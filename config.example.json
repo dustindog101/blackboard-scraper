@@ -1,0 +1,10 @@
+{
+  "courses": {
+    "_100001_1": "CIS 101 Introduction to Computing (01.0001) FA2025",
+    "_100002_1": "MATH 201 Calculus I (02.0002) FA2025"
+  },
+  "auto_login": {
+    "username": "your-username@umbc.edu",
+    "password": "your-password"
+  }
+}

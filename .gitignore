@@ -1,0 +1,38 @@
+# Session data (browser profile, cookies, etc.)
+.session/
+.session_clone/
+
+# Output (scraped data, exports, markdown)
+output/
+
+# Configuration with real course data
+config.json
+
+# Debug HTML snapshots
+*.html
+
+# Screenshots
+*.png
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Environment files
+.env
+
+# Temp / test / dev scripts
+1python3
+_test_grades.py
+test_disc_html.py
+capture_dom.py
+dump.py
+get_html.py
+parse_dump.py
+parse_bb_discussion.js
+utils/
