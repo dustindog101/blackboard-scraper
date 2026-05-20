@@ -1,9 +1,5 @@
 import json
 import time
-import subprocess
-import zipfile
-import threading
-import queue
 import re
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 from datetime import datetime, timezone
@@ -271,6 +267,60 @@ def _navigate_and_check(p, url: str, headless: bool = True, cdp_url: str = None)
 # Session management
 # ============================================================
 
+def logout(keep_config_creds: bool = True):
+    """
+    Clear the session to force re-login.
+    Keeps config credentials intact for auto-fill on next login.
+
+    Args:
+        keep_config_creds: If True, keeps config.json auto_login credentials.
+                         If False, also clears config.json auto_login section.
+    """
+    print("🚪 Logging out of Blackboard session...")
+
+    # Clear cookies (this invalidates the session)
+    cookies_file = Path(SESSION_DIR) / "cookies.json"
+    if cookies_file.exists():
+        cookies_file.unlink()
+        print("   ✅ Cleared saved cookies")
+
+    # Clear session metadata
+    meta_file = SESSION_DIR / "session_metadata.json"
+    if meta_file.exists():
+        meta_file.unlink()
+        print("   ✅ Cleared session metadata")
+
+    # Clear browser profile cookies too
+    try:
+        with sync_playwright() as p:
+            # Launch with existing profile but clear cookies
+            ctx = p.chromium.launch_persistent_context(
+                user_data_dir=SESSION_DIR,
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+                viewport={"width": 1280, "height": 800}
+            )
+            # Get all cookies and clear them
+            cookies = ctx.cookies()
+            if cookies:
+                ctx.clear_cookies()
+                print(f"   ✅ Cleared {len(cookies)} browser cookies from profile")
+            ctx.close()
+    except Exception as e:
+        print(f"   ⚠️ Could not clear browser cookies: {e}")
+
+    # Optionally clear config credentials
+    if not keep_config_creds:
+        from core.config import load_config, CONFIG_FILE
+        config = load_config()
+        if "auto_login" in config:
+            del config["auto_login"]
+            CONFIG_FILE.write_text(json.dumps(config, indent=2))
+            print("   ✅ Cleared config.json credentials")
+
+    print("   Logout complete. Run --login to re-authenticate.")
+
+
 def track_session_usage(event_type: str = "usage"):
     """
     Update session metadata to track when it was created and last used.
@@ -361,11 +411,28 @@ def login(force: bool = False, username: str = None, password: str = None, cdp_u
     """
     Handle the SSO login flow.
     If already logged in, does nothing unless force=True.
+
+    Credentials are loaded in this priority order:
+    1. CLI arguments (--username, --password)
+    2. config.json auto_login section
     """
     if cdp_url:
         print("🔌 Ignoring --login since you are connected to an existing CDP browser.")
         print("   Please login directly in your attached browser window.")
         return
+
+    # Auto-load credentials from config if not provided via CLI
+    if not username or not password:
+        config = load_config()
+        auto_login_config = config.get("auto_login", {})
+        if not username:
+            username = auto_login_config.get("username")
+            if username:
+                print(f"   📋 Using username from config: {username}")
+        if not password:
+            password = auto_login_config.get("password")
+            if password:
+                print("   📋 Using password from config")
 
     if not force:
         print("⏳ Checking existing session...")
@@ -436,106 +503,20 @@ def login(force: bool = False, username: str = None, password: str = None, cdp_u
         context.close()
 
 
-def listen_for_duo_code(code_queue: queue.Queue, timeout: int = 300):
-    """
-    Background thread to listen for a Duo SMS using `imsg chats` and `imsg history`.
-    Pushes the first 7-digit passcode found into the `code_queue` and terminates.
-    Since Duo dynamically changes shortcodes, we poll the top 3 most recent SMS chats.
-    """
-    start_time = time.time()
-    deadline = start_time + timeout
-    
-    # We will only look at messages created AFTER we started listening
-    # to avoid pulling an old code. We use a timezone-aware ISO string parser
-    
-    seen_ids = set()
-    
-    while time.time() < deadline:
-        try:
-            # 1. Get recent SMS chats (limit 10)
-            chats_proc = subprocess.run(["imsg", "chats", "--limit", "10", "--json"], capture_output=True, text=True)
-            if chats_proc.returncode != 0:
-                time.sleep(2)
-                continue
-                
-            active_chat_ids = []
-            for line in chats_proc.stdout.strip().split('\n'):
-                if not line: continue
-                try:
-                    chat = json.loads(line)
-                    # Don't strictly check service type, just ensure it has an identifier
-                    if "identifier" in chat:
-                        active_chat_ids.append(chat["id"])
-                except json.JSONDecodeError:
-                    continue
-                    
-            # 2. Check the message history for each of those chats
-            for chat_id in active_chat_ids:
-                hist_proc = subprocess.run(["imsg", "history", "--chat-id", str(chat_id), "--limit", "5", "--json"], capture_output=True, text=True)
-                for line in hist_proc.stdout.strip().split('\n'):
-                    if not line: continue
-                    try:
-                        msg = json.loads(line)
-                        msg_id = msg.get("id")
-                        if not msg_id or msg_id in seen_ids:
-                            continue
-                        
-                        seen_ids.add(msg_id)
-                        text = msg.get("text", "")
-                        
-                        # Only accept messages created recently
-                        if "passcode" in text.lower():
-                            match = re.search(r'\b(\d{4,9})\b', text)
-                            if match:
-                                msg_time_str = msg.get("created_at", "")
-                                # Basic fast check: if it was sent after our start timestamp, it's ours
-                                # We can't guarantee server time alignment, but we assume it's created ~now
-                                # Let's parse it precisely
-                                try:
-                                    # Strip trailing Z and fractional seconds for simple parsing
-                                    # Example: 2026-02-28T00:55:53.414Z -> 2026-02-28T00:55:53
-                                    clean_time = msg_time_str.split('.')[0].replace('Z', '')
-                                    dt = datetime.fromisoformat(clean_time).replace(tzinfo=timezone.utc)
-                                    msg_ts = dt.timestamp()
-                                    
-                                    # ONLY accept messages received AFTER we launched the script (with 15 sec buffer for clock skew)
-                                    if msg_ts >= start_time - 15:
-                                        code_queue.put(match.group(1))
-                                        return
-                                    else:
-                                        print(f"   [Debug] Ignored old passcode {match.group(1)} from {msg_time_str}")
-                                except Exception as e:
-                                    print(f"   ⚠️ Could not parse time: {e}")
-                    except Exception:
-                        continue
-                        
-        except Exception as e:
-            pass
-            
-        time.sleep(2)
-        
-    code_queue.put(Exception("Timeout listening for SMS."))
-
-
 def login_auto(username: str = None, password: str = None, duo_sender: str = None, headless: bool = False, cdp_url: str = None):
     """
-    Experimental: Fully automated login via SSO + Duo SMS.
-    Uses `imsg watch` to intercept 2FA codes.
+    Automated login via SSO + Duo OTP.
+    - Reads credentials from config.json if not provided.
+    - Fills username/password automatically.
+    - Always selects the OTP/passcode Duo method (never push).
+    - Prompts the user to type the 6-digit code into the CLI.
     """
     print("\n⚠️  [EXPERIMENTAL] --loginauto is an experimental feature.")
-    print("   Automated credential handling carries risk. Passwords in config.json are plaintext.")
     print("   UMBC's SSO or Duo configuration may change at any time, breaking this feature without notice.")
     print("   If login fails, run: python3 main.py --login\n")
     
     if cdp_url:
         print("🔌 Ignoring --loginauto since you are connected to an existing CDP browser.")
-        return
-
-    # Check dependencies
-    try:
-        subprocess.run(["imsg", "--version"], capture_output=True, check=True)
-    except FileNotFoundError:
-        print("❌ `imsg` CLI tool is NOT installed. Run: brew install nicholasgasior/brew/imsg")
         return
 
     config = load_config().get("auto_login", {})
@@ -546,7 +527,9 @@ def login_auto(username: str = None, password: str = None, duo_sender: str = Non
         print("❌ Username and Password are required. Either pass them via CLI or set them in config.json['auto_login']")
         return
 
+    print(f"   📋 Credentials loaded (username: {usr})")
     print("🚀 Starting Automated SSO Login...")
+
     with sync_playwright() as p:
         try:
             context, page = _launch_context(p, headless=headless)
@@ -555,185 +538,220 @@ def login_auto(username: str = None, password: str = None, duo_sender: str = Non
 
         try:
             page.goto(f"{BLACKBOARD_BASE}/ultra/course")
-            
-            # --- 1. UMBC LOGIN ---
-            print("   ↳ Navigating UMBC Login...")
-            
-            # Click the initial portal button if present
+            page.wait_for_timeout(3000)
+
+            # --- 1. CLICK PORTAL BUTTON IF PRESENT ---
+            print("   ↳ Looking for UMBC login portal button...")
             try:
-                portal_btn = page.locator("a:has-text('Log into Blackboard via myUMBC'), a:has-text('UMBC Login')").nth(0)
+                portal_btn = page.locator(
+                    "a:has-text('Log into Blackboard via myUMBC'), a:has-text('UMBC Login'), a:has-text('Sign in')"
+                ).nth(0)
                 if portal_btn.is_visible(timeout=5000):
+                    print("   ↳ Clicking portal login button...")
                     portal_btn.click()
+                    page.wait_for_timeout(2000)
             except PlaywrightTimeout:
                 pass
-            
-            # They might ask for username first, or username+password depending on entry point
+
+            # --- 2. FILL USERNAME ---
+            print("   ↳ Filling username...")
             try:
-                # Wait for username field
-                usr_field = page.locator("input[name='j_username'], input[type='email'], input#username").nth(0)
+                usr_field = page.locator(
+                    "input[name='j_username'], input[type='email'], input#username, input[name='username']"
+                ).nth(0)
                 usr_field.wait_for(state="visible", timeout=10000)
                 usr_field.fill(usr)
-                
-                page.wait_for_timeout(1000)
-                pwd_field = page.locator("input[name='j_password'], input[type='password'], input#password").nth(0)
-                
+                page.wait_for_timeout(800)
+
+                # Some flows show password on the same page, others on the next
+                pwd_field = page.locator(
+                    "input[name='j_password'], input[type='password'], input#password, input[name='password']"
+                ).nth(0)
+
                 if pwd_field.is_visible(timeout=2000):
+                    print("   ↳ Filling password (same page)...")
                     pwd_field.fill(pwd)
                     page.keyboard.press("Enter")
                 else:
+                    # Hit enter to advance to password page
                     page.keyboard.press("Enter")
                     page.wait_for_timeout(2000)
-                    if pwd_field.is_visible(timeout=5000):
+                    try:
+                        pwd_field.wait_for(state="visible", timeout=8000)
+                        print("   ↳ Filling password (next page)...")
                         pwd_field.fill(pwd)
                         page.keyboard.press("Enter")
+                    except PlaywrightTimeout:
+                        print("   ⚠️  Did not find password field after username submit.")
             except PlaywrightTimeout:
-                print("   ⚠️  Did not find standard login fields. We might already be logged in or at Duo.")
-            
-            # --- 2. REACHING DUO ---
-            try:
-                # We might already be logged in (e.g., active session bypassed SSO)
-                if "blackboard.umbc.edu/ultra" in page.url:
-                    print("   ✅ Already authenticated (active session detected). Skipping Duo.")
-                else:
-                    page.wait_for_url("**/duosecurity.com/**", timeout=15000)
-            except PlaywrightTimeout:
-                pass
-            
-            # If we didn't end up on Duo and are already at Blackboard, skip the rest
-            if "blackboard.umbc.edu/ultra" in page.url:
-                if _is_authenticated_session(page):
-                    track_session_usage("login_auto")
-                    print("✨ Session saved successfully.")
+                print("   ⚠️  Did not find username/password fields. May already be at Duo or logged in.")
+
+            # --- 3. CHECK IF ALREADY AUTHENTICATED ---
+            page.wait_for_timeout(3000)
+            if "blackboard.umbc.edu/ultra" in page.url and _is_authenticated_session(page):
+                print("   ✅ Already authenticated (active session detected). Skipping Duo.")
+                _save_session(context)
+                track_session_usage("login")
+                print("✨ Auto-Login Successful!")
                 context.close()
                 return
 
-            print("   ↳ Reaching Duo 2FA...")
-            page.wait_for_timeout(3000) # Give Duo time to settle
-
-            # --- 3. START LISTENER ---
-            print(f"   📡 Starting global SMS listener for Duo passcode (up to 5m)...")
-            code_queue = queue.Queue()
-            listener = threading.Thread(target=listen_for_duo_code, args=(code_queue, 300))
-            listener.daemon = True
-            listener.start()
-
-            # --- 4. TRIGGER SMS ---
-            print("   ↳ Requesting SMS Passcode...")
-            
-            # 4A. Click "Other options"
+            # --- 4. WAIT FOR DUO ---
+            print("   ↳ Waiting for Duo 2FA page...")
             try:
-                # wait_for_function does not enforce strict UI visibility, just DOM presence
-                page.wait_for_function('() => !!document.querySelector("a.button--link[href*=\'/all_methods\']")')
+                page.wait_for_url("**/duosecurity.com/**", timeout=20000)
+            except PlaywrightTimeout:
+                # Not on Duo yet — check if we landed on Blackboard already
+                if "blackboard.umbc.edu/ultra" in page.url and _is_authenticated_session(page):
+                    print("   ✅ Reached Blackboard without Duo (session reuse).")
+                    _save_session(context)
+                    track_session_usage("login")
+                    print("✨ Auto-Login Successful!")
+                    context.close()
+                    return
+                print(f"   ⚠️  Did not reach Duo within 20s. Current URL: {page.url}")
+
+            page.wait_for_timeout(2000)  # Let Duo fully render
+
+            # --- 5. ALWAYS SELECT OTP — NEVER PUSH ---
+            print("   ↳ Selecting OTP / passcode method (never push)...")
+
+            # Step 5A: If there's an "Other options" link, click it to get the method list
+            try:
+                page.wait_for_function(
+                    '() => !!document.querySelector("a.button--link[href*=\'/all_methods\']")',
+                    timeout=8000,
+                )
                 page.evaluate("""() => {
                     const btn = document.querySelector("a.button--link[href*='/all_methods']");
                     if (btn) btn.click();
                 }""")
                 page.wait_for_timeout(1500)
-            except Exception as e:
-                pass # Often Duo defaults to showing all methods depending on caching
-            
-            # 4B. Click "Text message passcode" / SMS
-            try:
-                page.wait_for_function("""() => {
-                    return !!Array.from(document.querySelectorAll('div.method-label')).find(el => el.textContent.includes('Text message passcode') || el.textContent.includes('Send me a passcode'));
-                }""")
-                page.evaluate("""() => {
-                    const el = Array.from(document.querySelectorAll('div.method-label')).find(el => 
-                        el.textContent.includes('Text message passcode') || el.textContent.includes('Send me a passcode')
-                    );
-                    if (el && el.closest('a.auth-method')) {
-                        el.closest('a.auth-method').click();
-                    } else if (el) {
-                        el.click();
-                    } else {
-                        throw new Error("Could not find Text message passcode label");
-                    }
-                }""")
-            except Exception as e:
-                print(f"   ⚠️ Click for 'Text message passcode' failed: {e}")
+                print("   ↳ Clicked 'Other options'.")
+            except Exception:
+                pass  # Duo may already show method list
 
-            # Look for the input to ensure we're at passcode stage
-            passcode_input = page.locator("#passcode-input, input[id*='passcode']").first
-            
+            # Step 5B: Find and click the OTP/passcode option (not push)
+            otp_clicked = False
+            # Try JS-based click on the label containing OTP-related text
+            try:
+                page.wait_for_function(
+                    """() => {
+                        return !!Array.from(document.querySelectorAll('div.method-label, .auth-method, button, a'))
+                            .find(el => {
+                                const t = el.textContent.toLowerCase();
+                                return t.includes('passcode') || t.includes('text message') || t.includes('otp') || t.includes('enter a code');
+                            });
+                    }""",
+                    timeout=8000,
+                )
+                otp_clicked = page.evaluate("""() => {
+                    const candidates = Array.from(document.querySelectorAll('div.method-label, .auth-method, button, a'));
+                    const el = candidates.find(el => {
+                        const t = el.textContent.toLowerCase();
+                        return t.includes('passcode') || t.includes('text message') || t.includes('otp') || t.includes('enter a code');
+                    });
+                    if (!el) return false;
+                    const clickable = el.closest('a.auth-method') || el.closest('button') || el;
+                    clickable.click();
+                    return true;
+                }""")
+            except Exception as e:
+                print(f"   ⚠️  Could not click OTP method via JS: {e}")
+
+            if otp_clicked:
+                print("   ↳ Clicked OTP/passcode method.")
+            else:
+                print("   ⚠️  Could not find OTP method button — Duo UI may have changed.")
+
+            page.wait_for_timeout(1500)
+
+            # --- 6. WAIT FOR PASSCODE INPUT ---
+            passcode_input = page.locator("#passcode-input, input[id*='passcode'], input[name*='passcode']").first
             try:
                 passcode_input.wait_for(state="visible", timeout=10000)
             except PlaywrightTimeout:
-                print("   ❌ Timeout waiting for the passcode input field to appear. Duo might be stuck or changed.")
+                print("   ❌ Timeout waiting for the passcode input field. Duo may have changed.")
                 page.screenshot(path="duo_timeout_state.png")
-                listener.join(1)
+                print("   📸 Screenshot saved to: duo_timeout_state.png")
                 context.close()
                 return
 
-            # --- 5. WAIT FOR CODE ---
-            print("   ⏳ Waiting for 6-digit code via iMessage (up to 5m)...")
+            # --- 7. PROMPT USER FOR CODE IN CLI ---
+            print("\n" + "="*55)
+            print("  📲 Check your phone for a Duo SMS passcode.")
+            print("  Enter the code below (or from your authenticator app).")
+            print("="*55)
             try:
-                code_result = code_queue.get(timeout=300)
-                if isinstance(code_result, Exception):
-                    raise code_result
-                if not code_result:
-                    raise Exception("Listener returned empty code.")
-                    
-                code = code_result
-                print(f"   💬 Received Code: {code}")
-            except queue.Empty:
-                print("   ❌ Timeout: Did not receive an SMS code within 5 minutes.")
-                listener.join(1)
+                code = input("  🔑 Enter your Duo OTP code: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n   ❌ No code entered. Aborting.")
                 context.close()
                 return
-            
-            # --- 6. ENTER CODE ---
-            print("   ↳ Submitting Code...")
+
+            if not code:
+                print("   ❌ No code entered. Aborting.")
+                context.close()
+                return
+
+            # --- 8. SUBMIT CODE ---
+            print("   ↳ Submitting code...")
             passcode_input.fill(code)
-            
-            verify_btn = page.locator(".verify-button, button[type='submit']:has-text('Verify')").first
-            if verify_btn.is_visible():
-                verify_btn.click()
-            else:
+
+            verify_btn = page.locator(".verify-button, button[type='submit']:has-text('Verify'), button:has-text('Log In')").first
+            try:
+                if verify_btn.is_visible(timeout=2000):
+                    verify_btn.click()
+                else:
+                    page.keyboard.press("Enter")
+            except Exception:
                 page.keyboard.press("Enter")
 
-            # --- 7. WAIT FOR SUCCESS & TRUST BROWSER ---
-            print("   ⏳ Checking for 'Trust browser' option and waiting for Dashboard...")
-            
-            # Attempt to click "Yes, this is my device" if it appears before Dashboard loads
+            # --- 9. TRUST BROWSER (if prompted) ---
+            print("   ⏳ Checking for 'Trust browser' prompt...")
             try:
                 page.wait_for_timeout(3000)
                 clicked_trust = page.evaluate("""() => {
                     const btn = document.querySelector('#trust-browser-button');
-                    if (btn) {
-                        btn.click();
-                        return true;
-                    }
+                    if (btn) { btn.click(); return true; }
                     return false;
                 }""")
                 if clicked_trust:
-                    print("   ↳ Clicked 'Yes, this is my device' via JS evaluate.")
-            except Exception as e:
-                print(f"   ⚠️ Trust device click check failed: {e}")
-                
+                    print("   ↳ Clicked 'Yes, this is my device'.")
+            except Exception:
+                pass
+
+            # --- 10. WAIT FOR BLACKBOARD DASHBOARD ---
+            print("   ⏳ Waiting for Blackboard to load...")
             try:
                 page.wait_for_url("**/ultra/**", timeout=30_000)
                 print("   ✅ Successfully authenticated and reached Blackboard!")
             except PlaywrightTimeout:
-                print(f"   ❌ Timeout waiting for Blackboard Dashboard to load. Current URL: {page.url}")
+                print(f"   ❌ Timeout waiting for Blackboard Dashboard. Current URL: {page.url}")
                 page.screenshot(path="timeout_state.png")
-                print("   📸 Saved screenshot of current state to: timeout_state.png")
+                print("   📸 Screenshot saved to: timeout_state.png")
                 context.close()
                 return
-            
-            page.wait_for_timeout(5000) # give Bb time to fully cookie up
-            
-            # Save session
-            cookies = context.cookies()
-            (Path(SESSION_DIR) / "cookies.json").write_text(json.dumps(cookies))
-            
+
+            page.wait_for_timeout(3000)  # Let Blackboard fully cookie up
+            _save_session(context)
             track_session_usage("login")
             print("✨ Auto-Login Successful!")
-                
+
         except Exception as e:
             print(f"❌ Auto-Login encountered an unhandled error: {e}")
-            
+
         finally:
             context.close()
+
+
+def _save_session(context) -> None:
+    """Persist browser cookies to disk so the session survives between runs."""
+    try:
+        cookies = context.cookies()
+        (Path(SESSION_DIR) / "cookies.json").write_text(json.dumps(cookies))
+    except Exception as e:
+        print(f"   ⚠️  Could not save session cookies: {e}")
 
 
 def _require_session(cdp_url: str = None) -> bool:
