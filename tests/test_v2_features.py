@@ -4,10 +4,12 @@ Unit and Integration Tests for Blackboard Ultra Scraper v2 features:
 - Task-aware concurrency profile calculation
 - Message chunking and HTML escaping for Telegram
 - Standardized v2 Composite JSON schema generation
+- Dual-channel Duo passcode regex parsing
 - Due Date Aggregation logic and date parsing
 """
 
 import json
+import re
 import unittest
 from datetime import datetime
 
@@ -92,6 +94,18 @@ class TestTelegramFormatter(unittest.TestCase):
         self.assertTrue(len(chunks) > 1)
         for chunk in chunks:
             self.assertTrue(len(chunk) <= 200)
+
+    def test_passcode_regex_matching(self):
+        sample_messages = [
+            ("123456", "123456"),
+            ("My code is 654321", "654321"),
+            ("987654 thanks!", "987654"),
+            ("Invalid 123", None),
+        ]
+        for text, expected in sample_messages:
+            match = re.search(r"\b(\d{6})\b", text)
+            extracted = match.group(1) if match else None
+            self.assertEqual(extracted, expected)
 
 
 class TestRouteOptimizer(unittest.TestCase):

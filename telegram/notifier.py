@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -19,7 +20,7 @@ logger = logging.getLogger("blackboard.telegram.notifier")
 
 class TelegramNotifier:
     """
-    Outbound Telegram notification client.
+    Outbound Telegram notification client and interactive response poller.
     Uses standard library urllib (zero required external packages).
     """
 
@@ -67,12 +68,59 @@ class TelegramNotifier:
                     retry_after = int(e.headers.get("Retry-After", 5))
                     time.sleep(retry_after)
                     continue
-                logger.error(f"Telegram API Error {e.code}: {e.read().decode('utf-8')}")
+                logger.debug(f"Telegram API Error {e.code}: {e.read().decode('utf-8')}")
                 return False
             except Exception as e:
-                logger.error(f"Failed to send Telegram message: {e}")
+                logger.debug(f"Failed to send Telegram message: {e}")
                 time.sleep(1)
         return False
+
+    def poll_for_passcode(self, timeout_sec: int = 120, stop_event: Optional[Any] = None) -> Optional[str]:
+        """
+        Polls Telegram getUpdates for an incoming 6-digit Duo passcode from admin_chat_id.
+        Safely returns None if disabled, on network error, or if timeout expires.
+        """
+        if not self.enabled or not self.bot_token or not self.admin_chat_id:
+            return None
+
+        # Fetch latest update_id offset to avoid reading old messages
+        offset = 0
+        try:
+            url = f"{self.api_base}/getUpdates?limit=1&offset=-1"
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if data.get("ok") and data.get("result"):
+                    offset = data["result"][-1]["update_id"] + 1
+        except Exception:
+            pass
+
+        start_time = time.time()
+        while time.time() - start_time < timeout_sec:
+            if stop_event and stop_event.is_set():
+                return None
+
+            try:
+                poll_url = f"{self.api_base}/getUpdates?offset={offset}&timeout=2"
+                with urllib.request.urlopen(poll_url, timeout=6) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    if data.get("ok") and data.get("result"):
+                        for upd in data["result"]:
+                            offset = max(offset, upd["update_id"] + 1)
+                            msg = upd.get("message", {})
+                            from_id = msg.get("chat", {}).get("id") or msg.get("from", {}).get("id")
+
+                            # Check if message is from configured admin
+                            if str(from_id) == str(self.admin_chat_id):
+                                text = (msg.get("text") or "").strip()
+                                # Look for 6-digit passcode pattern
+                                match = re.search(r"\b(\d{6})\b", text)
+                                if match:
+                                    return match.group(1)
+            except Exception:
+                pass
+
+            time.sleep(1.0)
+        return None
 
     def send_chunks(self, chunks: List[str], chat_id: Optional[Any] = None) -> bool:
         """Send sequence of message chunks with slight spacing."""

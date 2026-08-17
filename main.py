@@ -444,11 +444,12 @@ async def main_async(args: argparse.Namespace) -> None:
         return
 
     if args.login:
-        if args.auto:
-            login_auto(username=args.username, password=args.password, headless=headless, cdp_url=cdp)
-        else:
+        if args.visible and not args.auto:
             login(args.force, args.username, args.password, cdp)
+        else:
+            login_auto(username=args.username, password=args.password, headless=headless, cdp_url=cdp)
         return
+
 
     if args.logout:
         from core.session import logout as do_logout

@@ -779,7 +779,6 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 return
 
             # --- 7. WAIT FOR PASSCODE INPUT ---
-            # After clicking text passcode, Duo shows an input field for the code.
             login_stage = "waiting for Duo passcode input"
             passcode_input = page.locator(
                 "input[name='passcode'], input[id='passcode'], input[type='text'][autocomplete], input[id*='passcode']"
@@ -793,7 +792,6 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 context.close()
                 return
 
-            # Extract the last 4 digits from the page text to confirm where the passcode was sent
             sent_to_hint = ""
             try:
                 body_text = page.locator("body").inner_text()
@@ -803,52 +801,121 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
             except Exception:
                 pass
 
-            # --- 8. PROMPT USER FOR CODE IN CLI ---
-            login_stage = "waiting for Duo passcode entry"
-            print("\n" + "=" * 58)
-            print(f"  📲 Duo text passcode sent to your phone{sent_to_hint}.")
-            print("  Enter the passcode below.")
-            print("=" * 58)
-            try:
-                code = input("  🔑 Enter your Duo passcode: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\n   ❌ No code entered. Aborting.")
-                context.close()
-                return
-
-            if not code:
-                print("   ❌ No code entered. Aborting.")
-                context.close()
-                return
-
-            # --- 9. FILL CODE AND CLICK VERIFY ---
+            # --- 8 & 9. DUAL-CHANNEL PASSCODE ENTRY & RETRY LOOP ---
             login_stage = "submitting Duo passcode"
-            print("   ↳ Submitting code...")
-            passcode_input.fill(code)
-            page.wait_for_timeout(500)
+            import queue
+            import threading
 
+            tg_notifier = None
             try:
-                passcode_input.press("Enter")
+                from telegram.notifier import TelegramNotifier
+                notifier = TelegramNotifier()
+                if notifier.enabled:
+                    tg_notifier = notifier
             except Exception:
                 pass
 
-            try:
-                if not _click_exact_text_in_any_frame(page, "Verify", timeout=4000):
-                    raise PlaywrightTimeout("Verify button not found")
-                print("   ↳ Clicked 'Verify'.")
-            except PlaywrightTimeout:
-                print("   ↳ No 'Verify' button visible — pressing Enter.")
-                page.keyboard.press("Enter")
-            except Exception:
-                page.keyboard.press("Enter")
+            max_attempts = 3
+            passcode_accepted = False
 
-            page.wait_for_timeout(1500)
-            if "duosecurity.com" in page.url and passcode_input.is_visible(timeout=1000):
-                print("   ↳ Duo still visible after Verify; pressing Enter as backup.")
+            for attempt in range(1, max_attempts + 1):
+                # 1. Dual-Channel prompt (CLI + Telegram)
+                result_queue = queue.Queue()
+                stop_event = threading.Event()
+
+                if tg_notifier:
+                    header = "🔐 <b>UMBC Duo 2FA Passcode Required</b>" if attempt == 1 else f"❌ <b>Incorrect Duo Passcode (Attempt {attempt}/{max_attempts})</b>"
+                    try:
+                        tg_notifier.send_raw_message(
+                            f"{header}\n\n"
+                            f"Duo sent a 6-digit text passcode to your phone{sent_to_hint}.\n\n"
+                            f"Reply with the 6-digit code or enter it in your terminal."
+                        )
+                        def _tg_worker():
+                            c = tg_notifier.poll_for_passcode(timeout_sec=120, stop_event=stop_event)
+                            if c and not stop_event.is_set():
+                                result_queue.put(("telegram", c))
+                        threading.Thread(target=_tg_worker, daemon=True).start()
+                    except Exception:
+                        pass
+
+                print("\n" + "=" * 60)
+                if attempt > 1:
+                    print("  ❌ Incorrect passcode. Please check your phone for the latest code.")
+                print(f"  📲 Duo text passcode sent to your phone{sent_to_hint} (Attempt {attempt}/{max_attempts}).")
+                if tg_notifier:
+                    print("  💡 You can enter the passcode here OR reply directly in Telegram.")
+                print("=" * 60)
+
+                def _cli_worker():
+                    try:
+                        cli_input = input("  🔑 Enter your 6-digit Duo passcode: ").strip()
+                        if cli_input and not stop_event.is_set():
+                            result_queue.put(("cli", cli_input))
+                    except (EOFError, KeyboardInterrupt):
+                        pass
+
+                threading.Thread(target=_cli_worker, daemon=True).start()
+
+                code = None
                 try:
-                    page.keyboard.press("Enter")
+                    src, code = result_queue.get(timeout=120)
+                    stop_event.set()
+                    if src == "telegram":
+                        print(f"\n   📲 Received Duo passcode from Telegram: {code}")
+                except queue.Empty:
+                    stop_event.set()
+                    print("\n   ❌ Timeout waiting for passcode entry.")
+                    context.close()
+                    return
+
+                if not code:
+                    print("   ❌ No passcode entered. Aborting.")
+                    context.close()
+                    return
+
+                # 2. Fill & Submit code
+                print("   ↳ Submitting passcode...")
+                passcode_input.fill(code)
+                page.wait_for_timeout(400)
+
+                try:
+                    passcode_input.press("Enter")
                 except Exception:
                     pass
+
+                try:
+                    _click_exact_text_in_any_frame(page, "Verify", timeout=3000)
+                except Exception:
+                    pass
+
+                page.wait_for_timeout(2000)
+
+                # 3. Check if passcode was rejected
+                error_detected = False
+                try:
+                    err = page.locator("div.error-message, [role='alert'], div:has-text('Incorrect passcode'), div:has-text('Invalid passcode'), div:has-text('incorrect')").first
+                    if err.is_visible(timeout=1000):
+                        error_detected = True
+                except Exception:
+                    pass
+
+                if not error_detected and ("duosecurity.com" not in page.url or not passcode_input.is_visible(timeout=1000)):
+                    print("   ✅ Duo passcode accepted!")
+                    passcode_accepted = True
+                    break
+                else:
+                    print(f"   ⚠️  Duo rejected the passcode.")
+                    if attempt == max_attempts:
+                        print("   ❌ Maximum attempts reached. Aborting.")
+                        if tg_notifier:
+                            tg_notifier.send_raw_message("❌ <b>Login Failed</b>: Maximum Duo passcode attempts exceeded.")
+                        context.close()
+                        return
+
+            if not passcode_accepted:
+                context.close()
+                return
 
             # --- 10. TRUST BROWSER (if prompted) ---
             login_stage = "handling Duo trust browser prompt"
@@ -880,7 +947,13 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
             page.wait_for_timeout(3000)  # let Blackboard fully cookie up
             _save_session(context)
             track_session_usage("login")
+            if tg_notifier:
+                try:
+                    tg_notifier.send_raw_message("✅ <b>Blackboard Auto-Login Successful!</b>\nYour session is cached and ready.")
+                except Exception:
+                    pass
             print("✨ Auto-Login Successful!")
+
 
         except Exception as e:
             print(f"❌ Auto-Login encountered an unhandled error during '{login_stage}': {e}")
