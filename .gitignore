@@ -1,6 +1,7 @@
 # Session data (browser profile, cookies, etc.)
 .session/
 .session_clone/
+.playwright-mcp/
 
 # Output (scraped data, exports, markdown)
 output/

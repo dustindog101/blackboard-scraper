@@ -20,15 +20,14 @@ This document provides a detailed breakdown of all available commands in the `ma
 - `--force`: Forces a new login session even if the current one is still valid.
 **Description:** Opens a visible Chrome browser to allow the user to log into the UMBC Google Workspace via SSO and Duo 2FA. Once the Blackboard Dashboard is reached, the cookies are saved to `.session/` inside the project root for persistent headless use.
 
-### `--loginauto` [EXPERIMENTAL]
-**Usage:** `python3 main.py --loginauto`
+### `--auto` [EXPERIMENTAL]
+**Usage:** `python3 main.py --login --auto`
 **Modifiers:**
-- `--username`, `-u <email>`: Google account email (or read from config.json)
-- `--password`, `-p <pass>`: Google account password (or read from config.json)
-- `--duo-sender <phone>`: Phone number of Duo SMS sender (or read from config.json)
+- `--username`, `-u <email>`: Google account email (or read from config.json; prompts if omitted)
+- `--password`, `-p <pass>`: Google account password (or read from config.json; prompts if omitted)
 - `--headless`: Run login attempt headlessly (risky, harder to debug if UI changes)
-**Description:** Completely automates SSO login using Playwright and uses the `imsg` CLI tool to intercept Duo SMS messages via the macOS Messages app to extract the 6-digit passcode.
-**⚠️  Warning:** This involves automated credential handling. Requires `imsg` CLI tool and Full Disk Access granted to your terminal. Passwords in config.json are plaintext. UMBC's SSO or Duo configuration may change at any time.
+**Description:** Completely automates SSO login using Playwright, selects Duo text passcode, and prompts you to type the passcode into the CLI.
+**⚠️  Warning:** This involves automated credential handling. Passwords in config.json are plaintext. UMBC's SSO or Duo configuration may change at any time.
 
 ### `--check-session`
 **Usage:** `python3 main.py --check-session`

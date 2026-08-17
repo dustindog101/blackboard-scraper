@@ -1,6 +1,8 @@
+import asyncio
 import json
 import time
 import re
+from getpass import getpass
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -105,6 +107,75 @@ def _matching_selectors(page, selectors) -> list[str]:
     except Exception:
         return matched
     return matched
+
+
+def _normalized_text(value: str | None) -> str:
+    return " ".join((value or "").split())
+
+
+def _click_exact_text_in_any_frame(page, target_text: str, timeout: int = 10_000) -> bool:
+    """
+    Click the first visible element whose rendered text exactly matches target_text.
+
+    Duo sometimes renders these actions as buttons, links, or role=button nodes
+    inside an iframe. Matching by exact visible text keeps us from selecting the
+    wrong passcode method.
+    """
+    target_text = _normalized_text(target_text)
+    target_lower = target_text.lower().rstrip(".,:;!?)")
+    selectors = ["button", "a", "[role='button']", "input[type='submit']"]
+
+    deadline = time.time() + (timeout / 1000.0)
+    while time.time() <= deadline:
+        for frame in page.frames:
+            try:
+                text_loc = frame.get_by_text(target_text, exact=False)
+                for idx in range(text_loc.count()):
+                    item = text_loc.nth(idx)
+                    if item.is_visible():
+                        item.click(timeout=timeout)
+                        return True
+            except Exception:
+                pass
+
+            try:
+                role_loc = frame.get_by_role("button", name=re.compile(re.escape(target_text), re.I))
+                for idx in range(role_loc.count()):
+                    item = role_loc.nth(idx)
+                    if item.is_visible():
+                        item.click(timeout=timeout)
+                        return True
+            except Exception:
+                pass
+
+            for selector in selectors:
+                try:
+                    locator = frame.locator(selector)
+                    count = locator.count()
+                except Exception:
+                    continue
+
+                for idx in range(count):
+                    item = locator.nth(idx)
+                    try:
+                        if not item.is_visible():
+                            continue
+                        candidate = _normalized_text(item.inner_text())
+                        if not candidate:
+                            candidate = _normalized_text(item.get_attribute("aria-label"))
+                        if not candidate and selector.startswith("input"):
+                            candidate = _normalized_text(item.get_attribute("value"))
+
+                        candidate_lower = candidate.lower().rstrip(".,:;!?)")
+                        if candidate_lower == target_lower or target_lower in candidate_lower:
+                            item.click(timeout=timeout)
+                            return True
+                    except Exception:
+                        continue
+
+        page.wait_for_timeout(250)
+
+    return False
 
 
 def _has_auth_markers(page) -> bool:
@@ -348,40 +419,56 @@ def track_session_usage(event_type: str = "usage"):
     meta_file.write_text(json.dumps(data, indent=2))
 
 
-def check_session(quiet: bool = False, debug: bool = False, headless: bool = True) -> bool:
-    """
-    Test if the saved session is still valid.
-    Launches headless browser, navigates to Blackboard homepage,
-    checks if we land on Ultra (valid) or get redirected to SSO (expired).
-    """
+async def check_session_async(quiet: bool = False, debug: bool = False, headless: bool = True) -> bool:
+    """Async version of session health check using Async Playwright."""
+    from playwright.async_api import async_playwright
+    from core.async_engine import AdaptiveDOM
+
     try:
-        with sync_playwright() as p:
+        async with async_playwright() as p:
+            user_data_dir = str(SESSION_DIR)
             try:
-                context, page = _launch_context(p, headless=headless)
-            except SystemExit:
-                # Profile in use
+                context = await p.chromium.launch_persistent_context(
+                    user_data_dir=user_data_dir,
+                    headless=headless,
+                    args=["--disable-blink-features=AutomationControlled"],
+                    viewport={"width": 1280, "height": 800},
+                )
+                cookie_file = SESSION_DIR / "cookies.json"
+                if cookie_file.exists():
+                    try:
+                        cookies = json.loads(cookie_file.read_text())
+                        if cookies:
+                            await context.add_cookies(cookies)
+                    except Exception:
+                        pass
+                page = await context.new_page()
+            except Exception as e:
                 if not quiet:
-                    print("⚠️  Cannot check session: Profile is currently in use by another process.")
+                    print(f"⚠️  Cannot check session: {e}")
                 return False
 
             if not quiet:
                 print("⏳ Checking session validity...")
-                if debug:
-                    mode = "headless" if headless else "visible"
-                    print(f"   [session-debug] Browser mode: {mode}")
 
             try:
-                page.goto(f"{BLACKBOARD_BASE}/ultra/course", wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_timeout(3000)
+                await page.goto(f"{BLACKBOARD_BASE}/ultra/course", wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(2.0)
             except Exception as e:
                 if not quiet: print(f"   ⚠️ Network error: {e}")
-                context.close()
+                await context.close()
                 return False
 
-            valid = _is_authenticated_session(page, debug=debug)
-            if debug and not quiet:
-                bb_count, umbc_count = _session_cookie_summary(context)
-                print(f"   [session-debug] Cookie summary: blackboard.umbc.edu={bb_count}, *.umbc.edu={umbc_count}")
+            current = page.url
+            valid = _is_clearly_authenticated_url(current)
+            if not valid:
+                matched, _ = await AdaptiveDOM.wait_for_any_selector(
+                    page,
+                    AUTH_SELECTORS + LOGIN_SELECTORS,
+                    timeout=5000,
+                )
+                if matched and matched in AUTH_SELECTORS:
+                    valid = True
 
             if valid:
                 track_session_usage("usage")
@@ -400,11 +487,26 @@ def check_session(quiet: bool = False, debug: bool = False, headless: bool = Tru
                     print(f"   Redirected to: {page.url}")
                     print("   Run `python3 main.py --login` to re-authenticate.")
 
-            context.close()
+            await context.close()
             return valid
     except Exception as e:
         if not quiet: print(f"   ⚠️ Error checking session: {e}")
         return False
+
+
+def check_session(quiet: bool = False, debug: bool = False, headless: bool = True) -> bool:
+    """Synchronous / Async compatible session tester."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            return asyncio.run_coroutine_threadsafe(
+                check_session_async(quiet=quiet, debug=debug, headless=headless),
+                loop
+            ).result()
+    except Exception:
+        pass
+    return asyncio.run(check_session_async(quiet=quiet, debug=debug, headless=headless))
+
 
 
 def login(force: bool = False, username: str = None, password: str = None, cdp_url: str = None):
@@ -503,75 +605,93 @@ def login(force: bool = False, username: str = None, password: str = None, cdp_u
         context.close()
 
 
-def login_auto(username: str = None, password: str = None, duo_sender: str = None, headless: bool = False, cdp_url: str = None):
+def login_auto(username: str = None, password: str = None, headless: bool = False, cdp_url: str = None):
     """
-    Automated login via SSO + Duo OTP.
+    Automated login via SSO + Duo text passcode.
     - Reads credentials from config.json if not provided.
     - Fills username/password automatically.
-    - Always selects the OTP/passcode Duo method (never push).
-    - Prompts the user to type the 6-digit code into the CLI.
+    - Always selects the text message Duo method (never push).
+    - Prompts the user to type the passcode into the CLI.
     """
-    print("\n⚠️  [EXPERIMENTAL] --loginauto is an experimental feature.")
+    print("\n⚠️  [EXPERIMENTAL] --login --auto is an experimental feature.")
     print("   UMBC's SSO or Duo configuration may change at any time, breaking this feature without notice.")
     print("   If login fails, run: python3 main.py --login\n")
     
     if cdp_url:
-        print("🔌 Ignoring --loginauto since you are connected to an existing CDP browser.")
+        print("🔌 Ignoring --login --auto since you are connected to an existing CDP browser.")
         return
 
     config = load_config().get("auto_login", {})
     usr = username or config.get("username")
     pwd = password or config.get("password")
 
+    if not usr:
+        try:
+            usr = input("   🔐 Enter your UMBC username: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("❌ Username prompt cancelled.")
+            return
+
+    if not pwd:
+        try:
+            pwd = getpass("   🔐 Enter your UMBC password: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n❌ Password prompt cancelled.")
+            return
+
     if not usr or not pwd:
-        print("❌ Username and Password are required. Either pass them via CLI or set them in config.json['auto_login']")
+        print("❌ Username and Password are required. Either pass them via CLI, set them in config.json['auto_login'], or enter them when prompted.")
         return
 
     print(f"   📋 Credentials loaded (username: {usr})")
     print("🚀 Starting Automated SSO Login...")
+    login_stage = "initializing"
 
     with sync_playwright() as p:
         try:
+            login_stage = "launching browser context"
             context, page = _launch_context(p, headless=headless)
         except SystemExit:
             return
 
         try:
+            login_stage = "opening Blackboard course landing page"
             page.goto(f"{BLACKBOARD_BASE}/ultra/course")
             page.wait_for_timeout(3000)
 
             # --- 1. CLICK PORTAL BUTTON IF PRESENT ---
+            login_stage = "clicking UMBC portal button"
             print("   ↳ Looking for UMBC login portal button...")
             try:
-                portal_btn = page.locator(
-                    "a:has-text('Log into Blackboard via myUMBC'), a:has-text('UMBC Login'), a:has-text('Sign in')"
-                ).nth(0)
-                if portal_btn.is_visible(timeout=5000):
+                if _click_exact_text_in_any_frame(page, "Log into Blackboard via myUMBC") or _click_exact_text_in_any_frame(page, "UMBC Login") or _click_exact_text_in_any_frame(page, "Sign in"):
                     print("   ↳ Clicking portal login button...")
-                    portal_btn.click()
                     page.wait_for_timeout(2000)
             except PlaywrightTimeout:
                 pass
 
             # --- 2. FILL USERNAME ---
+            login_stage = "filling UMBC username and password"
             print("   ↳ Filling username...")
             try:
-                usr_field = page.locator(
-                    "input[name='j_username'], input[type='email'], input#username, input[name='username']"
-                ).nth(0)
+                usr_field = page.get_by_label(re.compile(r"Email Address / Username / Campus ID", re.I))
+                if usr_field.count() == 0:
+                    usr_field = page.locator("input[type='text'], input[type='email']").first
                 usr_field.wait_for(state="visible", timeout=10000)
                 usr_field.fill(usr)
                 page.wait_for_timeout(800)
 
                 # Some flows show password on the same page, others on the next
-                pwd_field = page.locator(
-                    "input[name='j_password'], input[type='password'], input#password, input[name='password']"
-                ).nth(0)
+                pwd_field = page.get_by_label(re.compile(r"Password", re.I))
+                if pwd_field.count() == 0:
+                    pwd_field = page.locator("input[type='password']").first
 
                 if pwd_field.is_visible(timeout=2000):
                     print("   ↳ Filling password (same page)...")
                     pwd_field.fill(pwd)
-                    page.keyboard.press("Enter")
+                    try:
+                        page.get_by_role("button", name=re.compile(r"^Log In$", re.I)).click(timeout=3000)
+                    except Exception:
+                        page.keyboard.press("Enter")
                 else:
                     # Hit enter to advance to password page
                     page.keyboard.press("Enter")
@@ -587,103 +707,110 @@ def login_auto(username: str = None, password: str = None, duo_sender: str = Non
                 print("   ⚠️  Did not find username/password fields. May already be at Duo or logged in.")
 
             # --- 3. CHECK IF ALREADY AUTHENTICATED ---
-            page.wait_for_timeout(3000)
-            if "blackboard.umbc.edu/ultra" in page.url and _is_authenticated_session(page):
-                print("   ✅ Already authenticated (active session detected). Skipping Duo.")
-                _save_session(context)
-                track_session_usage("login")
-                print("✨ Auto-Login Successful!")
-                context.close()
-                return
-
-            # --- 4. WAIT FOR DUO ---
-            print("   ↳ Waiting for Duo 2FA page...")
-            try:
-                page.wait_for_url("**/duosecurity.com/**", timeout=20000)
-            except PlaywrightTimeout:
-                # Not on Duo yet — check if we landed on Blackboard already
+            login_stage = "checking for direct Blackboard redirect"
+            for _ in range(6):
+                page.wait_for_timeout(1000)
                 if "blackboard.umbc.edu/ultra" in page.url and _is_authenticated_session(page):
-                    print("   ✅ Reached Blackboard without Duo (session reuse).")
+                    print("   ✅ Already authenticated (active session detected). Skipping Duo.")
                     _save_session(context)
                     track_session_usage("login")
                     print("✨ Auto-Login Successful!")
                     context.close()
                     return
-                print(f"   ⚠️  Did not reach Duo within 20s. Current URL: {page.url}")
 
-            page.wait_for_timeout(2000)  # Let Duo fully render
-
-            # --- 5. ALWAYS SELECT OTP — NEVER PUSH ---
-            print("   ↳ Selecting OTP / passcode method (never push)...")
-
-            # Step 5A: If there's an "Other options" link, click it to get the method list
-            try:
-                page.wait_for_function(
-                    '() => !!document.querySelector("a.button--link[href*=\'/all_methods\']")',
-                    timeout=8000,
-                )
-                page.evaluate("""() => {
-                    const btn = document.querySelector("a.button--link[href*='/all_methods']");
-                    if (btn) btn.click();
-                }""")
-                page.wait_for_timeout(1500)
-                print("   ↳ Clicked 'Other options'.")
-            except Exception:
-                pass  # Duo may already show method list
-
-            # Step 5B: Find and click the OTP/passcode option (not push)
-            otp_clicked = False
-            # Try JS-based click on the label containing OTP-related text
-            try:
-                page.wait_for_function(
-                    """() => {
-                        return !!Array.from(document.querySelectorAll('div.method-label, .auth-method, button, a'))
-                            .find(el => {
-                                const t = el.textContent.toLowerCase();
-                                return t.includes('passcode') || t.includes('text message') || t.includes('otp') || t.includes('enter a code');
-                            });
-                    }""",
-                    timeout=8000,
-                )
-                otp_clicked = page.evaluate("""() => {
-                    const candidates = Array.from(document.querySelectorAll('div.method-label, .auth-method, button, a'));
-                    const el = candidates.find(el => {
-                        const t = el.textContent.toLowerCase();
-                        return t.includes('passcode') || t.includes('text message') || t.includes('otp') || t.includes('enter a code');
-                    });
-                    if (!el) return false;
-                    const clickable = el.closest('a.auth-method') || el.closest('button') || el;
-                    clickable.click();
-                    return true;
-                }""")
-            except Exception as e:
-                print(f"   ⚠️  Could not click OTP method via JS: {e}")
-
-            if otp_clicked:
-                print("   ↳ Clicked OTP/passcode method.")
+            # --- 4. DETECT DUO ---
+            # wait_for_url won't fire if we're already on Duo — check first
+            login_stage = "waiting for Duo 2FA page"
+            print("   ↳ Waiting for Duo 2FA page...")
+            if "duosecurity.com" not in page.url:
+                try:
+                    page.wait_for_url("**/duosecurity.com/**", timeout=20000)
+                except PlaywrightTimeout:
+                    if "blackboard.umbc.edu/ultra" in page.url and _is_authenticated_session(page):
+                        print("   ✅ Reached Blackboard without Duo (session reuse).")
+                        _save_session(context)
+                        track_session_usage("login")
+                        print("✨ Auto-Login Successful!")
+                        context.close()
+                        return
+                    print(f"   ⚠️  Did not reach Duo. Current URL: {page.url}")
             else:
-                print("   ⚠️  Could not find OTP method button — Duo UI may have changed.")
+                print("   ↳ Already on Duo page.")
 
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(2000)  # let Duo fully render
 
-            # --- 6. WAIT FOR PASSCODE INPUT ---
-            passcode_input = page.locator("#passcode-input, input[id*='passcode'], input[name*='passcode']").first
+            # --- 5. CLICK "OTHER OPTIONS" ---
+            # Duo defaults to Push — click "Other options" immediately to get the full list.
+            login_stage = "clicking Duo Other options"
+            print("   ↳ Clicking 'Other options'...")
             try:
-                passcode_input.wait_for(state="visible", timeout=10000)
+                if _click_exact_text_in_any_frame(page, "Other options", timeout=8000):
+                    page.wait_for_timeout(1500)
+                    print("   ↳ Clicked 'Other options'.")
+                else:
+                    print("   ⚠️  No 'Other options' control found — Duo may already show all methods.")
             except PlaywrightTimeout:
-                print("   ❌ Timeout waiting for the passcode input field. Duo may have changed.")
+                print("   ⚠️  No 'Other options' control found — Duo may already show all methods.")
+            except Exception as e:
+                print(f"   ⚠️  Could not click 'Other options': {e}")
+            finally:
+                page.wait_for_timeout(1500)
+
+            # --- 6. SELECT "TEXT MESSAGE PASSCODE" SPECIFICALLY ---
+            # Must target this exact text to avoid accidentally clicking "Duo Mobile passcode".
+            login_stage = "selecting Duo text message passcode"
+            print("   ↳ Selecting 'Text message passcode'...")
+            try:
+                if not _click_exact_text_in_any_frame(page, "Text message passcode", timeout=8000):
+                    raise PlaywrightTimeout("Text message passcode control not found")
+                page.wait_for_timeout(2000)
+                print("   ↳ Clicked 'Text message passcode'. Passcode is being sent...")
+            except PlaywrightTimeout:
+                print("   ❌ Could not find 'Text message passcode' button.")
+                page.screenshot(path="duo_timeout_state.png")
+                print("   📸 Screenshot saved to: duo_timeout_state.png")
+                context.close()
+                return
+            except Exception as e:
+                print(f"   ❌ Could not select 'Text message passcode': {e}")
                 page.screenshot(path="duo_timeout_state.png")
                 print("   📸 Screenshot saved to: duo_timeout_state.png")
                 context.close()
                 return
 
-            # --- 7. PROMPT USER FOR CODE IN CLI ---
-            print("\n" + "="*55)
-            print("  📲 Check your phone for a Duo SMS passcode.")
-            print("  Enter the code below (or from your authenticator app).")
-            print("="*55)
+            # --- 7. WAIT FOR PASSCODE INPUT ---
+            # After clicking text passcode, Duo shows an input field for the code.
+            login_stage = "waiting for Duo passcode input"
+            passcode_input = page.locator(
+                "input[name='passcode'], input[id='passcode'], input[type='text'][autocomplete], input[id*='passcode']"
+            ).first
             try:
-                code = input("  🔑 Enter your Duo OTP code: ").strip()
+                passcode_input.wait_for(state="visible", timeout=12000)
+            except PlaywrightTimeout:
+                print("   ❌ Timeout waiting for passcode input. Duo may have changed.")
+                page.screenshot(path="duo_timeout_state.png")
+                print("   📸 Screenshot saved to: duo_timeout_state.png")
+                context.close()
+                return
+
+            # Extract the last 4 digits from the page text to confirm where the passcode was sent
+            sent_to_hint = ""
+            try:
+                body_text = page.locator("body").inner_text()
+                match = re.search(r"ending in (\d{4})", body_text)
+                if match:
+                    sent_to_hint = f" (sent to number ending in {match.group(1)})"
+            except Exception:
+                pass
+
+            # --- 8. PROMPT USER FOR CODE IN CLI ---
+            login_stage = "waiting for Duo passcode entry"
+            print("\n" + "=" * 58)
+            print(f"  📲 Duo text passcode sent to your phone{sent_to_hint}.")
+            print("  Enter the passcode below.")
+            print("=" * 58)
+            try:
+                code = input("  🔑 Enter your Duo passcode: ").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\n   ❌ No code entered. Aborting.")
                 context.close()
@@ -694,37 +821,54 @@ def login_auto(username: str = None, password: str = None, duo_sender: str = Non
                 context.close()
                 return
 
-            # --- 8. SUBMIT CODE ---
+            # --- 9. FILL CODE AND CLICK VERIFY ---
+            login_stage = "submitting Duo passcode"
             print("   ↳ Submitting code...")
             passcode_input.fill(code)
+            page.wait_for_timeout(500)
 
-            verify_btn = page.locator(".verify-button, button[type='submit']:has-text('Verify'), button:has-text('Log In')").first
             try:
-                if verify_btn.is_visible(timeout=2000):
-                    verify_btn.click()
-                else:
-                    page.keyboard.press("Enter")
-            except Exception:
-                page.keyboard.press("Enter")
-
-            # --- 9. TRUST BROWSER (if prompted) ---
-            print("   ⏳ Checking for 'Trust browser' prompt...")
-            try:
-                page.wait_for_timeout(3000)
-                clicked_trust = page.evaluate("""() => {
-                    const btn = document.querySelector('#trust-browser-button');
-                    if (btn) { btn.click(); return true; }
-                    return false;
-                }""")
-                if clicked_trust:
-                    print("   ↳ Clicked 'Yes, this is my device'.")
+                passcode_input.press("Enter")
             except Exception:
                 pass
 
-            # --- 10. WAIT FOR BLACKBOARD DASHBOARD ---
+            try:
+                if not _click_exact_text_in_any_frame(page, "Verify", timeout=4000):
+                    raise PlaywrightTimeout("Verify button not found")
+                print("   ↳ Clicked 'Verify'.")
+            except PlaywrightTimeout:
+                print("   ↳ No 'Verify' button visible — pressing Enter.")
+                page.keyboard.press("Enter")
+            except Exception:
+                page.keyboard.press("Enter")
+
+            page.wait_for_timeout(1500)
+            if "duosecurity.com" in page.url and passcode_input.is_visible(timeout=1000):
+                print("   ↳ Duo still visible after Verify; pressing Enter as backup.")
+                try:
+                    page.keyboard.press("Enter")
+                except Exception:
+                    pass
+
+            # --- 10. TRUST BROWSER (if prompted) ---
+            login_stage = "handling Duo trust browser prompt"
+            print("   ⏳ Checking for 'Trust browser' prompt...")
+            try:
+                if (
+                    _click_exact_text_in_any_frame(page, "Yes, this is my device", timeout=5000)
+                    or _click_exact_text_in_any_frame(page, "Trust browser", timeout=2000)
+                    or _click_exact_text_in_any_frame(page, "Remember this device", timeout=2000)
+                ):
+                    print("   ↳ Clicked 'Yes, this is my device'.")
+                    _save_session(context)
+            except Exception:
+                pass
+
+            # --- 11. WAIT FOR BLACKBOARD DASHBOARD ---
+            login_stage = "waiting for Blackboard dashboard"
             print("   ⏳ Waiting for Blackboard to load...")
             try:
-                page.wait_for_url("**/ultra/**", timeout=30_000)
+                page.wait_for_url("**/ultra/**", timeout=60_000)
                 print("   ✅ Successfully authenticated and reached Blackboard!")
             except PlaywrightTimeout:
                 print(f"   ❌ Timeout waiting for Blackboard Dashboard. Current URL: {page.url}")
@@ -733,13 +877,13 @@ def login_auto(username: str = None, password: str = None, duo_sender: str = Non
                 context.close()
                 return
 
-            page.wait_for_timeout(3000)  # Let Blackboard fully cookie up
+            page.wait_for_timeout(3000)  # let Blackboard fully cookie up
             _save_session(context)
             track_session_usage("login")
             print("✨ Auto-Login Successful!")
 
         except Exception as e:
-            print(f"❌ Auto-Login encountered an unhandled error: {e}")
+            print(f"❌ Auto-Login encountered an unhandled error during '{login_stage}': {e}")
 
         finally:
             context.close()
@@ -754,12 +898,30 @@ def _save_session(context) -> None:
         print(f"   ⚠️  Could not save session cookies: {e}")
 
 
+async def _require_session_async(cdp_url: str = None) -> bool:
+    """Fast check for session before async scraping."""
+    if cdp_url:
+        return True
+    cookie_file = Path(SESSION_DIR) / "cookies.json"
+    if cookie_file.exists():
+        return True
+    valid = await check_session_async(quiet=True, headless=True)
+    if not valid:
+        print("❌ Session invalid or expired. Run: python3 main.py --login")
+    return valid
+
+
 def _require_session(cdp_url: str = None) -> bool:
     """Check session before scraping. Returns True if valid."""
-    if cdp_url: return True
+    if cdp_url:
+        return True
+    cookie_file = Path(SESSION_DIR) / "cookies.json"
+    if cookie_file.exists():
+        return True
     if not check_session(quiet=True, headless=True):
         print("❌ Session invalid or expired. Run: python3 main.py --login")
         if not cdp_url:
             print("   Tip: run with --visible to let the browser handle login.")
         return False
     return True
+

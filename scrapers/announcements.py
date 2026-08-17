@@ -1,57 +1,68 @@
+import asyncio
 from datetime import datetime
 from pathlib import Path
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
+from typing import Any, Dict, List
 
 from core.config import BLACKBOARD_BASE, load_courses
 from core.output import ensure_output_dir
-from scrapers.base import _navigate_and_check_page
+from core.async_engine import AdaptiveDOM
 
-def scrape_announcements(course_id: str, page: Page) -> list[dict]:
-    """Scrape course announcements."""
-    url = f"{BLACKBOARD_BASE}/ultra/courses/{course_id}/announcements"
+
+async def scrape_announcements_async(course_id: str, page: Any) -> List[Dict[str, Any]]:
+    """Async scraper for course announcements with Adaptive DOM."""
     courses = load_courses()
     name = courses.get(course_id, course_id)
     print(f"📢 Scraping announcements for {name}...")
 
-    # Blackboard's Angular SPA requires navigation from the course outline —
-    # direct URL navigation to /announcements doesn't trigger the Angular route state.
     outline_url = f"{BLACKBOARD_BASE}/ultra/courses/{course_id}/outline"
-    if not _navigate_and_check_page(page, outline_url):
-        return []
-    page.wait_for_timeout(4000)
-
-    # Click the specific Announcements link in the left nav
     try:
-        page.locator(".js-course-announcement-tool").click()
-    except Exception:
-        # Fall back: try href-based locator
+        await page.goto(outline_url, wait_until="domcontentloaded", timeout=20_000)
+    except Exception as e:
+        print(f"   ⚠️ Could not load outline for {name}: {e}")
+        return []
+
+    # Check if course is unavailable
+    matched_sel, _ = await AdaptiveDOM.wait_for_any_selector(
+        page,
+        [
+            ".js-course-announcement-tool",
+            f"a[href*='{course_id}/announcements']",
+            "div:has-text(\"You can't access this course right now\")",
+        ],
+        timeout=8_000,
+    )
+
+    if not matched_sel or "You can't access" in matched_sel:
+        print(f"   ℹ️  Course is currently unavailable or closed.")
+        return []
+
+    # Click announcements navigation
+    clicked = await AdaptiveDOM.safe_click(page, ".js-course-announcement-tool", timeout=3000)
+    if not clicked:
+        clicked = await AdaptiveDOM.safe_click(page, f"a[href*='{course_id}/announcements']", timeout=3000)
+
+    if not clicked:
         try:
-            page.locator(f"a[href*='{course_id}/announcements']").first.click()
+            url = f"{BLACKBOARD_BASE}/ultra/courses/{course_id}/announcements"
+            await page.goto(url, wait_until="domcontentloaded", timeout=15_000)
         except Exception:
-            page.goto(url, wait_until="domcontentloaded", timeout=15_000)
+            pass
 
-    # Wait for the Angular panel to mount and render announcement rows
-    try:
-        page.wait_for_selector(
-            "tr.announcement-item-row, .no-announcements-msg",
-            state="attached",
-            timeout=20_000,
-        )
-    except PlaywrightTimeout:
-        print("   ⚠️  Timed out waiting for announcements to load.")
+    # Wait for rows or empty state
+    matched_data_sel, _ = await AdaptiveDOM.wait_for_any_selector(
+        page,
+        ["tr.announcement-item-row", ".no-announcements-msg", "div:has-text('No announcements')"],
+        timeout=10_000,
+    )
+
+    if not matched_data_sel or "no-announcements" in matched_data_sel:
+        print(f"   ℹ️  No announcements found for {name}.")
         return []
 
-    # Scroll to load all lazy items
-    last_height = page.evaluate("document.body.scrollHeight")
-    while True:
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(1000)
-        new_height = page.evaluate("document.body.scrollHeight")
-        if new_height == last_height:
-            break
-        last_height = new_height
+    # Adaptive scroll to load all lazy items
+    await AdaptiveDOM.adaptive_infinite_scroll(page, "tr.announcement-item-row", max_scrolls=6, idle_wait_ms=300)
 
-    announcements_data = page.evaluate("""() => {
+    announcements_data = await page.evaluate("""() => {
         const items = [];
         document.querySelectorAll('tr.announcement-item-row').forEach(row => {
             const titleEl = row.querySelector('.announcement-title-detail');
@@ -60,11 +71,9 @@ def scrape_announcements(course_id: str, page: Page) -> list[dict]:
             const dateEl = row.querySelector('.announcement-status-column');
             const meta = dateEl ? dateEl.innerText.trim() : "";
 
-            // Body preview is inside .announcement-header but excludes the title
             const headerEl = row.querySelector('.announcement-header');
             let body = "";
             if (headerEl) {
-                // Remove title text from header to get just the body snippet
                 const clone = headerEl.cloneNode(true);
                 const titleNode = clone.querySelector('.announcement-title-detail');
                 if (titleNode) titleNode.remove();
@@ -72,14 +81,34 @@ def scrape_announcements(course_id: str, page: Page) -> list[dict]:
             }
 
             const isUnread = !row.classList.contains('is-read');
-
             items.push({ title, meta, body, unread: isUnread });
         });
         return items;
     }""")
 
-    print(f"   ✅ Extracted {len(announcements_data)} announcements.")
+    print(f"   ✅ Extracted {len(announcements_data)} announcements from {name}.")
     return announcements_data
+
+
+def scrape_announcements(course_id: str, page: Any) -> list[dict]:
+    """Synchronous fallback wrapper."""
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # In existing running event loop
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                return pool.submit(asyncio.run, scrape_announcements_async(course_id, page)).result()
+        return asyncio.run(scrape_announcements_async(course_id, page))
+    except Exception:
+        # Direct sync execution
+        url = f"{BLACKBOARD_BASE}/ultra/courses/{course_id}/announcements"
+        courses = load_courses()
+        name = courses.get(course_id, course_id)
+        page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        return []
+
 
 def save_announcements(data: list[dict], course_id: str):
     out_dir = ensure_output_dir("announcements")

@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -9,13 +10,21 @@ from playwright.sync_api import sync_playwright
 
 from core.config import BLACKBOARD_BASE, load_courses, save_courses
 from core.export_json import build_export_doc, build_item, write_export
-from core.session import _launch_context, _require_session, check_session, login, login_auto
-from scrapers.activity import save_activity, scrape_activity
-from scrapers.announcements import save_announcements, scrape_announcements
-from scrapers.calendar import save_calendar, scrape_calendar
+from core.session import _launch_context, _require_session, _require_session_async, check_session, check_session_async, login, login_auto
+from core.async_engine import AsyncSessionManager, AsyncCourseWorkerPool, EngineConfig
+
+# Scrapers
+from scrapers.activity import save_activity, scrape_activity, scrape_activity_async
+from scrapers.announcements import save_announcements, scrape_announcements, scrape_announcements_async
+from scrapers.calendar import save_calendar, scrape_calendar, scrape_calendar_async
 from scrapers.discussions import save_discussions, scrape_discussions
-from scrapers.grades import save_grades, scrape_grades
+from scrapers.grades import save_grades, scrape_grades, scrape_grades_async
 from scrapers.profile import save_profile, scrape_profile
+from scrapers.briefing import run_briefing_async, run_briefing
+from scrapers.outline import scrape_course_outline_async, save_outline
+from scrapers.assignments import scrape_course_assignments_async, save_assignments
+from scrapers.due_dates import aggregate_due_dates_async, save_due_dates
+from scrapers.search import find_items_async, grab_item_async
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +51,7 @@ def _emit_output(args: argparse.Namespace, items: list[dict]) -> None:
         print(payload)
 
 
-def _emit_raw(args: argparse.Namespace, data: list[dict]) -> None:
+def _emit_raw(args: argparse.Namespace, data: Any) -> None:
     """Print raw scraper dicts (pre-transform) to stdout or --out file."""
     pretty = not args.compact
     if pretty:
@@ -83,11 +92,7 @@ _COURSE_CODE_RE = re.compile(r"\s*\([^)]*\)\s*(?:SP|FA|SU|WI)\d{4}\s*\([^)]*\)\s
 
 
 def _short_course_name(raw: str | None) -> str | None:
-    """Strip trailing section/semester codes from Blackboard course names.
-
-    'IS 247 Computer Programming II (01.2288) SP2026 (IS247_2288_SP2026)'
-    → 'IS 247 Computer Programming II'
-    """
+    """Strip trailing section/semester codes from Blackboard course names."""
     if not raw:
         return raw
     cleaned = _COURSE_CODE_RE.sub("", raw).strip()
@@ -106,7 +111,6 @@ def _build_activity_items(activity: list[dict], default_group: str) -> list[dict
         context = (entry.get("context") or "").strip()
         course_name = _short_course_name(context)
 
-        # Use the message/preview as title if available; fall back to a short label.
         if raw_preview:
             title = raw_preview.split("\n")[0][:120]
         elif context:
@@ -211,40 +215,58 @@ def _build_grade_items(
     return out
 
 
-def _build_discussion_items(
-    discussions: list[dict],
+def _build_outline_items(
+    outline: list[dict],
     course_id: str,
     course_name: str,
     default_group: str,
 ) -> list[dict]:
     out: list[dict] = []
-    for disc in discussions:
-        preview = disc.get("preview_text") or ""
-        posts = disc.get("posts") or []
-        participants = disc.get("participants") or []
-        notes_parts = []
-        if preview:
-            notes_parts.append(preview)
-        if posts:
-            first_post = posts[0]
-            notes_parts.append(
-                f"Latest post by {first_post.get('author', 'Unknown')} ({first_post.get('date', '')}):\n{first_post.get('text', '')}"
-            )
-        notes = "\n\n".join(part for part in notes_parts if part).strip()
+    for item in outline:
         out.append(
             build_item(
-                kind="discussion",
+                kind="content_item",
                 course_id=course_id,
                 course_name=_short_course_name(course_name),
-                title=disc.get("title") or "Discussion thread",
-                notes=notes or None,
-                due_text=disc.get("due_date"),
-                source_ref=disc.get("url") or f"discussion:{course_id}:{disc.get('title','')}",
-                url=disc.get("url"),
+                title=item.get("title") or "Content item",
+                notes=item.get("description") or None,
+                due_text=item.get("due_date") or None,
+                source_ref=f"outline:{course_id}:{item.get('content_id','')}",
                 group_name=default_group,
                 metadata={
-                    "participants_count": str(len(participants)),
-                    "posts_count": str(len(posts)),
+                    "content_type": item.get("content_type", "item"),
+                    "depth": item.get("depth", 0),
+                    "links": item.get("links", []),
+                },
+            )
+        )
+    return out
+
+
+def _build_assignment_items(
+    assignments: list[dict],
+    course_id: str,
+    course_name: str,
+    default_group: str,
+) -> list[dict]:
+    out: list[dict] = []
+    for item in assignments:
+        out.append(
+            build_item(
+                kind="assignment",
+                course_id=course_id,
+                course_name=_short_course_name(course_name),
+                title=item.get("title") or "Assignment",
+                notes=item.get("instructions") or None,
+                due_text=item.get("due_date") or None,
+                source_ref=f"assignment:{course_id}:{item.get('title','')}",
+                group_name=default_group,
+                metadata={
+                    "points_possible": item.get("points_possible", ""),
+                    "submission_status": item.get("submission_status", "Unattempted"),
+                    "attempts": item.get("attempts", ""),
+                    "is_timed_test": item.get("is_timed_test", False),
+                    "attachments": item.get("attachments", []),
                 },
             )
         )
@@ -252,80 +274,92 @@ def _build_discussion_items(
 
 
 # ---------------------------------------------------------------------------
-# Argument parsing
+# CLI Argument Parser
 # ---------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="bb",
-        description="UMBC Blackboard Ultra Scraper",
-        formatter_class=argparse.RawTextHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  python3 main.py --briefing\n"
-            "  python3 main.py --announcements --all\n"
-            "  python3 main.py --grades --all --out grades.json\n"
-            "  python3 main.py --activity --raw\n"
-            "  python3 main.py --check-session --visible\n"
-            "  python3 main.py --calendar --compact\n"
-        ),
+        description="UMBC Blackboard Ultra High-Performance Scraper & Assistant",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python3 main.py --briefing                          # High-speed concurrent briefing across all courses
+  python3 main.py --due 7d                            # Aggregated upcoming deadlines for next 7 days
+  python3 main.py --outline --all                     # Scrape course outlines across all courses
+  python3 main.py --assignments --all                 # Deep scrape assignments with prompts & rubrics
+  python3 main.py --find "Project 1"                  # Search content across all courses
+  python3 main.py --grades --all --out grades.json    # JSON export of grades
+  python3 main.py --bot                               # Launch interactive Telegram bot daemon
+        """,
     )
+
+    raw_args = sys.argv[1:]
+    if "-auto" in raw_args:
+        parser.error("Use --auto (or -a). The token '-auto' is ambiguous.")
 
     # --- authentication ---
     auth = parser.add_argument_group("authentication")
     auth.add_argument("--login", action="store_true", help="Login via SSO (skips if session is valid)")
-    auth.add_argument("--auto", "-a", action="store_true", help="With --login: fully automated SSO + Duo SMS login")
+    auth.add_argument("--logout", action="store_true", help="Logout (clear session cookies, keep config credentials)")
+    auth.add_argument("--auto", "-a", action="store_true", help="With --login: fully automated SSO + Duo text passcode login")
     auth.add_argument("--force", action="store_true", help="With --login: force re-login even if session exists")
-    auth.add_argument("--username", "-u", help="Username for automated login")
-    auth.add_argument("--password", "-p", help="Password for automated login")
+    auth.add_argument("--username", "-u", help="Username for automated login (prompts if omitted)")
+    auth.add_argument("--password", "-p", help="Password for automated login (prompts if omitted)")
+    auth.add_argument("--config-creds", action="store_true", help="With --login: use credentials from config.json")
     auth.add_argument("--check-session", action="store_true", help="Test if the current session is valid")
     auth.add_argument("--session-info", action="store_true", help="Show session creation / last-used timestamps")
     auth.add_argument("--debug", action="store_true", help="Print detailed debug output (use with --check-session)")
 
     # --- discovery ---
-    discovery = parser.add_argument_group("discovery")
-    discovery.add_argument("--discover", action="store_true", help="Find and save enrolled courses")
-    discovery.add_argument("--courses", action="store_true", help="List configured courses")
+    disc = parser.add_argument_group("discovery")
+    disc.add_argument("--discover", action="store_true", help="Find and save enrolled courses")
+    disc.add_argument("--courses", action="store_true", help="List configured courses")
 
     # --- scrapers ---
     scrapers = parser.add_argument_group("scrapers")
-    scrapers.add_argument("--briefing", action="store_true", help="Run all core scrapers (activity + calendar + announcements + grades)")
+    scrapers.add_argument("--briefing", action="store_true", help="Run high-speed concurrent briefing across all courses")
     scrapers.add_argument("--activity", action="store_true", help="Scrape homepage activity stream")
     scrapers.add_argument("--calendar", action="store_true", help="Scrape calendar due-dates")
     scrapers.add_argument("--announcements", action="store_true", help="Scrape course announcements")
     scrapers.add_argument("--grades", action="store_true", help="Scrape gradebook")
     scrapers.add_argument("--discussions", action="store_true", help="Scrape course discussions")
+    scrapers.add_argument("--outline", action="store_true", help="Scrape full course outline and modules")
+    scrapers.add_argument("--assignments", action="store_true", help="Deep scrape assignments with prompts and rubrics")
+    scrapers.add_argument("--due", nargs="?", const="7d", default=None, metavar="WINDOW", help="Aggregate cross-course due dates (e.g. 7d, 14d, overdue)")
+    scrapers.add_argument("--upcoming", type=int, metavar="DAYS", help="Alias for --due <N>d")
+    scrapers.add_argument("--exclude-completed", action="store_true", help="With --due: exclude submitted/graded items")
+    scrapers.add_argument("--find", metavar="QUERY", help="Search for content/assignments matching query")
+    scrapers.add_argument("--grab", metavar="ITEM_ID", help="Grab and download specific content item")
     scrapers.add_argument("--profile", action="store_true", help="Show your Blackboard profile")
 
-    # --- discussion modifiers ---
-    disc = parser.add_argument_group("discussion modifiers")
-    disc.add_argument("--max-posts", type=int, default=None, metavar="N", help="Max 'Load more' post clicks")
-    disc.add_argument("--max-parts", type=int, default=None, metavar="N", help="Max participant-expand clicks")
-    disc.add_argument("--posts-only", action="store_true", help="Fetch posts only")
-    disc.add_argument("--participants-only", action="store_true", help="Fetch participants only")
-    disc.add_argument("--titles-only", action="store_true", help="Fetch thread titles only")
-
-    # --- scope ---
-    scope = parser.add_argument_group("scope")
+    # --- scope & performance ---
+    scope = parser.add_argument_group("scope & performance")
     scope.add_argument("--course", "-c", help="Target course ID (e.g. _100001_1)")
     scope.add_argument("--all", action="store_true", help="Run against all configured courses")
+    scope.add_argument("--concurrency", type=int, default=4, metavar="N", help="Max concurrent browser workers (default: 4)")
     scope.add_argument("--visible", "-v", action="store_true", help="Show browser window (useful for debugging)")
     scope.add_argument("--cdp", help="Connect to an existing browser via CDP URL (e.g. http://localhost:9222)")
+
+    # --- telegram integration ---
+    tg = parser.add_argument_group("telegram integration")
+    tg.add_argument("--telegram", action="store_true", help="Send briefing/results to configured Telegram chat")
+    tg.add_argument("--bot", action="store_true", help="Start the interactive Telegram bot daemon")
 
     # --- output ---
     output = parser.add_argument_group("output")
     output.add_argument("--out", metavar="FILE", help="Write JSON output to FILE instead of stdout")
     output.add_argument("--md", action="store_true", help="Also save markdown file(s) to the output/ directory")
-    output.add_argument("--raw", action="store_true", help="Output raw scraper data (pre-transform) instead of the export envelope")
-    output.add_argument("--compact", action="store_true", help="Emit minified JSON (no indentation)")
-    output.add_argument("--source", default="blackboard-scraper", metavar="NAME", help="Value for the JSON 'source' field (default: blackboard-scraper)")
-    output.add_argument("--group", default="School", metavar="NAME", help="Group name for exported items (default: School)")
+    output.add_argument("--raw", action="store_true", help="Output raw scraper data instead of envelope")
+    output.add_argument("--compact", action="store_true", help="Emit minified JSON")
+    output.add_argument("--source", default="blackboard-scraper", metavar="NAME", help="Value for the JSON source field")
+    output.add_argument("--group", default="School", metavar="NAME", help="Group name for exported items")
 
     return parser.parse_args()
 
 
 # ---------------------------------------------------------------------------
-# Sub-command handlers
+# Discovery Subcommand
 # ---------------------------------------------------------------------------
 
 def _handle_discover_courses(headless: bool, cdp: str | None) -> None:
@@ -370,22 +404,23 @@ def _handle_discover_courses(headless: bool, cdp: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Main Async Execution Dispatcher
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    args = _parse_args()
-    if len(sys.argv) == 1:
-        print("Run with --help to see available commands.", file=sys.stderr)
-        sys.exit(1)
-
+async def main_async(args: argparse.Namespace) -> None:
     headless = not args.visible
     cdp = args.cdp
     courses = load_courses()
     os.environ["TMPDIR"] = "/tmp"
 
-    # --- auth / utility commands ---
+    # --- telegram bot daemon ---
+    if args.bot:
+        from telegram.bot import SimpleTelegramBot
+        bot = SimpleTelegramBot()
+        await bot.start_polling()
+        return
 
+    # --- course listing & auth ---
     if args.courses:
         print("\n📚 Configured Courses:", file=sys.stderr)
         for cid, name in courses.items():
@@ -400,13 +435,15 @@ def main() -> None:
             login(args.force, args.username, args.password, cdp)
         return
 
+    if args.logout:
+        from core.session import logout as do_logout
+        do_logout(keep_config_creds=True)
+        return
+
     if args.check_session:
-        # --visible is the global flag that controls headless/visible browser.
-        # When passed alongside --check-session it runs the check with a visible window.
-        ok = check_session(debug=args.debug, headless=headless)
+        ok = await check_session_async(debug=args.debug, headless=headless)
         if not ok and not args.visible:
-            # Fallback: try visible check to distinguish detection issues from real failures.
-            visible_ok = check_session(debug=args.debug, headless=False)
+            visible_ok = await check_session_async(debug=args.debug, headless=False)
             if visible_ok:
                 print(
                     "⚠️  Headless check failed but visible check passed.\n"
@@ -417,12 +454,10 @@ def main() -> None:
 
     if args.session_info:
         from core.config import SESSION_DIR
-        import json as _json
-
         meta = SESSION_DIR / "session_metadata.json"
         print("\n🕒 Session Info:", file=sys.stderr)
         if meta.exists():
-            data = _json.loads(meta.read_text())
+            data = json.loads(meta.read_text())
             print(f"  Created:   {data.get('login_time_human', 'Unknown')}", file=sys.stderr)
             print(f"  Last Used: {data.get('last_used_time_human', 'Unknown')}", file=sys.stderr)
         else:
@@ -434,11 +469,282 @@ def main() -> None:
         _handle_discover_courses(headless, cdp)
         return
 
-    # --- scraper commands ---
+    if not await _require_session_async(cdp):
+        return
 
-    if args.profile:
-        if not _require_session(cdp):
+    json_items: list[dict] = []
+
+    # --- high-speed concurrent briefing ---
+    if args.briefing:
+        bundle = await run_briefing_async(
+            headless=headless,
+            cdp_url=cdp,
+            write_markdown=args.md or True,
+            concurrency=args.concurrency,
+        )
+
+        if args.telegram:
+            try:
+                from telegram.notifier import TelegramNotifier
+                notifier = TelegramNotifier()
+                if notifier.enabled:
+                    notifier.notify_briefing(bundle)
+                    notifier.process_and_notify_diffs(bundle)
+                    print("📬 Sent daily briefing to Telegram.", file=sys.stderr)
+                else:
+                    print("⚠️ Telegram is not enabled or configured in config.json.", file=sys.stderr)
+            except Exception as e:
+                print(f"⚠️ Telegram notification error: {e}", file=sys.stderr)
+
+        if args.raw:
+            _emit_raw(args, bundle)
             return
+
+        json_items.extend(_build_activity_items(bundle.get("activity", []), args.group))
+        json_items.extend(_build_calendar_items(bundle.get("calendar", []), None, args.group))
+        for course_id, course_data in bundle.get("courses", {}).items():
+            if isinstance(course_data, dict):
+                course_name = course_data.get("course_name", courses.get(course_id, course_id))
+                json_items.extend(
+                    _build_announcement_items(course_data.get("announcements", []), course_id, course_name, args.group)
+                )
+                json_items.extend(_build_grade_items(course_data.get("grades", []), course_id, course_name, args.group))
+
+        _emit_output(args, json_items)
+        return
+
+    # --- due dates aggregator ---
+    window = f"{args.upcoming}d" if args.upcoming else (args.due if args.due is not None else None)
+    if window is not None:
+        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp))
+        await session_manager.initialize()
+        try:
+            async with session_manager.acquire_page() as page:
+                items = await aggregate_due_dates_async(
+                    page,
+                    courses,
+                    window_filter=window,
+                    exclude_completed=args.exclude_completed,
+                )
+                if args.md or True:
+                    save_due_dates(items, window_filter=window)
+        finally:
+            await session_manager.close()
+
+        if args.raw:
+            _emit_raw(args, items)
+            return
+        json_items.extend(_build_calendar_items(items, None, args.group))
+        _emit_output(args, json_items)
+        return
+
+    # --- course outline scraper ---
+    if args.outline:
+        target_courses = list(courses.keys()) if args.all else ([args.course] if args.course else [])
+        if not target_courses:
+            print("❌ Specify --course <ID> or --all", file=sys.stderr)
+            return
+
+        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=args.concurrency))
+        await session_manager.initialize()
+        raw_all: list[dict] = []
+        try:
+            pool = AsyncCourseWorkerPool(session_manager)
+            async def _worker(cid, cname, page):
+                data = await scrape_course_outline_async(cid, page)
+                if args.md or True:
+                    save_outline(data, cid)
+                return data
+
+            target_dict = {cid: courses.get(cid, cid) for cid in target_courses}
+            results = await pool.execute_task_per_course(target_dict, _worker)
+            for cid, data in results.items():
+                if isinstance(data, list):
+                    raw_all.extend(data)
+                    json_items.extend(_build_outline_items(data, cid, courses.get(cid, cid), args.group))
+        finally:
+            await session_manager.close()
+
+        if args.raw:
+            _emit_raw(args, raw_all)
+            return
+        _emit_output(args, json_items)
+        return
+
+    # --- deep assignments scraper ---
+    if args.assignments:
+        target_courses = list(courses.keys()) if args.all else ([args.course] if args.course else [])
+        if not target_courses:
+            print("❌ Specify --course <ID> or --all", file=sys.stderr)
+            return
+
+        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=args.concurrency))
+        await session_manager.initialize()
+        raw_all: list[dict] = []
+        try:
+            pool = AsyncCourseWorkerPool(session_manager)
+            async def _worker(cid, cname, page):
+                data = await scrape_course_assignments_async(cid, page)
+                if args.md or True:
+                    save_assignments(data, cid)
+                return data
+
+            target_dict = {cid: courses.get(cid, cid) for cid in target_courses}
+            results = await pool.execute_task_per_course(target_dict, _worker)
+            for cid, data in results.items():
+                if isinstance(data, list):
+                    raw_all.extend(data)
+                    json_items.extend(_build_assignment_items(data, cid, courses.get(cid, cid), args.group))
+        finally:
+            await session_manager.close()
+
+        if args.raw:
+            _emit_raw(args, raw_all)
+            return
+        _emit_output(args, json_items)
+        return
+
+    # --- omnisearch ---
+    if args.find:
+        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp))
+        await session_manager.initialize()
+        try:
+            async with session_manager.acquire_page() as page:
+                matches = await find_items_async(args.find, courses, page)
+        finally:
+            await session_manager.close()
+
+        print(f"\n🔎 Search Results for '{args.find}':")
+        for m in matches:
+            due_str = f" (Due: {m['due_date']})" if m.get("due_date") else ""
+            print(f"• [{m['course_name']}] {m['title']} [{m['content_type']}]{due_str}")
+        return
+
+    # --- item grabber ---
+    if args.grab:
+        target_cid = args.course or (list(courses.keys())[0] if courses else None)
+        if not target_cid:
+            print("❌ Specify --course <ID> to grab item from.", file=sys.stderr)
+            return
+        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp))
+        await session_manager.initialize()
+        try:
+            async with session_manager.acquire_page() as page:
+                item = await grab_item_async(args.grab, target_cid, page)
+        finally:
+            await session_manager.close()
+
+        _emit_raw(args, item)
+        return
+
+    # --- announcements ---
+    if args.announcements:
+        target_courses = list(courses.keys()) if args.all else ([args.course] if args.course else [])
+        if not target_courses:
+            print("❌ Specify --course <ID> or --all", file=sys.stderr)
+            return
+
+        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=args.concurrency))
+        await session_manager.initialize()
+        raw_all: list[dict] = []
+        try:
+            pool = AsyncCourseWorkerPool(session_manager)
+            async def _worker(cid, cname, page):
+                data = await scrape_announcements_async(cid, page)
+                if args.md:
+                    save_announcements(data, cid)
+                return data
+
+            target_dict = {cid: courses.get(cid, cid) for cid in target_courses}
+            results = await pool.execute_task_per_course(target_dict, _worker)
+            for cid, data in results.items():
+                if isinstance(data, list):
+                    raw_all.extend(data)
+                    json_items.extend(
+                        _build_announcement_items(data, cid, courses.get(cid, cid), args.group)
+                    )
+        finally:
+            await session_manager.close()
+
+        if args.raw:
+            _emit_raw(args, raw_all)
+            return
+        _emit_output(args, json_items)
+        return
+
+    # --- grades ---
+    if args.grades:
+        target_courses = list(courses.keys()) if args.all else ([args.course] if args.course else [])
+        if not target_courses:
+            print("❌ Specify --course <ID> or --all", file=sys.stderr)
+            return
+
+        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=args.concurrency))
+        await session_manager.initialize()
+        raw_all: list[dict] = []
+        try:
+            pool = AsyncCourseWorkerPool(session_manager)
+            async def _worker(cid, cname, page):
+                data = await scrape_grades_async(cid, page)
+                if args.md:
+                    save_grades(data, cid)
+                return data
+
+            target_dict = {cid: courses.get(cid, cid) for cid in target_courses}
+            results = await pool.execute_task_per_course(target_dict, _worker)
+            for cid, data in results.items():
+                if isinstance(data, list):
+                    raw_all.extend(data)
+                    json_items.extend(_build_grade_items(data, cid, courses.get(cid, cid), args.group))
+        finally:
+            await session_manager.close()
+
+        if args.raw:
+            _emit_raw(args, raw_all)
+            return
+        _emit_output(args, json_items)
+        return
+
+    # --- calendar ---
+    if args.calendar:
+        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp))
+        await session_manager.initialize()
+        try:
+            async with session_manager.acquire_page() as page:
+                calendar = await scrape_calendar_async(page, args.course)
+                if args.md:
+                    save_calendar(calendar, args.course)
+        finally:
+            await session_manager.close()
+
+        if args.raw:
+            _emit_raw(args, calendar)
+            return
+        json_items.extend(_build_calendar_items(calendar, args.course, args.group))
+        _emit_output(args, json_items)
+        return
+
+    # --- activity ---
+    if args.activity:
+        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp))
+        await session_manager.initialize()
+        try:
+            async with session_manager.acquire_page() as page:
+                activity = await scrape_activity_async(page)
+                if args.md:
+                    save_activity(activity)
+        finally:
+            await session_manager.close()
+
+        if args.raw:
+            _emit_raw(args, activity)
+            return
+        json_items.extend(_build_activity_items(activity, args.group))
+        _emit_output(args, json_items)
+        return
+
+    # --- profile ---
+    if args.profile:
         with sync_playwright() as p:
             ctx, page = _launch_context(p, headless, cdp)
             data = scrape_profile(page)
@@ -449,125 +755,14 @@ def main() -> None:
             ctx.close()
         return
 
-    json_items: list[dict] = []
-
-    if args.briefing:
-        if not _require_session(cdp):
-            return
-        from scrapers.briefing import run_briefing
-
-        bundle = run_briefing(headless=headless, cdp_url=cdp, write_markdown=args.md)
-        if args.raw:
-            _emit_raw(args, bundle)
-            return
-        json_items.extend(_build_activity_items(bundle.get("activity", []), args.group))
-        json_items.extend(_build_calendar_items(bundle.get("calendar", []), None, args.group))
-        for course_id, course_data in bundle.get("courses", {}).items():
-            course_name = course_data.get("course_name", courses.get(course_id, course_id))
-            json_items.extend(
-                _build_announcement_items(course_data.get("announcements", []), course_id, course_name, args.group)
-            )
-            json_items.extend(_build_grade_items(course_data.get("grades", []), course_id, course_name, args.group))
-        _emit_output(args, json_items)
-        return
-
-    if args.activity:
-        if not _require_session(cdp):
-            return
-        with sync_playwright() as p:
-            ctx, page = _launch_context(p, headless, cdp)
-            activity = scrape_activity(page)
-            if args.md:
-                save_activity(activity)
-            ctx.close()
-        if args.raw:
-            _emit_raw(args, activity)
-            return
-        json_items.extend(_build_activity_items(activity, args.group))
-        _emit_output(args, json_items)
-        return
-
-    if args.calendar:
-        if not _require_session(cdp):
-            return
-        with sync_playwright() as p:
-            ctx, page = _launch_context(p, headless, cdp)
-            calendar = scrape_calendar(page, args.course)
-            if args.md:
-                save_calendar(calendar, args.course)
-            ctx.close()
-        if args.raw:
-            _emit_raw(args, calendar)
-            return
-        json_items.extend(_build_calendar_items(calendar, args.course, args.group))
-        _emit_output(args, json_items)
-        return
-
-    if args.announcements:
-        if not _require_session(cdp):
-            return
-        target_courses = list(courses.keys()) if args.all else ([args.course] if args.course else [])
-        if not target_courses:
-            print("❌ Specify --course <ID> or --all", file=sys.stderr)
-            return
-        raw_all: list[dict] = []
-        with sync_playwright() as p:
-            ctx, _ = _launch_context(p, headless, cdp)
-            for course_id in target_courses:
-                page = ctx.new_page()
-                data = scrape_announcements(course_id, page)
-                if args.md:
-                    save_announcements(data, course_id)
-                if args.raw:
-                    raw_all.extend(data)
-                else:
-                    json_items.extend(
-                        _build_announcement_items(data, course_id, courses.get(course_id, course_id), args.group)
-                    )
-                page.close()
-            ctx.close()
-        if args.raw:
-            _emit_raw(args, raw_all)
-            return
-        _emit_output(args, json_items)
-        return
-
-    if args.grades:
-        if not _require_session(cdp):
-            return
-        target_courses = list(courses.keys()) if args.all else ([args.course] if args.course else [])
-        if not target_courses:
-            print("❌ Specify --course <ID> or --all", file=sys.stderr)
-            return
-        raw_all: list[dict] = []
-        with sync_playwright() as p:
-            ctx, _ = _launch_context(p, headless, cdp)
-            for course_id in target_courses:
-                page = ctx.new_page()
-                data = scrape_grades(course_id, page)
-                if args.md:
-                    save_grades(data, course_id)
-                if args.raw:
-                    raw_all.extend(data)
-                else:
-                    json_items.extend(_build_grade_items(data, course_id, courses.get(course_id, course_id), args.group))
-                page.close()
-            ctx.close()
-        if args.raw:
-            _emit_raw(args, raw_all)
-            return
-        _emit_output(args, json_items)
-        return
-
+    # --- discussions ---
     if args.discussions:
-        if not _require_session(cdp):
-            return
         kwargs = {
-            "max_post_clicks": args.max_posts,
-            "max_participant_clicks": args.max_parts,
-            "posts_only": args.posts_only,
-            "participants_only": args.participants_only,
-            "titles_only": args.titles_only,
+            "max_post_clicks": args.max_posts if hasattr(args, "max_posts") else None,
+            "max_participant_clicks": args.max_parts if hasattr(args, "max_parts") else None,
+            "posts_only": getattr(args, "posts_only", False),
+            "participants_only": getattr(args, "participants_only", False),
+            "titles_only": getattr(args, "titles_only", False),
         }
         target_courses = list(courses.keys()) if args.all else ([args.course] if args.course else [])
         if not target_courses:
@@ -580,7 +775,7 @@ def main() -> None:
                 page = ctx.new_page()
                 data = scrape_discussions(course_id, page, **kwargs)
                 if args.md:
-                    save_discussions(data, course_id, titles_only=args.titles_only)
+                    save_discussions(data, course_id, titles_only=getattr(args, "titles_only", False))
                 if args.raw:
                     raw_all.extend(data)
                 else:
@@ -596,6 +791,15 @@ def main() -> None:
         return
 
     print("No scraper action selected. Run with --help.", file=sys.stderr)
+
+
+def main() -> None:
+    args = _parse_args()
+    if len(sys.argv) == 1:
+        print("Run with --help to see available commands.", file=sys.stderr)
+        sys.exit(1)
+
+    asyncio.run(main_async(args))
 
 
 if __name__ == "__main__":

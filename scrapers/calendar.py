@@ -1,14 +1,15 @@
-import time
+import asyncio
 from datetime import datetime
 from pathlib import Path
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
+from typing import Any, Dict, List, Optional
 
 from core.config import BLACKBOARD_BASE, load_courses
 from core.output import ensure_output_dir
-from scrapers.base import _navigate_and_check_page
+from core.async_engine import AdaptiveDOM
 
-def scrape_calendar(page: Page, course_id: str = None) -> list[dict]:
-    """Scrape calendar due dates via infinite scroll bypass."""
+
+async def scrape_calendar_async(page: Any, course_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Scrapes calendar due dates asynchronously."""
     url = f"{BLACKBOARD_BASE}/ultra/calendar"
     if course_id:
         courses = load_courses()
@@ -17,74 +18,36 @@ def scrape_calendar(page: Page, course_id: str = None) -> list[dict]:
     else:
         print("📅 Scraping globally aggregated calendar due dates...")
 
-    if not _navigate_and_check_page(page, url):
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+    except Exception as e:
+        print(f"   ⚠️ Navigation error for calendar: {e}")
         return []
 
     # Switch to Due Dates view
-    try:
-        due_dates_btn = page.locator("button[aria-label='Due dates view']")
-        if due_dates_btn.is_visible():
-            due_dates_btn.click()
-            page.wait_for_timeout(2000)
-    except Exception as e:
-        print(f"   ⚠️ Could not switch to Due Dates view: {e}")
+    await AdaptiveDOM.safe_click(page, "button[aria-label='Due dates view']", timeout=3000)
 
-    try:
-        page.wait_for_selector(".element-card.due-item, .calendar-nothing-due", state="attached", timeout=15_000)
-    except PlaywrightTimeout:
-        print("   ⚠️  Timed out waiting for calendar to load.")
+    matched_sel, _ = await AdaptiveDOM.wait_for_any_selector(
+        page,
+        [".element-card.due-item", ".calendar-nothing-due", "div:has-text('Nothing due')"],
+        timeout=12_000,
+    )
+
+    if not matched_sel or "nothing-due" in matched_sel:
+        print("   ℹ️  No upcoming calendar deadlines found.")
         return []
 
-    # If course_id provided, open the filter panel and select it
-    if course_id:
-        try:
-            filter_btn = page.locator("button[aria-label*='Filter']")
-            if filter_btn.is_visible():
-                filter_btn.click()
-                page.wait_for_selector(".facet-list", timeout=5000)
-                
-                # Check the specific course checkbox
-                checkbox = page.locator(f"input[value='{course_id}']")
-                if checkbox.is_visible():
-                    checkbox.check()
-                    page.wait_for_timeout(2000) # give it time to filter
-                # Close filter
-                close_btn = page.locator("button.close-panel")
-                if close_btn.is_visible():
-                    close_btn.click()
-        except Exception as e:
-            print(f"   ⚠️ Could not filter calendar for {course_id}: {e}")
+    # Adaptive scroll to load full calendar
+    await AdaptiveDOM.adaptive_infinite_scroll(page, ".element-card.due-item", max_scrolls=8, idle_wait_ms=300)
 
-    # Infinite scroll to load all future items
-    last_count = 0
-    scroll_attempts = 0
-    max_scrolls = 20
-    
-    while scroll_attempts < max_scrolls:
-        items = page.locator(".element-card.due-item")
-        count = items.count()
-        
-        if count == last_count:
-            # Scroll the .scroll-container element instead of window
-            page.evaluate("""() => {
-                const scrollContainer = document.querySelector('.scroll-container');
-                if (scrollContainer) scrollContainer.scrollTop = scrollContainer.scrollHeight;
-            }""")
-            page.wait_for_timeout(1000)
-            new_count = page.locator(".element-card.due-item").count()
-            if new_count == count:
-                break
-        last_count = count
-        scroll_attempts += 1
-
-    calendar_data = page.evaluate("""() => {
+    calendar_data = await page.evaluate("""() => {
         const results = [];
         const items = document.querySelectorAll(".element-card.due-item");
         items.forEach(el => {
-            const titleEl = el.querySelector(".element-details .name a");
+            const titleEl = el.querySelector(".element-details .name a, .js-title");
             const dateEl = el.querySelector(".element-details .content > span:first-child");
-            const courseEl = el.querySelector(".element-details .content a[analytics-id*='openCourseOutline']");
-            
+            const courseEl = el.querySelector(".element-details .content a[analytics-id*='openCourseOutline'], [class*='course-title']");
+
             if (titleEl) {
                 results.push({
                     "title": titleEl.innerText.trim(),
@@ -99,19 +62,34 @@ def scrape_calendar(page: Page, course_id: str = None) -> list[dict]:
     print(f"   ✅ Extracted {len(calendar_data)} calendar items.")
     return calendar_data
 
+
+def scrape_calendar(page: Any, course_id: Optional[str] = None) -> list[dict]:
+    """Synchronous fallback wrapper."""
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                return pool.submit(asyncio.run, scrape_calendar_async(page, course_id)).result()
+        return asyncio.run(scrape_calendar_async(page, course_id))
+    except Exception:
+        return []
+
+
 def save_calendar(calendar: list[dict], course_id: str = None):
     out_dir = ensure_output_dir("calendar")
     filename = f"{course_id}.md" if course_id else "due_dates.md"
     filepath = out_dir / filename
-    
+
     title = f"Calendar: {course_id}" if course_id else "Global Calendar Due Dates"
-    
+
     lines = [
         f"# {title}",
         f"_Scraped: {datetime.now().strftime('%Y-%m-%d %H:%M')}_",
         ""
     ]
-    
+
     if not calendar:
         lines.append("_No upcoming due dates found._")
     else:
@@ -121,6 +99,6 @@ def save_calendar(calendar: list[dict], course_id: str = None):
                 lines.append(f"**Course:** {item['course']}")
             lines.append(f"**Due:** _{item['due']}_")
             lines.append("")
-            
+
     filepath.write_text("\n".join(lines))
-    print(f"   💾 Saved to: {filepath.relative_to(Path.cwd()) if filepath.is_absolute() else filepath}")
+    print(f"   💾 Saved to: {filepath.name}")
