@@ -28,8 +28,12 @@ MEDIUM_PRIORITY_PATTERNS = [
     re.compile(r"\b(\d{6})\b"),  # Standard 6-digit code
 ]
 
+# Combined pattern list
+PASSCODE_REGEXES = HIGH_PRIORITY_PATTERNS + MEDIUM_PRIORITY_PATTERNS
+
 # macOS Cocoa timestamp epoch offset (seconds between 1970-01-01 and 2001-01-01)
 COCOA_EPOCH_OFFSET = 978307200
+
 
 
 def get_latest_duo_sms_sqlite(after_unix_timestamp: Optional[float] = None) -> Optional[Tuple[str, float, str, str]]:
