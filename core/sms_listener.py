@@ -12,7 +12,6 @@ from typing import List, Optional, Tuple
 logger = logging.getLogger("blackboard.sms_listener")
 
 # Ranked regex patterns for Duo / UMBC SMS passcodes
-# Top priority: explicit UMBC/Duo passcode phrasing
 HIGH_PRIORITY_PATTERNS = [
     re.compile(r"UMBC\s+SMS\s+passcode.*?:\s*(\d{6,8})", re.IGNORECASE),
     re.compile(r"Duo\s+passcode.*?:\s*(\d{6,8})", re.IGNORECASE),
@@ -20,7 +19,6 @@ HIGH_PRIORITY_PATTERNS = [
     re.compile(r"UMBC.*?code.*?:\s*(\d{6,8})", re.IGNORECASE),
 ]
 
-# Medium priority: generic 2FA security codes
 MEDIUM_PRIORITY_PATTERNS = [
     re.compile(r"(?:passcode|verification code|security code|login code|auth code|pin)[:\s]+(\d{6,8})", re.IGNORECASE),
     re.compile(r"(?:code|passcode)\s+is[:\s]+(\d{6,8})", re.IGNORECASE),
@@ -28,19 +26,34 @@ MEDIUM_PRIORITY_PATTERNS = [
     re.compile(r"\b(\d{6})\b"),  # Standard 6-digit code
 ]
 
-# Combined pattern list
 PASSCODE_REGEXES = HIGH_PRIORITY_PATTERNS + MEDIUM_PRIORITY_PATTERNS
 
-# macOS Cocoa timestamp epoch offset (seconds between 1970-01-01 and 2001-01-01)
 COCOA_EPOCH_OFFSET = 978307200
 
 
+def get_current_max_rowid() -> int:
+    """Get the current highest message ROWID in chat.db to track subsequent incoming SMS."""
+    db_path = Path.home() / "Library" / "Messages" / "chat.db"
+    if not db_path.exists():
+        return 0
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        cursor = conn.cursor()
+        cursor.execute("SELECT MAX(ROWID) FROM message")
+        res = cursor.fetchone()
+        conn.close()
+        return res[0] if res and res[0] is not None else 0
+    except Exception:
+        return 0
 
-def get_latest_duo_sms_sqlite(after_unix_timestamp: Optional[float] = None) -> Optional[Tuple[str, float, str, str]]:
+
+def get_latest_duo_sms_sqlite(
+    start_rowid: Optional[int] = None,
+    after_unix_timestamp: Optional[float] = None,
+) -> Optional[Tuple[str, float, str, str]]:
     """
-    Directly query macOS Messages SQLite database (~2-5ms) for incoming 2FA passcodes.
-    Accepts ANY sender number (sender numbers dynamically change).
-    Returns: Tuple[passcode, unix_timestamp, sender, raw_text] or None
+    Query macOS Messages SQLite database for incoming 2FA passcodes.
+    Matches messages newer than start_rowid or within the timestamp window.
     """
     db_path = Path.home() / "Library" / "Messages" / "chat.db"
     if not db_path.exists():
@@ -50,21 +63,37 @@ def get_latest_duo_sms_sqlite(after_unix_timestamp: Optional[float] = None) -> O
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
         cursor = conn.cursor()
 
-        # Query recent incoming messages regardless of sender
-        query = """
-        SELECT 
-            m.ROWID,
-            m.text,
-            m.date,
-            COALESCE(h.id, 'SMS') as sender,
-            m.is_from_me
-        FROM message m
-        LEFT JOIN handle h ON m.handle_id = h.ROWID
-        WHERE m.text IS NOT NULL AND m.is_from_me = 0
-        ORDER BY m.date DESC
-        LIMIT 20
-        """
-        cursor.execute(query)
+        if start_rowid and start_rowid > 0:
+            query = """
+            SELECT 
+                m.ROWID,
+                m.text,
+                m.date,
+                COALESCE(h.id, 'SMS') as sender,
+                m.is_from_me
+            FROM message m
+            LEFT JOIN handle h ON m.handle_id = h.ROWID
+            WHERE m.ROWID > ? AND m.text IS NOT NULL AND m.is_from_me = 0
+            ORDER BY m.ROWID DESC
+            LIMIT 20
+            """
+            cursor.execute(query, (start_rowid,))
+        else:
+            query = """
+            SELECT 
+                m.ROWID,
+                m.text,
+                m.date,
+                COALESCE(h.id, 'SMS') as sender,
+                m.is_from_me
+            FROM message m
+            LEFT JOIN handle h ON m.handle_id = h.ROWID
+            WHERE m.text IS NOT NULL AND m.is_from_me = 0
+            ORDER BY m.date DESC
+            LIMIT 20
+            """
+            cursor.execute(query)
+
         rows = cursor.fetchall()
         conn.close()
 
@@ -74,9 +103,7 @@ def get_latest_duo_sms_sqlite(after_unix_timestamp: Optional[float] = None) -> O
                 continue
 
             unix_ts = (apple_date / 1_000_000_000) + COCOA_EPOCH_OFFSET
-
-            # Allow 4s clock skew buffer if start timestamp is provided
-            if after_unix_timestamp and unix_ts < (after_unix_timestamp - 4.0):
+            if after_unix_timestamp and not start_rowid and unix_ts < (after_unix_timestamp - 15.0):
                 continue
 
             for pattern in HIGH_PRIORITY_PATTERNS:
@@ -91,7 +118,7 @@ def get_latest_duo_sms_sqlite(after_unix_timestamp: Optional[float] = None) -> O
                 continue
 
             unix_ts = (apple_date / 1_000_000_000) + COCOA_EPOCH_OFFSET
-            if after_unix_timestamp and unix_ts < (after_unix_timestamp - 4.0):
+            if after_unix_timestamp and not start_rowid and unix_ts < (after_unix_timestamp - 15.0):
                 continue
 
             for pattern in MEDIUM_PRIORITY_PATTERNS:
@@ -106,10 +133,10 @@ def get_latest_duo_sms_sqlite(after_unix_timestamp: Optional[float] = None) -> O
     return None
 
 
-def get_latest_duo_sms_imsg(after_unix_timestamp: Optional[float] = None) -> Optional[Tuple[str, float, str, str]]:
-    """
-    Fallback method using `imsg` CLI tool to search recent messages.
-    """
+def get_latest_duo_sms_imsg(
+    after_unix_timestamp: Optional[float] = None,
+) -> Optional[Tuple[str, float, str, str]]:
+    """Fallback method using `imsg` CLI tool to search recent messages."""
     imsg_bin = "/opt/homebrew/bin/imsg"
     if not os.path.exists(imsg_bin):
         return None
@@ -134,7 +161,7 @@ def get_latest_duo_sms_imsg(after_unix_timestamp: Optional[float] = None) -> Opt
                     if created_at_str:
                         dt = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
                         unix_ts = dt.timestamp()
-                        if after_unix_timestamp and unix_ts < (after_unix_timestamp - 4.0):
+                        if after_unix_timestamp and unix_ts < (after_unix_timestamp - 15.0):
                             continue
                     else:
                         unix_ts = time.time()
@@ -153,20 +180,21 @@ def get_latest_duo_sms_imsg(after_unix_timestamp: Optional[float] = None) -> Opt
 
 
 def wait_for_duo_sms_passcode(
-    after_unix_timestamp: float,
-    timeout_seconds: int = 40,
-    poll_interval: float = 0.6,
+    start_rowid: Optional[int] = None,
+    after_unix_timestamp: Optional[float] = None,
+    timeout_seconds: int = 50,
+    poll_interval: float = 0.5,
 ) -> Optional[str]:
     """
     Actively listens for a newly arrived Duo SMS message on macOS Messages.
     Accepts ANY incoming sender number and automatically extracts the 6 or 7 digit code.
     """
-    print(f"⏳ Listening for incoming 2FA SMS on macOS Messages (dynamic sender, timeout: {timeout_seconds}s)...")
+    print(f"⏳ Listening for incoming 2FA SMS on macOS Messages (timeout: {timeout_seconds}s, poll: {poll_interval}s)...")
     start_time = time.time()
 
     while time.time() - start_time < timeout_seconds:
-        # 1. High-speed direct SQLite query (<3ms)
-        res = get_latest_duo_sms_sqlite(after_unix_timestamp)
+        # 1. High-speed direct SQLite query (<3ms) using ROWID delta or timestamp
+        res = get_latest_duo_sms_sqlite(start_rowid=start_rowid, after_unix_timestamp=after_unix_timestamp)
         if res:
             code, ts, sender, raw_text = res
             elapsed = round(time.time() - start_time, 1)
@@ -174,7 +202,7 @@ def wait_for_duo_sms_passcode(
             return code
 
         # 2. imsg CLI fallback
-        res_imsg = get_latest_duo_sms_imsg(after_unix_timestamp)
+        res_imsg = get_latest_duo_sms_imsg(after_unix_timestamp=after_unix_timestamp)
         if res_imsg:
             code, ts, sender, raw_text = res_imsg
             elapsed = round(time.time() - start_time, 1)

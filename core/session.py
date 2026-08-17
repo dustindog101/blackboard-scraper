@@ -822,12 +822,15 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
             # Must target this exact text to avoid accidentally clicking "Duo Mobile passcode".
             login_stage = "selecting Duo text message passcode"
             print("   ↳ Selecting 'Text message passcode'...")
+            from core.sms_listener import get_current_max_rowid
+            start_rowid = get_current_max_rowid()
             try:
                 if not _click_exact_text_in_any_frame(page, "Text message passcode", timeout=8000):
                     raise PlaywrightTimeout("Text message passcode control not found")
                 page.wait_for_timeout(2000)
                 print("   ↳ Clicked 'Text message passcode'. Passcode is being sent...")
             except PlaywrightTimeout:
+
                 print("   ❌ Could not find 'Text message passcode' button.")
                 page.screenshot(path="duo_timeout_state.png")
                 print("   📸 Screenshot saved to: duo_timeout_state.png")
@@ -890,12 +893,13 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 def _sms_worker():
                     try:
                         from core.sms_listener import wait_for_duo_sms_passcode
-                        c = wait_for_duo_sms_passcode(trigger_time, timeout_seconds=45)
+                        c = wait_for_duo_sms_passcode(start_rowid=start_rowid, after_unix_timestamp=trigger_time, timeout_seconds=50)
                         if c and not stop_event.is_set():
                             result_queue.put(("sms", c))
                     except Exception as e:
                         pass
                 threading.Thread(target=_sms_worker, daemon=True).start()
+
 
                 # B. Telegram prompt
                 if tg_notifier:
