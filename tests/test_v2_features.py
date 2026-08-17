@@ -112,6 +112,27 @@ class TestTelegramFormatter(unittest.TestCase):
             self.assertEqual(extracted, expected)
 
 
+class TestSMSListener(unittest.TestCase):
+    def test_umbc_duo_sms_patterns(self):
+        from core.sms_listener import PASSCODE_REGEXES
+        sample_texts = [
+            ("UMBC SMS passcode (will expire in 5 minutes): 1191652", "1191652"),
+            ("UMBC SMS passcode (will expire in 5 minutes): 1985729", "1985729"),
+            ("Your Duo passcode is: 654321", "654321"),
+            ("Use passcode 885259 to log in", "885259"),
+            ("UMBC code: 1234567", "1234567"),
+        ]
+        for msg, expected in sample_texts:
+            matched_code = None
+            for pattern in PASSCODE_REGEXES:
+                m = pattern.search(msg)
+                if m:
+                    matched_code = m.group(1)
+                    break
+            self.assertEqual(matched_code, expected)
+
+
+
 class TestRouteOptimizer(unittest.TestCase):
     def test_blocked_extensions(self):
         self.assertIn("png", RouteOptimizer.BLOCKED_EXTENSIONS)

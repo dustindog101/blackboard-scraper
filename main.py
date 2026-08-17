@@ -302,7 +302,9 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     auth.add_argument("--login", action="store_true", help="Login via UMBC SSO (skips if session is already active)")
     auth.add_argument("--logout", action="store_true", help="Logout (clear cached session cookies)")
     auth.add_argument("--auto", "-a", action="store_true", help="With --login: automated SSO + Duo text passcode login")
+    auth.add_argument("--auto-exp", "--login-auto-exp", action="store_true", help="[EXPERIMENTAL] Fully automated SSO login with real-time macOS SMS Duo 2FA capture")
     auth.add_argument("--force", action="store_true", help="With --login: force re-login even if session exists")
+
     auth.add_argument("--username", "-u", help="Username for automated login (prompts if omitted)")
     auth.add_argument("--password", "-p", help="Password for automated login (prompts if omitted)")
     auth.add_argument("--duo-passcode", help="Provide 6-digit Duo SMS passcode directly via CLI")
@@ -500,12 +502,21 @@ async def main_async(args: argparse.Namespace) -> None:
             print("")
         return
 
-    if args.login:
-        if args.visible and not args.auto:
+    if args.login or args.auto_exp:
+        auto_exp_mode = args.auto_exp
+        if args.visible and not args.auto and not auto_exp_mode:
             await asyncio.to_thread(login, args.force, args.username, args.password, cdp)
         else:
-            await asyncio.to_thread(login_auto, username=args.username, password=args.password, headless=headless, cdp_url=cdp)
+            await asyncio.to_thread(
+                login_auto,
+                username=args.username,
+                password=args.password,
+                headless=headless,
+                cdp_url=cdp,
+                auto_exp=auto_exp_mode,
+            )
         return
+
 
     if args.logout:
         from core.session import logout as do_logout
