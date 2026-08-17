@@ -355,7 +355,12 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     tg.add_argument("--bot-restart", action="store_true", help="Restart background Telegram bot daemon")
 
 
+    # --- menubar & gui ---
+    gui = parser.add_argument_group("gui & menubar")
+    gui.add_argument("--menubar", action="store_true", help="Launch native macOS Menubar app for Blackboard & Telegram bot")
+
     # --- output formats & file saving ---
+
     output = parser.add_argument_group("output formats & file saving")
     output.add_argument("--json", action="store_true", help="Output standardized JSON to CLI stdout (No files saved)")
     output.add_argument("--out", metavar="FILE", help="Save JSON output directly to FILE")
@@ -465,6 +470,13 @@ async def main_async(args: argparse.Namespace) -> None:
             bot = SimpleTelegramBot()
             await bot.start_polling()
         return
+
+    # --- menubar app ---
+    if args.menubar:
+        from ui.menubar import run_menubar
+        run_menubar()
+        return
+
 
 
     # --- course listing & auth ---

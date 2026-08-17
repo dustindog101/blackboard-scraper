@@ -6,6 +6,7 @@ Unit and Integration Tests for Blackboard Ultra Scraper v2 features:
 - Standardized v2 Composite JSON schema generation
 - Dual-channel Duo passcode regex parsing
 - Lightweight HTTP session validation
+- Native macOS Menubar App structure
 - Due Date Aggregation logic and date parsing
 """
 
@@ -18,6 +19,7 @@ from core.export_json import build_item, build_export_doc, build_composite_schem
 from core.async_engine import RouteOptimizer, TaskProfile, get_optimal_concurrency
 from core.session import quick_check_session_http
 from telegram.formatter import escape_html, chunk_message, format_due_dates_list, format_grade_alert, format_announcement_alert
+from ui.menubar import BlackboardMenuBarApp
 
 
 class TestSmartConcurrency(unittest.TestCase):
@@ -127,6 +129,18 @@ class TestSessionValidation(unittest.TestCase):
         if is_valid:
             self.assertIsNotNone(user_data)
             self.assertTrue("id" in user_data or "studentId" in user_data or "userName" in user_data)
+
+
+class TestMenuBarApp(unittest.TestCase):
+    def test_menubar_instantiation(self):
+        app = BlackboardMenuBarApp()
+        self.assertIn("BB", app.title)
+        self.assertIsNotNone(app.item_user)
+        self.assertIsNotNone(app.menu_session_actions)
+        self.assertIsNotNone(app.menu_bot_controls)
+        self.assertIsNotNone(app.item_run_briefing)
+        self.assertIsNotNone(app.menu_due_dates)
+        self.assertIsNotNone(app.menu_grades)
 
 
 if __name__ == "__main__":
