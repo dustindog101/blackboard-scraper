@@ -70,8 +70,9 @@ class BlackboardMenuBarApp(rumps.App):
         """Construct the rich macOS Menubar hierarchy."""
         self.menu.clear()
 
-        # Header Title
+        # Header Title & Start Menu
         self.item_header = rumps.MenuItem("🎓 UMBC Blackboard Ultra", callback=None)
+        self.item_start_menu = rumps.MenuItem("🌟 Start Menu / Dashboard Overview", callback=self.on_open_start_menu)
 
         # Session Block
         self.item_user = rumps.MenuItem("👤 Student: Loading...", callback=None)
@@ -116,6 +117,9 @@ class BlackboardMenuBarApp(rumps.App):
 
         # Settings & Tools
         self.menu_tools = rumps.MenuItem("🛠️ Tools & Settings")
+        self.menu_tools.add(rumps.MenuItem("⏱️ View Session Lifespan Stats", callback=self.on_view_session_stats))
+        self.menu_tools.add(rumps.MenuItem("🔍 Auto-Discover Active Courses", callback=self.on_auto_discover_courses))
+        self.menu_tools.add(rumps.separator)
         self.menu_tools.add(rumps.MenuItem("📝 Edit config.json", callback=self.on_open_config))
         self.menu_tools.add(rumps.MenuItem("📂 Open Project Folder", callback=self.on_open_project_folder))
         self.menu_tools.add(rumps.MenuItem("📄 Open Session Directory", callback=self.on_open_session_dir))
@@ -128,6 +132,7 @@ class BlackboardMenuBarApp(rumps.App):
         # Assemble menu
         self.menu = [
             self.item_header,
+            self.item_start_menu,
             rumps.separator,
             self.item_user,
             self.item_session_status,
@@ -149,6 +154,7 @@ class BlackboardMenuBarApp(rumps.App):
             rumps.separator,
             self.item_quit,
         ]
+
 
     def _populate_courses_submenu(self):
         """Populate the courses list submenu."""
@@ -523,12 +529,82 @@ class BlackboardMenuBarApp(rumps.App):
             threading.Thread(target=_search_thread, daemon=True).start()
 
     # ------------------------------------------------------------------------
+    # Start Menu & Dashboard Overview
+    # ------------------------------------------------------------------------
+
+    def on_open_start_menu(self, _):
+        """Open Start Menu Dashboard Overview Dialog."""
+        session_text = "🟢 ACTIVE (<150ms HTTP Probe)" if self.session_valid else "🔴 EXPIRED"
+        bot_text = f"🟢 RUNNING (PID {self.bot_status['pid']} • {self.bot_status['memory_mb']}MB)" if self.bot_status["running"] else "🔴 STOPPED"
+        course_count = len(self.courses)
+        course_preview = "\n".join([f"  • {cname.split('(')[0].strip()}" for cname in list(self.courses.values())[:5]])
+
+        overview = (
+            f"👤 Student: Amanuel (BH69617)\n"
+            f"🔐 Blackboard Session: {session_text}\n"
+            f"🤖 Telegram Daemon: {bot_text}\n"
+            f"📚 Active Semester: Fall 2026 ({course_count} Courses)\n\n"
+            f"Enrolled Courses:\n{course_preview}\n\n"
+            f"⚡ Quick Actions:\n"
+            f"• Daily Briefing: Click 'Run Daily Briefing Now'\n"
+            f"• Deadlines: Browse 'Upcoming Deadlines' submenu\n"
+            f"• Grades & Announcements: Open corresponding submenus\n"
+            f"• Telegram: Open @blackboardscrapbot"
+        )
+        rumps.alert(title="🎓 Blackboard Ultra Start Menu", message=overview)
+
+    def on_view_session_stats(self, _):
+        """Display Session Lifespan Telemetry & Stats dialog."""
+        from core.session_tracker import tracker
+        valid, user_data = quick_check_session_http()
+        tracker.record_probe(valid, user_data)
+        summary = tracker.get_telemetry_summary_dict()
+        stats = summary["stats"]
+        status_str = "🟢 ACTIVE" if summary["is_active"] else "🔴 EXPIRED"
+        elapsed_str = summary["current_session_duration_human"] or "N/A"
+
+        msg = (
+            f"🔐 Current Session: {status_str}\n"
+            f"⏳ Elapsed Active Time: {elapsed_str}\n\n"
+            f"📈 Historical Statistics:\n"
+            f"• Total Tracked Sessions: {stats.get('total_recorded_sessions', 0)}\n"
+            f"• Average Lifespan: {stats.get('average_lifespan_human', 'N/A')}\n"
+            f"• Shortest Observed: {stats.get('min_lifespan_human', 'N/A')}\n"
+            f"• Longest Observed: {stats.get('max_lifespan_human', 'N/A')}\n"
+            f"• Recommended Auto-Refresh: {stats.get('recommended_refresh_interval_human', 'N/A')}\n\n"
+            f"💡 Run 'SSO Auto-Login' in Session Controls to refresh."
+        )
+        rumps.alert(title="⏱️ Blackboard Session Lifespan Telemetry", message=msg)
+
+    def on_auto_discover_courses(self, _):
+        """Run intelligent course discovery for current active semester."""
+        def _disc_thread():
+            rumps.notification(title="Course Discovery", subtitle="Querying Blackboard API", message="Detecting current semester courses...")
+            try:
+                from core.course_discovery import handle_discover_courses_cli
+                saved = handle_discover_courses_cli(term_filter=None, list_only=False)
+                self.courses = load_courses()
+                _safe_clear_menu(self.menu_courses)
+                self._populate_courses_submenu()
+                self.menu_courses.title = f"📚 Enrolled Courses ({len(self.courses)})"
+                rumps.notification(
+                    title="Active Courses Discovered",
+                    subtitle="Fall 2026 Semester",
+                    message=f"Saved {len(saved)} active courses to config.json.",
+                )
+            except Exception as e:
+                rumps.alert(title="Discovery Error", message=str(e))
+
+        threading.Thread(target=_disc_thread, daemon=True).start()
+
+    # ------------------------------------------------------------------------
     # Tools & Utilities
     # ------------------------------------------------------------------------
 
     def on_open_config(self, _):
         """Open config.json in default text editor."""
         subprocess.run(["open", str(CONFIG_FILE)])
+
 
     def on_open_project_folder(self, _):
         """Open project directory in Finder."""

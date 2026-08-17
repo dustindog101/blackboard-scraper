@@ -39,17 +39,19 @@ def load_courses() -> dict[str, str]:
     return DEFAULT_COURSES
 
 
-def save_courses(courses: dict[str, str]):
-    """Save courses to config.json."""
+def save_courses(courses: dict[str, str], overwrite: bool = False):
+    """Save courses to config.json with optional overwrite."""
     if not courses:
         return
-    # Merge with existing
     data = load_config()
-    existing = data.get("courses", {})
-    if not existing and data and not any(k in data for k in ["courses", "auto_login"]):
-        existing = data 
-    
-    existing.update(courses)
-    data["courses"] = existing
-    
+    if overwrite:
+        data["courses"] = courses
+    else:
+        existing = data.get("courses", {})
+        if not existing and data and not any(k in data for k in ["courses", "auto_login"]):
+            existing = data
+        existing.update(courses)
+        data["courses"] = existing
+
     CONFIG_FILE.write_text(json.dumps(data, indent=2))
+

@@ -200,13 +200,15 @@ class SimpleTelegramBot:
                 ],
                 [
                     {"text": "🔐 Check Session", "callback_data": "btn:check"},
-                    {"text": "📊 System Status", "callback_data": "btn:status"},
+                    {"text": "⏱️ Lifespan Stats", "callback_data": "btn:telemetry"},
                 ],
                 [
+                    {"text": "📊 System Status", "callback_data": "btn:status"},
                     {"text": "❓ Help & Manual", "callback_data": "btn:help"},
                 ],
             ]
         }
+
 
     @staticmethod
     def get_back_keyboard(refresh_action: Optional[str] = None) -> Dict[str, Any]:
@@ -272,6 +274,27 @@ class SimpleTelegramBot:
             else:
                 res_text = "❌ <b>Session EXPIRED or Missing</b>\nPlease run <code>python3 main.py --login</code> to re-authenticate."
             self.edit_message(chat_id, message_id, res_text, reply_markup=self.get_back_keyboard(refresh_action="check"))
+
+        elif data == "btn:telemetry":
+            from core.session_tracker import tracker
+            summary = tracker.get_telemetry_summary_dict()
+            stats = summary["stats"]
+            status_icon = "🟢 ACTIVE" if summary["is_active"] else "🔴 EXPIRED"
+            duration_str = summary["current_session_duration_human"] or "N/A"
+            res_text = (
+                f"⏱️ <b>Blackboard Session Telemetry</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🔐 <b>Status:</b> {status_icon}\n"
+                f"⏳ <b>Elapsed:</b> <code>{duration_str}</code>\n\n"
+                f"📊 <b>Historical Longevity:</b>\n"
+                f"• Total Tracked: <code>{stats.get('total_recorded_sessions', 0)}</code>\n"
+                f"• Avg Lifespan: <code>{stats.get('average_lifespan_human', 'N/A')}</code>\n"
+                f"• Shortest: <code>{stats.get('min_lifespan_human', 'N/A')}</code>\n"
+                f"• Longest: <code>{stats.get('max_lifespan_human', 'N/A')}</code>\n"
+                f"• Optimal Refresh: <code>{stats.get('recommended_refresh_interval_human', 'N/A')}</code>"
+            )
+            self.edit_message(chat_id, message_id, res_text, reply_markup=self.get_back_keyboard(refresh_action="telemetry"))
+
 
         elif data in ("btn:briefing", "btn:due_7d", "btn:grades", "btn:announcements", "btn:outline"):
             action_labels = {
@@ -511,6 +534,27 @@ class SimpleTelegramBot:
                     if mid:
                         self.edit_message(chat_id, mid, f"❌ <b>Search Failed:</b> <code>{escape_html(str(e))}</code>", reply_markup=self.get_back_keyboard())
 
+            elif cmd in ("/session", "/telemetry", "/stats"):
+                from core.session_tracker import tracker
+                summary = tracker.get_telemetry_summary_dict()
+                stats = summary["stats"]
+                status_icon = "🟢 ACTIVE" if summary["is_active"] else "🔴 EXPIRED"
+                duration_str = summary["current_session_duration_human"] or "N/A"
+                text = (
+                    f"⏱️ <b>Blackboard Session Telemetry</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🔐 <b>Status:</b> {status_icon}\n"
+                    f"⏳ <b>Elapsed:</b> <code>{duration_str}</code>\n\n"
+                    f"📊 <b>Historical Longevity:</b>\n"
+                    f"• Total Tracked: <code>{stats.get('total_recorded_sessions', 0)} sessions</code>\n"
+                    f"• Avg Lifespan: <code>{stats.get('average_lifespan_human', 'N/A')}</code>\n"
+                    f"• Shortest: <code>{stats.get('min_lifespan_human', 'N/A')}</code>\n"
+                    f"• Longest: <code>{stats.get('max_lifespan_human', 'N/A')}</code>\n"
+                    f"• Optimal Refresh: <code>{stats.get('recommended_refresh_interval_human', 'N/A')}</code>\n\n"
+                    f"💡 <i>Run /login to refresh session cookies.</i>"
+                )
+                self.send_message(chat_id, text, reply_markup=self.get_back_keyboard())
+
             elif cmd == "/watch":
                 interval = int(args[0]) if args and args[0].isdigit() else 30
                 self.watch_interval = max(interval, 5) * 60
@@ -529,26 +573,19 @@ class SimpleTelegramBot:
     # ------------------------------------------------------------------------
 
     async def _periodic_watch_loop(self):
-        """Background loop that monitors session health and checks for updates."""
+        """Background loop that monitors session health and tracks lifespan telemetry."""
+        from core.session_tracker import tracker
         while self.running:
             try:
-                # Check session health instantaneously
-                valid, _ = quick_check_session_http()
-                if self.last_session_valid is not None and self.last_session_valid and not valid:
-                    logger.warning("Session expired during background monitoring.")
-                    if self.admin_chat_id:
-                        self.notifier.send_raw_message(
-                            "🚨 <b>Blackboard Session Expired</b>\n"
-                            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            "Your Blackboard session has expired.\n"
-                            "Please run <code>python3 main.py --login</code> to re-authenticate."
-                        )
-                elif self.last_session_valid is False and valid:
-                    logger.info("Session restored during background monitoring.")
-                    if self.admin_chat_id:
-                        self.notifier.send_raw_message("✅ <b>Blackboard Session Restored</b>\nBackground monitors active.")
+                # Check session health instantaneously & track lifespan
+                valid, user_data = quick_check_session_http()
+                state_changed, alert_msg = tracker.record_probe(valid, user_data)
+
+                if state_changed and alert_msg and self.admin_chat_id:
+                    self.notifier.send_raw_message(alert_msg)
 
                 self.last_session_valid = valid
+
 
                 # Periodic content scrape if session is valid
                 if valid:
@@ -623,7 +660,32 @@ class SimpleTelegramBot:
         self.running = True
         self.watch_task = asyncio.create_task(self._periodic_watch_loop())
 
+        # Send rich startup notification card to admin
+        if self.admin_chat_id:
+            try:
+                valid, user_data = quick_check_session_http()
+                session_badge = "🟢 ACTIVE (<120ms)" if valid else "🔴 EXPIRED"
+                mem_mb = get_process_memory_mb(os.getpid())
+                courses = load_courses()
+                course_lines = "\n".join([f"• <code>{cid}</code>: {cname.split('(')[0].strip()}" for cid, cname in list(courses.items())[:5]])
+
+                startup_text = (
+                    "🚀 <b>Blackboard Scraper Bot Online!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "👤 <b>Student:</b> Amanuel (<code>BH69617</code>)\n"
+                    f"🔐 <b>Blackboard Session:</b> {session_badge}\n"
+                    f"📚 <b>Active Semester:</b> Fall 2026 ({len(courses)} Courses)\n"
+                    f"🧠 <b>Memory (RSS):</b> <code>{mem_mb} MB</code> (PID {os.getpid()})\n\n"
+                    f"<b>Enrolled Courses:</b>\n"
+                    f"{course_lines}\n\n"
+                    "💡 <i>Tap /menu or the buttons below for instant briefing, grades & due dates.</i>"
+                )
+                self.send_message(self.admin_chat_id, startup_text, reply_markup=self.get_main_menu_keyboard())
+            except Exception as e:
+                logger.debug(f"Startup notify notice: {e}")
+
         backoff_seconds = 2.0
+
 
         try:
             while self.running:

@@ -308,12 +308,17 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     auth.add_argument("--duo-passcode", help="Provide 6-digit Duo SMS passcode directly via CLI")
     auth.add_argument("--check-session", action="store_true", help="Test if current session cookies are valid")
     auth.add_argument("--session-info", action="store_true", help="Show session creation & last used timestamps")
+    auth.add_argument("--session-stats", "--session-telemetry", action="store_true", help="Show session longevity statistics and average lifespan telemetry")
     auth.add_argument("--debug", action="store_true", help="Print debug output (use with --check-session)")
+
 
     # --- discovery ---
     disc = parser.add_argument_group("course discovery")
-    disc.add_argument("--discover", action="store_true", help="Auto-discover and save enrolled courses from Blackboard")
+    disc.add_argument("--discover", action="store_true", help="Auto-discover and intelligently save current active semester courses")
+    disc.add_argument("--term", metavar="TERM", help="With --discover: filter academic term (e.g. 'current', 'FA2026', 'SP2026', 'all')")
+    disc.add_argument("--list-terms", action="store_true", help="List all enrolled academic terms and courses without modifying config.json")
     disc.add_argument("--courses", action="store_true", help="List configured courses and IDs")
+
 
     # --- scrapers ---
     scrapers = parser.add_argument_group("scrapers & features")
@@ -376,45 +381,49 @@ clean terminal UI by default, and standardized v2 JSON schemas.
 # Discovery Subcommand
 # ---------------------------------------------------------------------------
 
-def _handle_discover_courses(headless: bool, cdp: str | None) -> None:
-    if not _require_session(cdp):
-        return
-    print("🔍 Discovering enrolled courses...", file=sys.stderr)
-    with sync_playwright() as p:
-        ctx, page = _launch_context(p, headless, cdp)
-        from scrapers.base import _navigate_and_check_page
-
-        url = f"{BLACKBOARD_BASE}/ultra/course"
-        if not _navigate_and_check_page(page, url):
-            ctx.close()
+def _handle_discover_courses(term_filter: str | None = None, list_only: bool = False, headless: bool = True, cdp: str | None = None) -> None:
+    from core.course_discovery import handle_discover_courses_cli
+    res = handle_discover_courses_cli(term_filter=term_filter, list_only=list_only)
+    if not res and not list_only:
+        if not _require_session(cdp):
             return
+        print("🔍 Attempting fallback browser course discovery...", file=sys.stderr)
+        with sync_playwright() as p:
+            ctx, page = _launch_context(p, headless, cdp)
+            from scrapers.base import _navigate_and_check_page
 
-        page.wait_for_timeout(3000)
-        page.wait_for_selector(".course-element-card", timeout=15_000)
+            url = f"{BLACKBOARD_BASE}/ultra/course"
+            if not _navigate_and_check_page(page, url):
+                ctx.close()
+                return
 
-        discovered = page.evaluate(
-            """() => {
-                const results = {};
-                document.querySelectorAll('.course-element-card').forEach(el => {
-                    const titleEl = el.querySelector('.js-course-title-element');
-                    const courseId = el.getAttribute('data-course-id');
-                    if (titleEl && courseId) {
-                        results[courseId] = titleEl.innerText.trim();
-                    }
-                });
-                return results;
-            }"""
-        )
+            page.wait_for_timeout(3000)
+            page.wait_for_selector(".course-element-card", timeout=15_000)
 
-        if discovered:
-            print(f"   ✅ Found {len(discovered)} courses:", file=sys.stderr)
-            for cid, cname in discovered.items():
-                print(f"      {cid}: {cname}", file=sys.stderr)
-            save_courses(discovered)
-            print("   💾 Saved to config.json", file=sys.stderr)
-        else:
-            print("   ❌ No courses found.", file=sys.stderr)
-        ctx.close()
+            discovered = page.evaluate(
+                """() => {
+                    const results = {};
+                    document.querySelectorAll('.course-element-card').forEach(el => {
+                        const titleEl = el.querySelector('.js-course-title-element');
+                        const courseId = el.getAttribute('data-course-id');
+                        if (titleEl && courseId) {
+                            results[courseId] = titleEl.innerText.trim();
+                        }
+                    });
+                    return results;
+                }"""
+            )
+
+            if discovered:
+                print(f"   ✅ Found {len(discovered)} courses via browser:", file=sys.stderr)
+                for cid, cname in discovered.items():
+                    print(f"      {cid}: {cname}", file=sys.stderr)
+                save_courses(discovered, overwrite=True)
+                print("   💾 Saved to config.json", file=sys.stderr)
+            else:
+                print("   ❌ No courses found.", file=sys.stderr)
+            ctx.close()
+
 
 
 # ---------------------------------------------------------------------------
@@ -493,11 +502,10 @@ async def main_async(args: argparse.Namespace) -> None:
 
     if args.login:
         if args.visible and not args.auto:
-            login(args.force, args.username, args.password, cdp)
+            await asyncio.to_thread(login, args.force, args.username, args.password, cdp)
         else:
-            login_auto(username=args.username, password=args.password, headless=headless, cdp_url=cdp)
+            await asyncio.to_thread(login_auto, username=args.username, password=args.password, headless=headless, cdp_url=cdp)
         return
-
 
     if args.logout:
         from core.session import logout as do_logout
@@ -529,12 +537,21 @@ async def main_async(args: argparse.Namespace) -> None:
         print("", file=sys.stderr)
         return
 
-    if args.discover:
-        _handle_discover_courses(headless, cdp)
+    if args.session_stats:
+        from core.session_tracker import tracker
+        is_valid, user_data = quick_check_session_http()
+        tracker.record_probe(is_valid, user_data)
+        print(tracker.format_cli_summary())
         return
+
+    if args.discover or args.list_terms:
+        await asyncio.to_thread(_handle_discover_courses, term_filter=args.term, list_only=args.list_terms, headless=headless, cdp=cdp)
+        return
+
 
     if not await _require_session_async(cdp):
         return
+
 
     # --- resolve target courses ---
     target_cids = resolve_target_courses(args.course, args.all, courses)

@@ -143,5 +143,47 @@ class TestMenuBarApp(unittest.TestCase):
         self.assertIsNotNone(app.menu_grades)
 
 
+class TestSessionTracker(unittest.TestCase):
+
+    def test_tracker_lifecycle_and_averages(self):
+        import tempfile
+        from pathlib import Path
+        from core.session_tracker import SessionTracker
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_path = Path(tmpdir) / "test_telemetry.json"
+            tracker = SessionTracker(test_path)
+
+            # 1. New session probe
+            changed, alert = tracker.record_probe(True, {"studentId": "BH69617"})
+            self.assertTrue(changed)
+            self.assertIn("session established", alert)
+            self.assertEqual(tracker.data["current_session"]["status"], "VALID")
+
+            # 2. Re-probe while still valid -> no state change
+            changed2, alert2 = tracker.record_probe(True, {"studentId": "BH69617"})
+            self.assertFalse(changed2)
+            self.assertIsNone(alert2)
+
+            # 3. Simulate passage of time and session expiration
+            tracker.data["current_session"]["login_time"] -= 36000  # 10 hours ago
+            changed3, alert3 = tracker.record_probe(False)
+            self.assertTrue(changed3)
+            self.assertIn("Session Expired", alert3)
+            self.assertIn("Lifespan", alert3)
+            self.assertEqual(len(tracker.data["history"]), 1)
+            self.assertEqual(tracker.data["current_session"]["status"], "EXPIRED")
+
+            # 4. Check statistics calculation
+            stats = tracker.data["stats"]
+            self.assertEqual(stats["total_recorded_sessions"], 1)
+            self.assertIn("h", stats["average_lifespan_human"])
+
+            # 5. Format CLI summary verification
+            cli_text = tracker.format_cli_summary()
+            self.assertIn("BLACKBOARD SESSION LIFESPAN TELEMETRY", cli_text)
+
+
 if __name__ == "__main__":
     unittest.main()
+
