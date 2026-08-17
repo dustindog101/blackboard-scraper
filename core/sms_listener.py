@@ -182,15 +182,16 @@ def get_latest_duo_sms_imsg(
 def wait_for_duo_sms_passcode(
     start_rowid: Optional[int] = None,
     after_unix_timestamp: Optional[float] = None,
-    timeout_seconds: int = 50,
+    timeout_seconds: int = 90,
     poll_interval: float = 0.5,
 ) -> Optional[str]:
     """
     Actively listens for a newly arrived Duo SMS message on macOS Messages.
     Accepts ANY incoming sender number and automatically extracts the 6 or 7 digit code.
     """
-    print(f"⏳ Listening for incoming 2FA SMS on macOS Messages (timeout: {timeout_seconds}s, poll: {poll_interval}s)...")
+    print(f"⏳ Real-time SMS Listener active (tracking chat.db ROWID > {start_rowid or 0}, timeout: {timeout_seconds}s)...")
     start_time = time.time()
+    last_ping = start_time
 
     while time.time() - start_time < timeout_seconds:
         # 1. High-speed direct SQLite query (<3ms) using ROWID delta or timestamp
@@ -198,7 +199,8 @@ def wait_for_duo_sms_passcode(
         if res:
             code, ts, sender, raw_text = res
             elapsed = round(time.time() - start_time, 1)
-            print(f"📩 \033[32mAuto-Detected SMS Code: [{code}]\033[0m (from sender '{sender}' in {elapsed}s)!")
+            print(f"\n📩 \033[1;32m[SMS Auto-Detected] Passcode: [{code}]\033[0m from '{sender}' (received in {elapsed}s)!")
+            print(f"   ↳ Text: \"{raw_text.strip()}\"")
             return code
 
         # 2. imsg CLI fallback
@@ -206,10 +208,18 @@ def wait_for_duo_sms_passcode(
         if res_imsg:
             code, ts, sender, raw_text = res_imsg
             elapsed = round(time.time() - start_time, 1)
-            print(f"📩 \033[32mAuto-Detected SMS Code via imsg: [{code}]\033[0m (from sender '{sender}' in {elapsed}s)!")
+            print(f"\n📩 \033[1;32m[SMS Auto-Detected via imsg] Passcode: [{code}]\033[0m from '{sender}' (received in {elapsed}s)!")
+            print(f"   ↳ Text: \"{raw_text.strip()}\"")
             return code
+
+        # Periodic status ping every 10 seconds
+        if time.time() - last_ping >= 10.0:
+            elapsed = round(time.time() - start_time)
+            print(f"   ↳ ⏳ Still waiting for Duo SMS passcode... ({elapsed}s / {timeout_seconds}s)")
+            last_ping = time.time()
 
         time.sleep(poll_interval)
 
-    print(f"⚠️  Timed out waiting for Duo SMS passcode after {timeout_seconds}s.")
+    print(f"\n⚠️  Timed out waiting for Duo SMS passcode after {timeout_seconds}s.")
     return None
+

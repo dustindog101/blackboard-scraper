@@ -893,12 +893,13 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 def _sms_worker():
                     try:
                         from core.sms_listener import wait_for_duo_sms_passcode
-                        c = wait_for_duo_sms_passcode(start_rowid=start_rowid, after_unix_timestamp=trigger_time, timeout_seconds=50)
+                        c = wait_for_duo_sms_passcode(start_rowid=start_rowid, after_unix_timestamp=trigger_time, timeout_seconds=90)
                         if c and not stop_event.is_set():
                             result_queue.put(("sms", c))
                     except Exception as e:
                         pass
                 threading.Thread(target=_sms_worker, daemon=True).start()
+
 
 
                 # B. Telegram prompt
