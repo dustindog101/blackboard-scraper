@@ -11,7 +11,7 @@ from playwright.sync_api import sync_playwright
 
 from core.config import BLACKBOARD_BASE, load_courses, save_courses
 from core.export_json import build_composite_schema, build_export_doc, build_item, write_export
-from core.session import _launch_context, _require_session, _require_session_async, check_session, check_session_async, login, login_auto
+from core.session import _launch_context, _require_session, _require_session_async, check_session, check_session_async, login, login_auto, quick_check_session_http
 from core.async_engine import AsyncSessionManager, AsyncCourseWorkerPool, EngineConfig, TaskProfile, get_optimal_concurrency
 
 # Scrapers
@@ -349,6 +349,11 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     tg = parser.add_argument_group("telegram integration")
     tg.add_argument("--telegram", action="store_true", help="Send briefing/results to configured Telegram chat")
     tg.add_argument("--bot", action="store_true", help="Start the interactive Telegram bot daemon")
+    tg.add_argument("--daemon", "-d", action="store_true", help="With --bot: run daemon detached in background")
+    tg.add_argument("--bot-status", action="store_true", help="Check running status, PID, and memory of Telegram bot daemon")
+    tg.add_argument("--bot-stop", action="store_true", help="Gracefully stop background Telegram bot daemon")
+    tg.add_argument("--bot-restart", action="store_true", help="Restart background Telegram bot daemon")
+
 
     # --- output formats & file saving ---
     output = parser.add_argument_group("output formats & file saving")
@@ -424,12 +429,43 @@ async def main_async(args: argparse.Namespace) -> None:
     courses = load_courses()
     os.environ["TMPDIR"] = "/tmp"
 
-    # --- telegram bot daemon ---
-    if args.bot:
-        from telegram.bot import SimpleTelegramBot
-        bot = SimpleTelegramBot()
-        await bot.start_polling()
+    # --- telegram bot daemon management ---
+    if args.bot_status:
+        from telegram.daemon import get_bot_status
+        status = get_bot_status()
+        if status["running"]:
+            is_valid, _ = quick_check_session_http()
+            sess_str = "✅ ACTIVE" if is_valid else "❌ EXPIRED"
+            print("\n🤖 Telegram Bot Daemon Status:")
+            print(f"  • State:       🟢 RUNNING (PID: {status['pid']})")
+            print(f"  • Memory:      {status['memory_mb']} MB (RSS)")
+            print(f"  • Session:     {sess_str}")
+            print(f"  • Courses:     {len(courses)} configured")
+            print(f"  • Log File:    {status['log_file']}\n")
+        else:
+            print("\n🤖 Telegram Bot Daemon: 🔴 STOPPED\n   Run `python3 main.py --bot -d` to launch in background.\n")
         return
+
+    if args.bot_stop:
+        from telegram.daemon import stop_bot_daemon
+        stop_bot_daemon()
+        return
+
+    if args.bot_restart:
+        from telegram.daemon import restart_bot_daemon
+        restart_bot_daemon()
+        return
+
+    if args.bot:
+        if args.daemon:
+            from telegram.daemon import start_bot_daemon
+            start_bot_daemon()
+        else:
+            from telegram.bot import SimpleTelegramBot
+            bot = SimpleTelegramBot()
+            await bot.start_polling()
+        return
+
 
     # --- course listing & auth ---
     if args.courses:

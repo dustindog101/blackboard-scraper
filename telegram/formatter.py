@@ -61,9 +61,33 @@ def format_help_telegram() -> str:
         "• /find <code>&lt;query&gt;</code> — Search content across all courses\n"
         "• /courses — List all enrolled courses and IDs\n"
         "• /check — Verify Blackboard session health\n"
+        "• /status — View bot daemon memory & engine metrics\n"
         "• /watch <code>[mins]</code> — Background monitoring daemon\n"
         "• /menu — Return to main interactive dashboard\n"
     )
+
+
+def format_bot_status_telegram(metrics: Dict[str, Any]) -> str:
+    """Format daemon health and memory metrics for Telegram."""
+    uptime_sec = int(metrics.get("uptime_sec", 0))
+    hours = uptime_sec // 3600
+    mins = (uptime_sec % 3600) // 60
+    secs = uptime_sec % 60
+    uptime_str = f"{hours}h {mins}m {secs}s" if hours else f"{mins}m {secs}s"
+
+    sess_icon = "✅ ACTIVE" if metrics.get("session_valid") else "❌ EXPIRED"
+    return (
+        "📊 <b>Bot Daemon Health & Metrics</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 <b>Status:</b> <code>RUNNING</code> (PID: <code>{metrics.get('pid')}</code>)\n"
+        f"⏱️ <b>Uptime:</b> <code>{uptime_str}</code>\n"
+        f"🧠 <b>Memory (RSS):</b> <code>{metrics.get('memory_mb', 0)} MB</code>\n"
+        f"🔐 <b>Blackboard Session:</b> <code>{sess_icon}</code>\n"
+        f"📚 <b>Courses Monitored:</b> <code>{metrics.get('total_courses', 0)}</code>\n"
+        f"🔔 <b>Watch Interval:</b> Every <code>{metrics.get('watch_mins', 30)} min</code>\n"
+        f"⚡ <b>Scraper Engine:</b> <code>Adaptive Async Pool</code>\n"
+    )
+
 
 
 def format_daily_briefing(briefing_data: Dict[str, Any]) -> List[str]:
