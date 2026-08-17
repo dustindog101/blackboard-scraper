@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -25,13 +24,12 @@ async def scrape_course_assignments_async(
     """
     courses = load_courses()
     course_name = courses.get(course_id, course_id)
-    print(f"📝 Deep-scraping assignments for {course_name}...")
 
     url = f"{BLACKBOARD_BASE}/ultra/courses/{course_id}/outline"
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=25_000)
     except Exception as e:
-        print(f"   ⚠️ Navigation error for {course_name}: {e}")
+        logger.debug(f"Navigation error for {course_name}: {e}")
         return []
 
     # Verify outline exists
@@ -42,12 +40,12 @@ async def scrape_course_assignments_async(
             "bb-course-outline",
             "div[role='tree']",
             "div:has-text(\"You can't access this course right now\")",
+            "div:has-text(\"Course is not currently available\")",
         ],
-        timeout=12_000,
+        timeout=10_000,
     )
 
-    if not matched_sel or "You can't access" in matched_sel:
-        print(f"   ℹ️  Course is currently closed or unavailable.")
+    if not matched_sel or "You can't access" in matched_sel or "not currently available" in matched_sel:
         return []
 
     # Expand any top-level folders to reveal assignments
@@ -67,16 +65,17 @@ async def scrape_course_assignments_async(
         const results = [];
         const seen = new Set();
 
-        document.querySelectorAll('bb-content-item, div[role="treeitem"], div.element-details').forEach(el => {
+        document.querySelectorAll('bb-content-item, div[role="treeitem"], div.element-details, li.item, li.clearfix').forEach(el => {
             const html = el.outerHTML.toLowerCase();
             const isAssessment = html.includes('assignment') || html.includes('assessment') ||
-                                 html.includes('quiz') || html.includes('test') || html.includes('duedate');
+                                 html.includes('quiz') || html.includes('test') || html.includes('duedate') ||
+                                 html.includes('project') || html.includes('homework') || html.includes('lab');
             if (!isAssessment) return;
 
             const linkEl = el.querySelector('a, button, [role="button"], span.title');
             const title = el.querySelector('h3, h4, span.title, [class*="itemName"]')?.innerText.trim() ||
-                          linkEl?.innerText.trim();
-            const analyticsId = el.getAttribute('data-analytics-id') || el.getAttribute('data-content-id') || title;
+                          linkEl?.innerText.trim() || el.innerText.trim().split('\\n')[0];
+            const analyticsId = el.getAttribute('data-analytics-id') || el.getAttribute('data-content-id') || el.id || title;
 
             if (title && !seen.has(analyticsId)) {
                 seen.add(analyticsId);
@@ -97,21 +96,16 @@ async def scrape_course_assignments_async(
     }""")
 
     if not assessment_links:
-        print(f"   ℹ️  No assignments detected on outline.")
         return []
 
-    print(f"   Found {len(assessment_links)} potential assignments. Inspecting details...")
     assignments: List[Dict[str, Any]] = []
 
     for item in assessment_links[:12]:  # Inspect up to 12 assessments
         title = item["title"]
-        print(f"   ↳ Inspecting: {title[:40]}...")
 
         try:
-            # Locate and click the item by title
             item_locator = page.locator(f"text={title}").first
             if not await item_locator.is_visible():
-                # Fallback to general item link
                 item_locator = page.locator(f"[data-analytics-id='{item['content_id']}']").first
 
             if not await item_locator.is_visible():
@@ -119,7 +113,6 @@ async def scrape_course_assignments_async(
 
             await item_locator.click(timeout=3000)
 
-            # Wait for drawer or details pane to mount
             drawer_sel, _ = await AdaptiveDOM.wait_for_any_selector(
                 page,
                 [
@@ -133,7 +126,6 @@ async def scrape_course_assignments_async(
             )
 
             if not drawer_sel:
-                # Direct outline inline item without drawer
                 assignments.append({
                     "title": title,
                     "due_date": item.get("due_date", ""),
@@ -148,31 +140,25 @@ async def scrape_course_assignments_async(
             drawer_data = await page.evaluate("""() => {
                 const drawer = document.querySelector('bb-drawer, aside[role="dialog"], div.panel-content') || document.body;
 
-                // Points possible
                 let points = '';
                 const pointsEl = drawer.querySelector('[data-analytics-id*="points"], [class*="pointsPossible"], [class*="score-pill"]');
                 if (pointsEl) points = pointsEl.innerText.trim();
 
-                // Due Date
                 let due = '';
                 const dueEl = drawer.querySelector('[data-analytics-id*="due-date"], [class*="dueDate"], .due-date-value');
                 if (dueEl) due = dueEl.innerText.replace(/due\\s*date[:\\s]*/i, '').trim();
 
-                // Submission / Attempts Status
                 let status = 'Unattempted';
                 let attempts = '';
                 const attemptsEl = drawer.querySelector('[class*="attemptsDetail"], [data-analytics-id*="attempts"]');
                 if (attemptsEl) attempts = attemptsEl.innerText.trim();
 
-                // Check for Timed Test Warning
                 const isTimed = !!drawer.querySelector('.time-limit-warning, [data-analytics-id*="time-limit"], span:has-text("time limit")');
 
-                // Instructions body
                 let instructions = '';
                 const instEl = drawer.querySelector('bb-rich-text-viewer, div.details-instructions, [class*="assessmentDescription"]');
                 if (instEl) instructions = instEl.innerText.trim();
 
-                // Attached Files
                 const attachments = [];
                 drawer.querySelectorAll('a[data-analytics-id*="file-download"], bb-attachment-item a, a[href*="bbcswebdav"]').forEach(a => {
                     const fname = a.innerText.trim();
@@ -217,8 +203,40 @@ async def scrape_course_assignments_async(
             await page.keyboard.press("Escape")
             continue
 
-    print(f"   ✅ Successfully extracted {len(assignments)} detailed assignments for {course_name}.")
     return assignments
+
+
+def format_assignments_summary(assignments: List[Dict[str, Any]], course_name: str, course_id: str = "") -> str:
+    """Formats assignments into a clean CLI string."""
+    lines = [
+        f"📝 Assignments & Assessments: {course_name} ({course_id})" if course_id else f"📝 Assignments & Assessments: {course_name}",
+        "━" * 50,
+    ]
+
+    if not assignments:
+        lines.append("  (No assignments found or course is currently closed)")
+        return "\n".join(lines)
+
+    for a in assignments:
+        timed = " ⏱️ [TIMED]" if a.get("is_timed_test") else ""
+        lines.append(f"\n• {a['title']}{timed}")
+        if a.get("due_date"):
+            lines.append(f"  └ Due Date: {a['due_date']}")
+        if a.get("points_possible"):
+            lines.append(f"  └ Points: {a['points_possible']}")
+        if a.get("submission_status"):
+            lines.append(f"  └ Status: {a['submission_status']}")
+        if a.get("attempts"):
+            lines.append(f"  └ Attempts: {a['attempts']}")
+        if a.get("instructions"):
+            snippet = a['instructions'].replace("\n", " ").strip()
+            if len(snippet) > 140:
+                snippet = snippet[:137] + "..."
+            lines.append(f"  └ Instructions: {snippet}")
+        for att in a.get("attachments", []):
+            lines.append(f"  └ 📎 File: {att['filename']} ({att['url']})")
+
+    return "\n".join(lines)
 
 
 def save_assignments(assignments: List[Dict[str, Any]], course_id: str) -> Path:
@@ -263,5 +281,4 @@ def save_assignments(assignments: List[Dict[str, Any]], course_id: str) -> Path:
             lines.append("\n---")
 
     filepath.write_text("\n".join(lines))
-    print(f"   💾 Assignments saved to: {filepath.name}")
     return filepath

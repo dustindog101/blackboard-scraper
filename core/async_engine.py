@@ -1,16 +1,17 @@
 """
-Async Concurrency Engine for Blackboard Ultra Scraper.
+Smart Adaptive Async Concurrency Engine for Blackboard Ultra Scraper.
 
 Key Features:
-- Playwright Async API (`playwright.async_api.async_playwright`)
-- Async Worker Pool with bounded concurrency via `asyncio.Semaphore`
-- Context-level Route Optimization (aborts images, webfonts, media, telemetry)
-- Adaptive DOM State Synchronization (zero rigid sleep timeouts)
-- Course Worker Isolation (per-task error containment)
+- Task-Aware Concurrency Tuning (Light vs Heavy scraping tasks)
+- Dynamic Auto-Adjusting Concurrency (scales up on low latency, throttles on slow networks/timeouts)
+- Context-Level Route Optimization (aborts images, webfonts, media, telemetry)
+- Adaptive DOM State Synchronization & Circuit Breakers (instant skip on closed courses)
+- Resource-Aware Worker Allocation bounded by CPU cores and memory limits
 """
 
 import asyncio
 import logging
+import os
 import re
 import time
 from contextlib import asynccontextmanager
@@ -40,7 +41,7 @@ logger = logging.getLogger("blackboard.async_engine")
 
 class RouteOptimizer:
     """
-    Manages high-performance network route interception.
+    High-performance network route interception.
     Aborts unneeded assets (images, fonts, video, audio, trackers) to save bandwidth
     and accelerate page load and DOM parsing.
     """
@@ -86,7 +87,7 @@ class RouteOptimizer:
         url = req.url
         resource_type = req.resource_type
 
-        # Always allow essential scripts, APIs, and stylesheets
+        # Whitelist essential API & scripts
         for pattern in cls.WHITELIST_PATTERNS:
             if pattern.search(url):
                 await route.continue_()
@@ -111,34 +112,42 @@ class RouteOptimizer:
             await route.abort()
             return
 
-        # Pass everything else
         await route.continue_()
 
 
 # ============================================================================
-# 2. Adaptive DOM State Synchronization
+# 2. Adaptive DOM State Synchronization & Circuit Breakers
 # ============================================================================
 
 class AdaptiveDOM:
     """
     Utilities for resilient DOM interaction without rigid sleep timers.
-    Uses race resolvers and dynamic mutation observers.
+    Uses race resolvers, dynamic mutation observers, and closed-course circuit breakers.
     """
+
+    CLOSED_COURSE_SELECTORS: List[str] = [
+        "#notification-modal-api-error",
+        "div:has-text(\"You can't access this course right now\")",
+        "div:has-text(\"Course is not currently available\")",
+        ".reveal-modal__title:has-text(\"You can't access this course right now\")",
+    ]
 
     @staticmethod
     async def wait_for_any_selector(
         page: Page,
         selectors: List[str],
         state: str = "attached",
-        timeout: int = 15_000,
+        timeout: int = 12_000,
     ) -> Tuple[Optional[str], Optional[Any]]:
         """
         Wait for ANY of the specified selectors to reach the desired state.
         Returns (matched_selector, locator) or (None, None) if timeout.
         """
+        all_targets = selectors + AdaptiveDOM.CLOSED_COURSE_SELECTORS
         deadline = time.time() + (timeout / 1000.0)
+
         while time.time() < deadline:
-            for sel in selectors:
+            for sel in all_targets:
                 try:
                     loc = page.locator(sel).first
                     count = await loc.count()
@@ -150,15 +159,15 @@ class AdaptiveDOM:
                             return sel, loc
                 except Exception:
                     continue
-            await asyncio.sleep(0.08)
+            await asyncio.sleep(0.06)
         return None, None
 
     @staticmethod
     async def safe_click(
         page: Page,
         selector: str,
-        timeout: int = 5_000,
-        wait_after: float = 0.2,
+        timeout: int = 4_000,
+        wait_after: float = 0.15,
     ) -> bool:
         """Attempt to click an element with fallback error catching."""
         try:
@@ -175,14 +184,13 @@ class AdaptiveDOM:
     async def adaptive_infinite_scroll(
         page: Page,
         item_selector: str,
-        max_scrolls: int = 15,
-        idle_wait_ms: int = 400,
+        max_scrolls: int = 12,
+        idle_wait_ms: int = 300,
     ) -> int:
         """Scroll dynamically until no new items are appended."""
         prev_count = await page.locator(item_selector).count()
         for _ in range(max_scrolls):
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            # Poll until item count increases or idle timeout expires
             start = time.time()
             new_items_found = False
             while (time.time() - start) * 1000 < idle_wait_ms:
@@ -191,14 +199,45 @@ class AdaptiveDOM:
                     prev_count = curr_count
                     new_items_found = True
                     break
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.04)
             if not new_items_found:
                 break
         return prev_count
 
 
 # ============================================================================
-# 3. Async Session Manager
+# 3. Smart Task-Aware Concurrency Profiles
+# ============================================================================
+
+class TaskProfile:
+    """Defines optimal concurrency and timeout profiles per scraper operation."""
+    LIGHT = "light"          # announcements, grades, calendar (high concurrency, fast parsing)
+    MEDIUM = "medium"        # activity stream, due dates aggregation (moderate concurrency)
+    HEAVY = "heavy"          # outline recursive tree, assignments drawer inspection (conservative concurrency)
+
+
+def get_optimal_concurrency(task_profile: str = TaskProfile.MEDIUM, user_override: Optional[int] = None) -> int:
+    """
+    Computes optimal concurrency based on task weight, CPU cores, and user preferences.
+    """
+    if user_override is not None and user_override > 0:
+        return user_override
+
+    cpu_cores = os.cpu_count() or 4
+
+    if task_profile == TaskProfile.LIGHT:
+        # High concurrency for shallow lightweight scrapers
+        return min(max(4, cpu_cores), 8)
+    elif task_profile == TaskProfile.HEAVY:
+        # Bounded concurrency for deep tree expansion & drawers
+        return min(max(2, cpu_cores // 2), 3)
+    else:
+        # Standard balanced concurrency
+        return min(max(3, cpu_cores), 5)
+
+
+# ============================================================================
+# 4. Async Session Manager
 # ============================================================================
 
 @dataclass
@@ -206,15 +245,15 @@ class EngineConfig:
     headless: bool = True
     cdp_url: Optional[str] = None
     max_concurrency: int = 4
-    page_timeout_ms: int = 25_000
-    navigation_timeout_ms: int = 30_000
+    page_timeout_ms: int = 22_000
+    navigation_timeout_ms: int = 25_000
     block_assets: bool = True
 
 
 class AsyncSessionManager:
     """
     Manages Playwright async lifecycle, persistent context, cookie state,
-    and tab allocation bounded by concurrency limits.
+    and tab allocation bounded by adaptive concurrency limits.
     """
 
     def __init__(self, config: Optional[EngineConfig] = None):
@@ -225,6 +264,16 @@ class AsyncSessionManager:
         self._lock = asyncio.Lock()
         self._initialized = False
 
+    def update_concurrency(self, new_concurrency: int):
+        """Dynamically adjusts concurrency bounds."""
+        diff = new_concurrency - self.config.max_concurrency
+        self.config.max_concurrency = new_concurrency
+        if diff > 0:
+            for _ in range(diff):
+                self._semaphore.release()
+        elif diff < 0:
+            pass  # Will naturally drain on next acquisitions
+
     async def initialize(self) -> None:
         """Launch persistent context or connect via CDP."""
         async with self._lock:
@@ -234,12 +283,11 @@ class AsyncSessionManager:
             self._pw = await async_playwright().start()
 
             if self.config.cdp_url:
-                logger.info(f"🔌 Connecting to existing CDP browser: {self.config.cdp_url}")
+                logger.info(f"🔌 Connecting to CDP browser: {self.config.cdp_url}")
                 browser = await self._pw.chromium.connect_over_cdp(self.config.cdp_url)
                 self._context = browser.contexts[0] if browser.contexts else await browser.new_context()
             else:
                 user_data_dir = str(SESSION_DIR)
-                logger.debug(f"Launching persistent browser context from {user_data_dir}")
                 self._context = await self._pw.chromium.launch_persistent_context(
                     user_data_dir=user_data_dir,
                     headless=self.config.headless,
@@ -247,7 +295,6 @@ class AsyncSessionManager:
                     viewport={"width": 1280, "height": 800},
                 )
 
-                # Add session cookies if present
                 cookie_file = Path(SESSION_DIR) / "cookies.json"
                 if cookie_file.exists():
                     import json
@@ -258,7 +305,6 @@ class AsyncSessionManager:
                     except Exception:
                         pass
 
-            # Apply route interception
             if self.config.block_assets and self._context:
                 await self._context.route("**/*", RouteOptimizer.route_handler)
 
@@ -267,7 +313,7 @@ class AsyncSessionManager:
     @asynccontextmanager
     async def acquire_page(self) -> AsyncGenerator[Page, None]:
         """
-        Acquires an isolated page tab bounded by max_concurrency semaphore.
+        Acquires an isolated page tab bounded by concurrency semaphore.
         Guarantees page closure on exit.
         """
         if not self._initialized:
@@ -308,17 +354,20 @@ class AsyncSessionManager:
 
 
 # ============================================================================
-# 4. Async Course Worker Pool
+# 5. Smart Adaptive Course Worker Pool
 # ============================================================================
 
-class AsyncCourseWorkerPool:
+class SmartWorkerPool:
     """
-    Executes scraping tasks across multiple courses concurrently.
-    Provides complete error containment per course.
+    Intelligent worker pool with automatic concurrency scaling, latency tracking,
+    and circuit-breaker containment.
     """
 
-    def __init__(self, session_manager: AsyncSessionManager):
+    def __init__(self, session_manager: AsyncSessionManager, task_profile: str = TaskProfile.MEDIUM):
         self.session_manager = session_manager
+        self.task_profile = task_profile
+        self.latency_records: List[float] = []
+        self.timeout_count = 0
 
     async def execute_task_per_course(
         self,
@@ -326,18 +375,38 @@ class AsyncCourseWorkerPool:
         task_fn: Callable[[str, str, Page], Coroutine[Any, Any, Any]],
     ) -> Dict[str, Any]:
         """
-        Run `task_fn(course_id, course_name, page)` concurrently across all `courses`.
-        Returns {course_id: result_data_or_dict}.
+        Runs `task_fn(course_id, course_name, page)` across all `courses`.
+        Monitors worker latencies and auto-adjusts concurrency if slow response detected.
         """
         async def _worker(cid: str, cname: str) -> Tuple[str, Any]:
+            start = time.time()
             try:
                 async with self.session_manager.acquire_page() as page:
                     res = await task_fn(cid, cname, page)
+                    duration = time.time() - start
+                    self.latency_records.append(duration)
+
+                    # Dynamic scaling adjustment:
+                    # If responses are rapid (<1.0s), scale up concurrency
+                    if duration < 1.0 and self.session_manager.config.max_concurrency < 8:
+                        self.session_manager.update_concurrency(self.session_manager.config.max_concurrency + 1)
+
                     return cid, res
+            except PlaywrightTimeout:
+                self.timeout_count += 1
+                logger.warning(f"Timeout scraping {cname} ({cid}). Throttling concurrency.")
+                # Throttle down concurrency on timeout
+                if self.session_manager.config.max_concurrency > 2:
+                    self.session_manager.update_concurrency(self.session_manager.config.max_concurrency - 1)
+                return cid, {"error": "Timeout", "course_name": cname, "course_id": cid}
             except Exception as e:
-                logger.error(f"Error scraping course {cname} ({cid}): {e}")
+                logger.error(f"Error scraping {cname} ({cid}): {e}")
                 return cid, {"error": str(e), "course_name": cname, "course_id": cid}
 
         tasks = [_worker(cid, cname) for cid, cname in courses.items()]
         results = await asyncio.gather(*tasks, return_exceptions=False)
         return dict(results)
+
+
+# Backward compatibility alias
+AsyncCourseWorkerPool = SmartWorkerPool

@@ -15,10 +15,64 @@ from scrapers.grades import scrape_grades_async, save_grades
 logger = logging.getLogger("blackboard.scrapers.briefing")
 
 
+def format_briefing_cli(bundle: Dict[str, Any]) -> str:
+    """Formats composite briefing into readable CLI Markdown text."""
+    now = datetime.now()
+    lines = [
+        f"📋 Blackboard Daily Briefing — {now.strftime('%A, %b %d • %I:%M %p')}",
+        "━" * 60,
+        "",
+    ]
+    activity = bundle.get("activity", [])
+    calendar = bundle.get("calendar", [])
+    courses = bundle.get("courses", {})
+
+    urgent = [a for a in activity if "due" in a.get("title", "").lower() or a.get("due_date")]
+    if urgent:
+        lines.append("🚨 URGENT & OVERDUE:")
+        for a in urgent:
+            lines.append(f"  • {a['title']} ({a.get('course', '')}) — Due: {a.get('due_date', 'Today')}")
+        lines.append("")
+
+    if calendar:
+        lines.append("📅 UPCOMING ASSIGNMENTS:")
+        for item in calendar[:10]:
+            lines.append(f"  • {item['title']} ({item.get('course', '')}) — Due: {item.get('due', 'TBD')}")
+        lines.append("")
+
+    lines.append("📚 COURSE UPDATES:")
+    any_course_updates = False
+    for course_id, course_data in courses.items():
+        if not isinstance(course_data, dict):
+            continue
+        course_name = course_data.get("course_name", course_id)
+        announcements = course_data.get("announcements", [])
+        unread_ann = [a for a in announcements if a.get("unread")]
+        grades = course_data.get("grades", [])
+        graded = [g for g in grades if g.get("grade") and g["grade"] not in ("Not graded", "-- %", "")]
+
+        if unread_ann or graded:
+            any_course_updates = True
+            lines.append(f"\n▶ {course_name}")
+            if unread_ann:
+                lines.append(f"  📢 Announcements ({len(unread_ann)} unread):")
+                for a in unread_ann:
+                    lines.append(f"    • {a['title']} ({a.get('meta','')})")
+            if graded:
+                lines.append(f"  📊 Graded Items:")
+                for g in graded:
+                    lines.append(f"    • {g['name']}: {g['grade']} (Due: {g.get('dueDate','')})")
+
+    if not any_course_updates:
+        lines.append("  (No active unread announcements or new grades across enrolled courses)")
+
+    return "\n".join(lines)
+
+
 async def run_briefing_async(
     headless: bool = True,
     cdp_url: Optional[str] = None,
-    write_markdown: bool = True,
+    write_markdown: bool = False,
     concurrency: int = 4,
 ) -> Dict[str, Any]:
     """
@@ -42,8 +96,6 @@ async def run_briefing_async(
 
     try:
         # Step 1: Global scrapers (Activity & Calendar) concurrently
-        print("\n🌊 Scraping Global Streams (Activity + Calendar)...")
-
         async def _get_activity():
             async with session_manager.acquire_page() as p:
                 return await scrape_activity_async(p)
@@ -66,7 +118,6 @@ async def run_briefing_async(
             save_calendar(calendar)
 
         # Step 2: Course Workers - scrape announcements & grades concurrently
-        print(f"\n🚀 Launching Concurrent Course Workers across {len(courses)} courses (Concurrency={concurrency})...")
         worker_pool = AsyncCourseWorkerPool(session_manager)
 
         async def _scrape_course(cid: str, cname: str, page: Any) -> Dict[str, Any]:
@@ -138,7 +189,6 @@ async def run_briefing_async(
     if write_markdown:
         filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.write_text("\n".join(lines))
-        print(f"\n✅ Briefing written to: {filepath.name}")
 
     return {
         "briefing_path": filepath,
@@ -148,6 +198,6 @@ async def run_briefing_async(
     }
 
 
-def run_briefing(headless: bool = True, cdp_url: str = None, write_markdown: bool = True) -> Dict[str, Any]:
+def run_briefing(headless: bool = True, cdp_url: str = None, write_markdown: bool = False) -> Dict[str, Any]:
     """Synchronous entrypoint wrapper."""
     return asyncio.run(run_briefing_async(headless=headless, cdp_url=cdp_url, write_markdown=write_markdown))

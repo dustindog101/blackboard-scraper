@@ -31,11 +31,8 @@ async def aggregate_due_dates_async(
     Aggregates deadlines across global calendar, per-course gradebooks, and outlines.
     Deduplicates records and applies window filters.
     """
-    print(f"📅 Aggregating cross-course due dates (Window: {window_filter})...")
-
     # 1. Scrape Global Calendar
     calendar_items = await scrape_calendar_async(page)
-    print(f"   Calendar returned {len(calendar_items)} items.")
 
     # 2. Combine with gradebook items for detailed submission status
     combined: Dict[str, Dict[str, Any]] = {}
@@ -56,21 +53,39 @@ async def aggregate_due_dates_async(
         }
 
     # 3. Filter items by window
-    now = datetime.now()
     results: List[Dict[str, Any]] = []
-
     for item in combined.values():
         if exclude_completed and item.get("status", "").lower() in ("graded", "submitted"):
             continue
-
         results.append(item)
 
-    print(f"   ✅ Aggregated {len(results)} distinct upcoming assignments.")
     return results
 
 
+def format_due_dates_table(items: List[Dict[str, Any]], window_filter: str = "7d") -> str:
+    """Formats aggregated due dates into a clean CLI table."""
+    lines = [
+        f"📅 Upcoming Deadlines & Due Dates ({window_filter.upper()})",
+        "━" * 60,
+    ]
+    if not items:
+        lines.append("  (No upcoming deadlines found in this window)")
+        return "\n".join(lines)
+
+    lines.append(f"{'Course':<25} | {'Assignment':<35} | {'Due Date':<20} | {'Status'}")
+    lines.append("-" * 25 + "-+-" + "-" * 35 + "-+-" + "-" * 20 + "-+-" + "-" * 10)
+    for it in items:
+        c = (it.get("course") or "Unknown")[:24]
+        t = (it.get("title") or "Untitled")[:34]
+        d = (it.get("due_date") or "TBD")[:19]
+        s = it.get("status") or "Upcoming"
+        lines.append(f"{c:<25} | {t:<35} | {d:<20} | {s}")
+
+    return "\n".join(lines)
+
+
 def save_due_dates(items: List[Dict[str, Any]], window_filter: str = "7d") -> Path:
-    """Saves due dates report to output/due_dates.md."""
+    """Saves due dates report to output/calendar/due_dates.md."""
     out_dir = ensure_output_dir("calendar")
     filepath = out_dir / "due_dates.md"
 
@@ -93,5 +108,4 @@ def save_due_dates(items: List[Dict[str, Any]], window_filter: str = "7d") -> Pa
             lines.append(f"| **{c}** | {t} | `{d}` | {s} |")
 
     filepath.write_text("\n".join(lines))
-    print(f"   💾 Saved due dates schedule to: {filepath.name}")
     return filepath

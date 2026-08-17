@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -19,21 +18,21 @@ async def scrape_course_outline_async(
     max_depth: int = 4,
 ) -> List[Dict[str, Any]]:
     """
-    Scrapes full course outline (folders, learning modules, documents, files, assignments).
-    Expands nested accordions recursively up to max_depth.
+    Scrapes full course outline across Blackboard Ultra and Classic layouts.
+    Traverses learning modules, folders, documents, syllabi, attachments, and external links.
     """
     courses = load_courses()
     course_name = courses.get(course_id, course_id)
-    print(f"📁 Scraping Course Outline for {course_name}...")
 
+    # Step 1: Navigate to Ultra Outline URL
     url = f"{BLACKBOARD_BASE}/ultra/courses/{course_id}/outline"
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=25_000)
     except Exception as e:
-        print(f"   ⚠️ Navigation failed for {course_name}: {e}")
+        logger.debug(f"Navigation error for {course_name}: {e}")
         return []
 
-    # Check for course availability or error banners
+    # Step 2: Check for course availability or error banners
     matched_sel, _ = await AdaptiveDOM.wait_for_any_selector(
         page,
         [
@@ -41,25 +40,27 @@ async def scrape_course_outline_async(
             "bb-course-outline",
             "div[role='tree']",
             "[data-analytics-id='course-outline']",
+            "#courseMenuPalette_contents",
+            "#content_listContainer",
+            "#notification-modal-api-error",
             "div:has-text(\"You can't access this course right now\")",
+            "div:has-text(\"Course is not currently available\")",
             "div.empty-state",
             "p:has-text(\"No content\")",
         ],
-        timeout=12_000,
+        timeout=10_000,
     )
 
-    if not matched_sel or "You can't access" in matched_sel:
-        print(f"   ℹ️  Course is currently unavailable or closed.")
+    if not matched_sel or "notification-modal" in matched_sel or "You can't access" in matched_sel or "not currently available" in matched_sel:
         return []
 
-    # Expand collapsible folders and learning modules level-by-level
+    # Step 3: Ultra layout handling - Expand collapsible folders and learning modules
     for depth in range(max_depth):
         expand_buttons = page.locator("button[aria-expanded='false'], button.accordion-toggle[aria-expanded='false']")
         count = await expand_buttons.count()
         if count == 0:
             break
 
-        # Click up to 15 collapsed containers per level
         clicked_any = False
         for idx in range(min(count, 15)):
             try:
@@ -75,12 +76,13 @@ async def scrape_course_outline_async(
             break
         await asyncio.sleep(0.3)
 
-    # Extract all outline nodes via DOM evaluation
+    # Step 4: Extract items for Ultra AND Classic Blackboard layouts
     extracted_items = await page.evaluate("""() => {
         const items = [];
         const seenIds = new Set();
 
-        const nodeElements = document.querySelectorAll(
+        // 1. Ultra Elements
+        const ultraNodes = document.querySelectorAll(
             'bb-content-item, ' +
             'div[role="treeitem"], ' +
             'div.course-outline-item, ' +
@@ -88,7 +90,7 @@ async def scrape_course_outline_async(
             'li.content-item'
         );
 
-        nodeElements.forEach((el, index) => {
+        ultraNodes.forEach((el, index) => {
             const titleEl = el.querySelector('h3, h4, span.title, a.element-details-link, [class*="itemName"], .js-title');
             const title = titleEl ? titleEl.innerText.trim() : (el.getAttribute('aria-label') || '').trim();
             if (!title) return;
@@ -101,14 +103,15 @@ async def scrape_course_outline_async(
             // Determine content type
             const html = el.outerHTML.toLowerCase();
             let contentType = 'item';
-            if (html.includes('folder') || el.querySelector('button[aria-expanded]')) contentType = 'folder';
+            if (html.includes('syllabus') || title.toLowerCase().includes('syllabus')) contentType = 'syllabus';
+            else if (html.includes('folder') || el.querySelector('button[aria-expanded]')) contentType = 'folder';
             else if (html.includes('learning-module') || html.includes('learningmodule')) contentType = 'learning_module';
             else if (html.includes('document') || html.includes('doc')) contentType = 'document';
             else if (html.includes('assignment') || html.includes('assessment')) contentType = 'assignment';
             else if (html.includes('test') || html.includes('quiz') || html.includes('exam')) contentType = 'test';
             else if (html.includes('discussion')) contentType = 'discussion';
             else if (html.includes('weblink') || html.includes('external-link')) contentType = 'link';
-            else if (html.includes('file') || html.includes('attachment')) contentType = 'file';
+            else if (html.includes('file') || html.includes('attachment') || html.includes('.pdf')) contentType = 'file';
 
             // Due Date
             let dueDate = '';
@@ -155,11 +158,94 @@ async def scrape_course_outline_async(
             });
         });
 
+        // 2. Classic Layout Elements (if Ultra nodes are empty)
+        if (items.length === 0) {
+            document.querySelectorAll('#content_listContainer li.clearfix, #content_listContainer .item, .contentList li').forEach((el, index) => {
+                const titleEl = el.querySelector('h3 a, .item h3, a');
+                const title = titleEl ? titleEl.innerText.trim() : el.innerText.trim().split('\\n')[0];
+                if (!title) return;
+
+                const contentId = el.id || `classic_item_${index}`;
+                if (seenIds.has(contentId)) return;
+                seenIds.add(contentId);
+
+                let contentType = 'item';
+                const lower = el.innerText.toLowerCase();
+                if (lower.includes('syllabus')) contentType = 'syllabus';
+                else if (lower.includes('folder')) contentType = 'folder';
+                else if (lower.includes('assignment')) contentType = 'assignment';
+                else if (lower.includes('document')) contentType = 'document';
+
+                const links = [];
+                el.querySelectorAll('a[href]').forEach(a => {
+                    if (a.href && !a.href.startsWith('javascript:')) {
+                        links.push({ text: a.innerText.trim() || title, url: a.href });
+                    }
+                });
+
+                items.push({
+                    content_id: contentId,
+                    title: title,
+                    content_type: contentType,
+                    due_date: '',
+                    description: el.querySelector('.details, .vtbegenerated')?.innerText.trim() || '',
+                    depth: 0,
+                    links: links
+                });
+            });
+        }
+
         return items;
     }""")
 
-    print(f"   ✅ Extracted {len(extracted_items)} outline items from {course_name}.")
     return extracted_items
+
+
+def format_outline_tree(data: List[Dict[str, Any]], course_name: str, course_id: str = "") -> str:
+    """Formats outline into a readable hierarchical CLI string."""
+    type_icons = {
+        "syllabus": "📜",
+        "folder": "📁",
+        "learning_module": "📦",
+        "document": "📄",
+        "assignment": "📝",
+        "test": "🧪",
+        "quiz": "🧪",
+        "discussion": "💬",
+        "link": "🔗",
+        "file": "📎",
+        "item": "📌",
+    }
+
+    lines = [
+        f"📚 Course Outline: {course_name} ({course_id})" if course_id else f"📚 Course Outline: {course_name}",
+        "━" * 50,
+    ]
+
+    if not data:
+        lines.append("  (Course is currently closed or has no content items)")
+        return "\n".join(lines)
+
+    for item in data:
+        depth = item.get("depth", 0)
+        indent = "  " * depth
+        icon = type_icons.get(item.get("content_type", "item"), "📌")
+        title = item.get("title", "Untitled")
+        due = f" — (Due: {item['due_date']})" if item.get("due_date") else ""
+        ctype = item.get("content_type", "item")
+
+        lines.append(f"{indent}{icon} {title} [{ctype}]{due}")
+        if item.get("description"):
+            desc = item["description"].replace("\n", " ").strip()
+            if len(desc) > 120:
+                desc = desc[:117] + "..."
+            lines.append(f"{indent}   > {desc}")
+
+        for l in item.get("links", []):
+            if l.get("url") and not l["url"].endswith("#"):
+                lines.append(f"{indent}   └ 🔗 {l.get('text', 'Link')}: {l['url']}")
+
+    return "\n".join(lines)
 
 
 def save_outline(data: List[Dict[str, Any]], course_id: str) -> Path:
@@ -181,6 +267,7 @@ def save_outline(data: List[Dict[str, Any]], course_id: str) -> Path:
         lines.append("_No course content found or course is unavailable._")
     else:
         type_icons = {
+            "syllabus": "📜",
             "folder": "📁",
             "learning_module": "📦",
             "document": "📄",
@@ -212,5 +299,4 @@ def save_outline(data: List[Dict[str, Any]], course_id: str) -> Path:
                     lines.append(f"{indent}  └ 🔗 [{l.get('text', 'Open Link')}]({l['url']})")
 
     filepath.write_text("\n".join(lines))
-    print(f"   💾 Outline saved to: {filepath.name}")
     return filepath

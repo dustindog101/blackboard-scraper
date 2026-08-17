@@ -1,19 +1,29 @@
 # Blackboard Scraper v2 (High-Speed & Concurrent)
 
-Automated, high-performance headless scraper and school assistant for **UMBC Blackboard Ultra**. Built on Playwright Async + Chromium with persistent SSO session caching, concurrent multi-course worker pools, deep assignment extraction, due date aggregation, and optional modular Telegram alerts & bot control.
+Automated, high-performance headless scraper and school assistant for **UMBC Blackboard Ultra**. Built on Playwright Async + Chromium with persistent SSO session caching, task-aware adaptive concurrency, deep outline & syllabus extraction, assignment drawer inspection, cross-course deadline aggregation, clean terminal UI by default, and standardized JSON export.
 
 ---
 
 ## ⚡ Key Highlights (v2 Upgrades)
 
-- **11.2× Speedup via Async Concurrency**: Scrapes all course announcements and gradebooks concurrently in parallel browser tabs bounded by an async semaphore pool (`--concurrency 4`).
-- **Context-Wide Route Aborting**: Strips heavy images, video, webfonts, and 3rd-party telemetry to save ~74% bandwidth and cut page load times.
-- **Adaptive DOM State Synchronization**: Zero fixed sleep delays (`wait_for_timeout`); uses event-driven selector races and mutation watchers.
-- **📁 Course Outline & Treeview Traversal (`--outline`)**: Recursively expands modules, folders, documents, syllabi, and links.
-- **📝 Deep Assignment Inspector (`--assignments`)**: Safely opens assignment drawers to extract prompts, points possible, rubric weights, submission status, and downloadable starter files (with timed test protection).
-- **📅 Cross-Course Due Date Aggregator (`--due 7d / 14d / overdue`)**: Merges deadlines across Global Calendar, Gradebooks, and Outlines.
-- **🔍 Omnisearch & Grabber (`--find`, `--grab`)**: Instant keyword search across all courses and direct document extraction.
-- **🤖 Modular Telegram Notifications & Interactive Bot**: Admin-secured bot daemon (`telegram_bot.py` or `python3 main.py --bot`) supporting `/briefing`, `/due`, `/grades`, `/announcements`, `/courses`, `/check`, and `/watch` with zero required external pip dependencies.
+- **🖥️ Beautiful CLI Output by Default (No Unwanted Files)**:
+  - Every command formats directly to terminal stdout with trees (`├─`, `└─`, `📁`, `📜 [SYLLABUS]`, `📄`, `📝`) and aligned ASCII tables.
+  - No Markdown files are written unless `--md` or `--save` is explicitly passed.
+- **📦 Standardized v2 Composite JSON Schema**:
+  - Full school intelligence document via `--json` or `--out <file.json>`. Includes course metadata, syllabi, recursive outlines, assignment rubrics/points, grades, and announcements.
+- **⚡ Task-Aware Smart Adaptive Concurrency**:
+  - Automatically selects optimal concurrency profile (Light: 6-8 workers, Medium: 4-5 workers, Heavy: 2-3 workers).
+  - Dynamically scales up on fast responses and throttles down on slow networks or timeouts.
+- **🛡️ Closed-Course Circuit Breakers**:
+  - Instantly detects closed course modals in `<120ms` to avoid burning idle worker cycles.
+- **📁 Deep Course Outline & Syllabus Grabber (`--outline`)**:
+  - Multi-level accordion expansion for folders, learning modules, syllabi, documents, and downloadable attachments across Ultra and Classic layouts.
+- **📝 Safe Assignment Drawer Inspector (`--assignments`)**:
+  - Safely extracts prompts, rubric weights, submission status, allowed attempts, and starter files without triggering timed tests.
+- **📅 Cross-Course Due Date Aggregator (`--due 7d / 14d / overdue`)**:
+  - Combines deadlines across Global Calendar, Gradebooks, and Outlines.
+- **🤖 Modular Telegram Alerts & Bot Control (Optional)**:
+  - Admin-secured bot daemon (`telegram_bot.py` or `python3 main.py --bot`) with zero external pip dependencies.
 
 ---
 
@@ -42,38 +52,73 @@ python3 main.py --login
 python3 main.py --check-session
 ```
 
-### 3. Run Concurrent Daily Briefing
+### 3. Run Daily Briefing (Prints directly to CLI stdout)
 ```bash
-python3 main.py --briefing --concurrency 4
+python3 main.py --briefing
 ```
 
 ---
 
-## CLI Reference & Capabilities
+## CLI Output Modes
 
-### Core Scrapers
+### 1. Terminal UI (Default)
+```bash
+# Formatted briefing digest
+python3 main.py --briefing
 
-| Command | Description |
-| :--- | :--- |
-| `python3 main.py --briefing` | Concurrent daily briefing across all courses (JSON + Markdown) |
-| `python3 main.py --due 7d` | Cross-course aggregated due dates for next 7 days (`14d`, `30d`, `overdue`) |
-| `python3 main.py --outline --all` | Scrape complete course outlines and module trees |
-| `python3 main.py --assignments --all` | Deep scrape assignments, rubrics, and instructions |
-| `python3 main.py --find "Project 1"` | Omnisearch across all enrolled courses |
-| `python3 main.py --grab "<item_id>"` | Download or extract details of a specific item |
-| `python3 main.py --grades --all` | Scrape gradebook across all courses |
-| `python3 main.py --announcements --all` | Scrape announcements across all courses |
-| `python3 main.py --calendar` | Scrape global calendar |
-| `python3 main.py --activity` | Scrape homepage activity stream |
+# Upcoming deadlines ASCII table
+python3 main.py --due 7d
 
-### Performance & Modifiers
+# Hierarchical outline tree
+python3 main.py --outline --all
 
-- `--concurrency N`: Max concurrent browser tabs (default: `4`).
-- `--exclude-completed`: With `--due`: hide already submitted/graded items.
-- `--visible`: Launch with visible Chromium window for debugging.
-- `--cdp <URL>`: Connect to existing browser instance via Chrome DevTools Protocol.
-- `--out <FILE>`: Save structured JSON envelope to custom path.
-- `--raw`: Output raw Python dict structures instead of envelope.
+# Deep assignment details & rubrics
+python3 main.py --assignments --all
+```
+
+### 2. Standardized JSON Output
+```bash
+# Output JSON directly to CLI stdout
+python3 main.py --briefing --json
+python3 main.py --outline --all --json
+python3 main.py --due 7d --json
+
+# Export JSON directly to a file
+python3 main.py --briefing --out my_briefing.json
+python3 main.py --grades --all --out grades.json
+python3 main.py --assignments --all --out assignments.json
+
+# Minified compact JSON
+python3 main.py --briefing --json --compact
+```
+
+### 3. Optional Markdown Saving
+```bash
+# Save markdown files into output/ directory
+python3 main.py --briefing --md
+python3 main.py --outline --all --md
+```
+
+---
+
+## Item Filtering & Selection
+
+- **Filter by Item Type**:
+  ```bash
+  python3 main.py --outline --all --type syllabus     # Grab syllabi across courses
+  python3 main.py --outline --all --type assignment   # Grab assignments
+  python3 main.py --outline --all --type document     # Grab lecture notes & docs
+  python3 main.py --outline --all --type folder       # Grab folders
+  ```
+- **Filter by Keyword**:
+  ```bash
+  python3 main.py --outline --all --filter "Homework"
+  python3 main.py --assignments --all --filter "Project"
+  ```
+- **Omnisearch Across Courses**:
+  ```bash
+  python3 main.py --find "Syllabus"
+  ```
 
 ---
 
@@ -81,35 +126,18 @@ python3 main.py --briefing --concurrency 4
 
 The Telegram integration is **100% optional** and requires **zero external pip dependencies** (built using standard library HTTP). It remains completely inactive unless enabled in `config.json` or `.env`.
 
-### 1. Configuration
-In `config.json`:
+### 1. Configuration (`config.json`)
 ```json
 {
   "telegram": {
     "enabled": true,
     "bot_token": "YOUR_BOT_TOKEN_FROM_BOTFATHER",
-    "admin_chat_id": 123456789,
-    "notifications": {
-      "daily_briefing": { "enabled": true },
-      "grade_updates": { "enabled": true },
-      "urgent_due_alerts": { "enabled": true }
-    }
+    "admin_chat_id": 123456789
   }
 }
 ```
-*Or set via environment variables:*
-- `TELEGRAM_BOT_TOKEN="123456:ABC-DEF..."`
-- `TELEGRAM_ADMIN_CHAT_ID="123456789"`
-- `TELEGRAM_NOTIFY_ENABLED="true"`
 
-### 2. Push Notifications
-Send daily briefing and new grade alerts directly to Telegram:
-```bash
-python3 main.py --briefing --telegram
-```
-
-### 3. Interactive Telegram Bot Daemon
-Run the self-contained bot daemon:
+### 2. Interactive Telegram Bot Daemon
 ```bash
 python3 main.py --bot
 # or
@@ -117,34 +145,14 @@ python3 telegram_bot.py
 ```
 
 #### Supported Bot Commands:
-- `/briefing` — Trigger on-demand concurrent briefing and send formatted digest
-- `/due [days]` — View upcoming deadlines (e.g. `/due 7`)
+- `/briefing` — Run full concurrent briefing
+- `/due [days]` — Upcoming deadlines (e.g. `/due 7`)
 - `/grades [course]` — View latest grades
 - `/announcements [course]` — View recent course announcements
 - `/courses` — List configured courses and IDs
 - `/check` — Test Blackboard session health
-- `/watch [interval_mins]` — Toggle automatic background monitoring for grade/announcement changes
-- `/help` — Display command manual
-
----
-
-## Output Architecture
-
-```
-output/
-├── briefing.md                  # Comprehensive daily briefing
-├── calendar/
-│   └── due_dates.md             # Aggregated deadlines
-├── outlines/
-│   ├── _100001_1.md             # Course outline & module hierarchy
-│   └── ...
-├── assignments/
-│   ├── _100001_1.md             # Assignment prompts, rubrics, points
-│   └── ...
-├── announcements/               # Course announcements
-├── grades/                      # Graded item tables
-└── activity/                    # Activity feed
-```
+- `/watch [mins]` — Periodic background monitoring for new grades/announcements
+- `/help` — Command manual
 
 ---
 

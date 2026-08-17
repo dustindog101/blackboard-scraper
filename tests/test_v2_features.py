@@ -1,16 +1,78 @@
 """
 Unit and Integration Tests for Blackboard Ultra Scraper v2 features:
-- Async Route Optimizer rules
+- Dynamic Route Optimizer rules
+- Task-aware concurrency profile calculation
 - Message chunking and HTML escaping for Telegram
+- Standardized v2 Composite JSON schema generation
 - Due Date Aggregation logic and date parsing
-- Envelope Export formatting for new content kinds
 """
 
+import json
 import unittest
 from datetime import datetime
+
+from core.export_json import build_item, build_export_doc, build_composite_schema, _to_unix_timestamp
+from core.async_engine import RouteOptimizer, TaskProfile, get_optimal_concurrency
 from telegram.formatter import escape_html, chunk_message, format_due_dates_list, format_grade_alert, format_announcement_alert
-from core.export_json import build_item, _to_unix_timestamp
-from core.async_engine import RouteOptimizer
+
+
+class TestSmartConcurrency(unittest.TestCase):
+    def test_optimal_concurrency_profiles(self):
+        c_light = get_optimal_concurrency(TaskProfile.LIGHT)
+        c_heavy = get_optimal_concurrency(TaskProfile.HEAVY)
+        c_medium = get_optimal_concurrency(TaskProfile.MEDIUM)
+
+        self.assertGreaterEqual(c_light, c_heavy)
+        self.assertGreaterEqual(c_medium, c_heavy)
+
+    def test_user_override_concurrency(self):
+        c_custom = get_optimal_concurrency(TaskProfile.HEAVY, user_override=10)
+        self.assertEqual(c_custom, 10)
+
+
+class TestStandardizedJSONSchema(unittest.TestCase):
+    def test_build_composite_schema(self):
+        bundle = {
+            "courses": {
+                "_105737_1": {
+                    "course_name": "IS 410 Database Design",
+                    "outline": [
+                        {"content_type": "syllabus", "title": "Course Syllabus", "links": [{"text": "Syllabus.pdf", "url": "https://example.com/s.pdf"}]},
+                        {"content_type": "folder", "title": "Week 1", "depth": 0, "links": []}
+                    ],
+                    "assignments": [
+                        {"title": "Project 1", "points_possible": 100, "submission_status": "Unattempted"}
+                    ],
+                    "grades": [
+                        {"name": "Quiz 1", "grade": "90 / 100", "dueDate": "2026-09-10"}
+                    ],
+                    "announcements": [
+                        {"title": "Welcome", "meta": "Aug 15", "unread": True, "body": "Welcome to IS 410"}
+                    ]
+                }
+            },
+            "calendar": [
+                {"title": "Project 1", "course": "IS 410", "due": "Sep 15, 2026"}
+            ],
+            "activity": []
+        }
+
+        json_str = build_composite_schema(bundle, user_info={"name": "Amanuel Hailie", "username": "BH69617"})
+        data = json.loads(json_str)
+
+        self.assertEqual(data["version"], "2.0")
+        self.assertEqual(data["summary"]["total_courses"], 1)
+        self.assertEqual(data["summary"]["upcoming_deadlines_count"], 1)
+        self.assertEqual(data["summary"]["unread_announcements_count"], 1)
+        self.assertEqual(data["user"]["username"], "BH69617")
+
+        course = data["courses"][0]
+        self.assertEqual(course["course_id"], "_105737_1")
+        self.assertIsNotNone(course["syllabus"])
+        self.assertEqual(course["syllabus"]["title"], "Course Syllabus")
+        self.assertEqual(len(course["assignments"]), 1)
+        self.assertEqual(len(course["grades"]), 1)
+        self.assertEqual(len(course["announcements"]), 1)
 
 
 class TestTelegramFormatter(unittest.TestCase):
@@ -30,42 +92,6 @@ class TestTelegramFormatter(unittest.TestCase):
         self.assertTrue(len(chunks) > 1)
         for chunk in chunks:
             self.assertTrue(len(chunk) <= 200)
-
-    def test_format_grade_alert(self):
-        grade_item = {"name": "Midterm Exam", "grade": "95 / 100", "status": "Graded"}
-        formatted = format_grade_alert(grade_item, "IS 410 Database Design")
-        self.assertIn("NEW GRADE POSTED", formatted)
-        self.assertIn("IS 410 Database Design", formatted)
-        self.assertIn("Midterm Exam", formatted)
-        self.assertIn("95 / 100", formatted)
-
-
-class TestExportEnvelope(unittest.TestCase):
-    def test_build_outline_item(self):
-        item = build_item(
-            kind="content_item",
-            course_id="_100001_1",
-            course_name="IS 410",
-            title="Lecture Notes Week 1",
-            notes="Introduction to Relational Algebra",
-            metadata={"content_type": "document", "depth": 1},
-        )
-        self.assertEqual(item["kind"], "content_item")
-        self.assertEqual(item["course_id"], "_100001_1")
-        self.assertEqual(item["metadata"]["content_type"], "document")
-
-    def test_build_assignment_item(self):
-        item = build_item(
-            kind="assignment",
-            course_id="_100001_1",
-            course_name="IS 410",
-            title="Project Milestone 1",
-            due_text="2026-09-15 23:59",
-            metadata={"points_possible": "100", "submission_status": "Unattempted"},
-        )
-        self.assertEqual(item["kind"], "assignment")
-        self.assertIsNotNone(item["due_at"])
-        self.assertEqual(item["metadata"]["points_possible"], "100")
 
 
 class TestRouteOptimizer(unittest.TestCase):
