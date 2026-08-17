@@ -62,7 +62,6 @@ def _emit_json(args: argparse.Namespace, data: Any, source: str = "blackboard-sc
         print(payload)
 
 
-
 def _print_profile(data: dict) -> None:
     if not data:
         print("No profile data found.")
@@ -94,11 +93,11 @@ def _short_course_name(raw: str | None) -> str | None:
 def resolve_target_courses(course_arg: Optional[str], all_flag: bool, courses: Dict[str, str]) -> List[str]:
     """
     Smart multi-mode course selector:
-    - Supports exact Blackboard IDs: '_105737_1'
-    - Supports course codes: 'IS410', 'IS 410', 'ECON122', 'MATH 215'
-    - Supports fuzzy title keywords: 'Database', 'Accounting'
-    - Supports comma-separated list: 'IS410,ENGL100' or '_105737_1,_108410_1'
-    - Supports --all flag (returns all configured courses)
+    - Exact Blackboard IDs: '_105737_1'
+    - Course codes: 'IS410', 'IS 410', 'ECON122', 'MATH 215'
+    - Fuzzy title keywords: 'Database', 'Accounting'
+    - Comma-separated list: 'IS410,ENGL100' or '_105737_1,_108410_1'
+    - --all flag: all configured courses
     """
     if all_flag:
         return list(courses.keys())
@@ -135,24 +134,158 @@ def resolve_target_courses(course_arg: Optional[str], all_flag: bool, courses: D
 
 
 # ---------------------------------------------------------------------------
+# Rich Topic Help Guides
+# ---------------------------------------------------------------------------
+
+HELP_GUIDES: Dict[str, str] = {
+    "auth": """
+🔐 Authentication & Full Headless Execution Guide:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Daily & Ongoing Scraping (100% Fully Headless):
+   - Persistent session cookies are stored in .session/cookies.json.
+   - Sessions last for weeks to months without re-authenticating.
+   - All CLI commands, background cron jobs, and Telegram bot commands run
+     completely in the background with zero browser popups and zero user intervention.
+
+2. One-Time Automated SSO Login:
+   $ python3 main.py --login --auto
+   - Automatically fills your UMBC username and password on WebAuth.
+   - Dispatches Duo 2FA SMS passcode to your phone.
+   - Enter the 6-digit passcode into the terminal prompt.
+   - Playwright automatically trusts the browser and saves cookies.
+
+3. Visible Manual Login Fallback:
+   $ python3 main.py --login
+   - Opens a visible browser if you prefer Duo Push, TouchID, or Security Keys.
+""",
+    "courses": """
+🔀 Smart Course Selection Syntax:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You can target courses in multiple flexible ways:
+
+• Target by Course Code:
+  $ python3 main.py --outline -c IS410
+  $ python3 main.py --assignments -c ENGL100
+  $ python3 main.py --grades -c "ECON 122"
+
+• Target Multiple Courses (Comma-Separated):
+  $ python3 main.py --outline -c IS410,ENGL100,MATH215
+  $ python3 main.py --assignments -c IS410,STAT351
+
+• Target by Fuzzy Title Keyword:
+  $ python3 main.py --outline -c Database
+  $ python3 main.py --grades -c Accounting
+
+• Target All Configured Courses:
+  $ python3 main.py --outline --all
+  $ python3 main.py --briefing
+""",
+    "schema": """
+📦 Standardized v2 JSON Schemas:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Output clean JSON to stdout (--json) or export to file (--out <path>):
+
+• Full Composite Document (--briefing --json):
+  {
+    "version": "2.0",
+    "generated_at": 1786938000,
+    "generated_at_human": "2026-08-16T23:40:00Z",
+    "summary": { "total_courses": 5, "upcoming_deadlines_count": 2, ... },
+    "user": { "username": "BH69617", "name": "Amanuel Hailie" },
+    "courses": [ { "course_id": "...", "syllabus": {...}, "outline": [...], "assignments": [...], ... } ],
+    "global": { "activity_stream": [...], "calendar_due_dates": [...] }
+  }
+
+• Targeted Deadline Items (--due 7d --json):
+  { "version": "2.0", "total_items": 3, "items": [ { "title": "...", "course": "...", "due_date": "..." } ] }
+
+• Targeted Outline Trees (--outline -c IS410 --json):
+  [ { "course_id": "_105737_1", "course_name": "IS 410", "items": [ { "title": "...", "content_type": "folder", "depth": 0 } ] } ]
+""",
+    "telegram": """
+🤖 Telegram Bot & Alerts Guide:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Setup in config.json:
+   {
+     "telegram": {
+       "enabled": true,
+       "bot_token": "123456789:ABCdefGhIJKlmNoPQRstuVWXyz",
+       "admin_chat_id": 123456789
+     }
+   }
+
+2. Launch Bot Daemon:
+   $ python3 main.py --bot
+   # or
+   $ python3 telegram_bot.py
+
+3. Supported Bot Commands:
+   /briefing           - Trigger concurrent school briefing
+   /due [days]         - View upcoming deadlines (e.g. /due 7)
+   /grades [course]    - Check recent grades
+   /announcements [c]  - View unread course announcements
+   /courses            - List configured courses
+   /check              - Verify Blackboard session health
+   /watch [mins]       - Start background monitoring loop
+   /help               - View command manual
+""",
+    "concurrency": """
+⚡ Smart Adaptive Concurrency Engine:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+The engine selects optimal worker profiles and auto-tunes dynamically:
+
+• LIGHT Profile (6-8 workers):
+  Used for shallow DOM queries: --announcements, --grades, --calendar.
+• MEDIUM Profile (4-5 workers):
+  Used for composite streams: --briefing, --due, --activity.
+• HEAVY Profile (2-3 workers):
+  Used for deep operations: --outline (tree expansion), --assignments (drawers).
+
+• Dynamic Auto-Scaling:
+  - Latency < 1.0s: Concurrency scales up automatically.
+  - Timeouts / Slow Network: Concurrency throttles down to prevent browser stalls.
+  - Closed Courses: Skipped in < 120ms via circuit-breaker detection.
+"""
+}
+
+
+# ---------------------------------------------------------------------------
 # CLI Argument Parser
 # ---------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="bb",
-        description="UMBC Blackboard Ultra High-Performance Scraper & Assistant",
+        description="""
+╔═══════════════════════════════════════════════════════════════════════╗
+║       UMBC Blackboard Ultra High-Performance Scraper & Assistant      ║
+╚═══════════════════════════════════════════════════════════════════════╝
+High-speed headless scraper with adaptive concurrency, deep outline & syllabus
+extraction, safe assignment drawer inspection, dead-simple course selection,
+clean terminal UI by default, and standardized v2 JSON schemas.
+        """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
+═══════════════════════════════════════════════════════════════════════
+💡 QUICK START EXAMPLES
+═══════════════════════════════════════════════════════════════════════
   python3 main.py --briefing                          # Print high-speed briefing to CLI stdout
   python3 main.py --due 7d                            # Print upcoming deadlines table to CLI stdout
-  python3 main.py --outline -c IS410                  # Print hierarchical outline tree for IS 410
+  python3 main.py --outline -c IS410                  # Print outline tree for IS 410 (by course code)
   python3 main.py --outline -c IS410,ENGL100          # Select multiple courses
-  python3 main.py --assignments --all --json          # Output all assignments as clean JSON to stdout
+  python3 main.py --assignments --all --json          # Output all assignments as clean JSON
   python3 main.py --briefing --out briefing.json      # Save composite school intelligence to file
+  python3 main.py --outline --all --type syllabus     # Grab syllabi across courses
+  python3 main.py --find "Project 1"                  # Search content across all courses
   python3 main.py --login --auto                      # One-time automated login with Duo text passcode
   python3 main.py --bot                               # Launch interactive Telegram bot daemon
+
+📖 DETAILED TOPIC GUIDES:
+  python3 main.py --guide auth                        # Authentication & Headless execution
+  python3 main.py --guide courses                     # Course selection & multi-course syntax
+  python3 main.py --guide schema                      # Standardized v2 JSON schemas
+  python3 main.py --guide telegram                    # Telegram bot & notifications
+  python3 main.py --guide concurrency                 # Adaptive async worker engine
         """,
     )
 
@@ -160,44 +293,48 @@ Examples:
     if "-auto" in raw_args:
         parser.error("Use --auto (or -a). The token '-auto' is ambiguous.")
 
+    # --- help guides ---
+    guides = parser.add_argument_group("help & documentation")
+    guides.add_argument("--guide", choices=["auth", "courses", "schema", "telegram", "concurrency"], help="Show comprehensive topic manual")
+
     # --- authentication ---
-    auth = parser.add_argument_group("authentication")
-    auth.add_argument("--login", action="store_true", help="Login via SSO (skips if session is valid)")
-    auth.add_argument("--logout", action="store_true", help="Logout (clear session cookies)")
+    auth = parser.add_argument_group("authentication & session")
+    auth.add_argument("--login", action="store_true", help="Login via UMBC SSO (skips if session is already active)")
+    auth.add_argument("--logout", action="store_true", help="Logout (clear cached session cookies)")
     auth.add_argument("--auto", "-a", action="store_true", help="With --login: automated SSO + Duo text passcode login")
     auth.add_argument("--force", action="store_true", help="With --login: force re-login even if session exists")
     auth.add_argument("--username", "-u", help="Username for automated login (prompts if omitted)")
     auth.add_argument("--password", "-p", help="Password for automated login (prompts if omitted)")
-    auth.add_argument("--duo-passcode", help="Provide 6-digit Duo SMS passcode directly")
-    auth.add_argument("--check-session", action="store_true", help="Test if current session is valid")
-    auth.add_argument("--session-info", action="store_true", help="Show session timestamps")
+    auth.add_argument("--duo-passcode", help="Provide 6-digit Duo SMS passcode directly via CLI")
+    auth.add_argument("--check-session", action="store_true", help="Test if current session cookies are valid")
+    auth.add_argument("--session-info", action="store_true", help="Show session creation & last used timestamps")
     auth.add_argument("--debug", action="store_true", help="Print debug output (use with --check-session)")
 
     # --- discovery ---
-    disc = parser.add_argument_group("discovery")
-    disc.add_argument("--discover", action="store_true", help="Find and save enrolled courses")
-    disc.add_argument("--courses", action="store_true", help="List configured courses")
+    disc = parser.add_argument_group("course discovery")
+    disc.add_argument("--discover", action="store_true", help="Auto-discover and save enrolled courses from Blackboard")
+    disc.add_argument("--courses", action="store_true", help="List configured courses and IDs")
 
     # --- scrapers ---
-    scrapers = parser.add_argument_group("scrapers")
-    scrapers.add_argument("--briefing", action="store_true", help="Run high-speed concurrent briefing across all courses")
+    scrapers = parser.add_argument_group("scrapers & features")
+    scrapers.add_argument("--briefing", action="store_true", help="Run high-speed concurrent daily briefing across all courses")
     scrapers.add_argument("--activity", action="store_true", help="Scrape homepage activity stream")
     scrapers.add_argument("--calendar", action="store_true", help="Scrape calendar due-dates")
     scrapers.add_argument("--announcements", action="store_true", help="Scrape course announcements")
     scrapers.add_argument("--grades", action="store_true", help="Scrape gradebook")
     scrapers.add_argument("--discussions", action="store_true", help="Scrape course discussions")
-    scrapers.add_argument("--outline", action="store_true", help="Scrape full course outline and modules")
-    scrapers.add_argument("--assignments", action="store_true", help="Deep scrape assignments with prompts and rubrics")
+    scrapers.add_argument("--outline", action="store_true", help="Scrape full course outline, modules, syllabi, and files")
+    scrapers.add_argument("--assignments", action="store_true", help="Deep scrape assignments with prompts, rubrics, and files")
     scrapers.add_argument("--due", nargs="?", const="7d", default=None, metavar="WINDOW", help="Aggregate cross-course due dates (e.g. 7d, 14d, overdue)")
     scrapers.add_argument("--upcoming", type=int, metavar="DAYS", help="Alias for --due <N>d")
     scrapers.add_argument("--exclude-completed", action="store_true", help="With --due: exclude submitted/graded items")
-    scrapers.add_argument("--find", metavar="QUERY", help="Search for content/assignments matching query")
+    scrapers.add_argument("--find", metavar="QUERY", help="Search for content/assignments matching query across courses")
     scrapers.add_argument("--grab", metavar="ITEM_ID", help="Grab and download specific content item")
-    scrapers.add_argument("--profile", action="store_true", help="Show your Blackboard profile")
+    scrapers.add_argument("--profile", action="store_true", help="Show student profile information")
 
     # --- item filtering & selection ---
-    filt = parser.add_argument_group("filtering & selection")
-    filt.add_argument("--course", "-c", help="Target course ID(s) or code(s), e.g. '_105737_1' or 'IS410,ENGL100'")
+    filt = parser.add_argument_group("filtering & course selection")
+    filt.add_argument("--course", "-c", help="Target course ID(s) or code(s), e.g. 'IS410' or 'IS410,ENGL100'")
     filt.add_argument("--all", action="store_true", help="Run against all configured courses")
     filt.add_argument("--type", help="Filter outline items by type (e.g. syllabus, document, assignment, folder, link)")
     filt.add_argument("--filter", dest="keyword_filter", help="Filter items by text keyword")
@@ -205,8 +342,8 @@ Examples:
     # --- performance & execution ---
     perf = parser.add_argument_group("performance & execution")
     perf.add_argument("--concurrency", type=int, metavar="N", help="Override dynamic concurrency worker pool size")
-    perf.add_argument("--visible", "-v", action="store_true", help="Show browser window")
-    perf.add_argument("--cdp", help="Connect to existing browser via CDP URL")
+    perf.add_argument("--visible", "-v", action="store_true", help="Show browser window (useful for debugging)")
+    perf.add_argument("--cdp", help="Connect to existing browser via CDP URL (e.g. http://localhost:9222)")
 
     # --- telegram integration ---
     tg = parser.add_argument_group("telegram integration")
@@ -214,9 +351,9 @@ Examples:
     tg.add_argument("--bot", action="store_true", help="Start the interactive Telegram bot daemon")
 
     # --- output formats & file saving ---
-    output = parser.add_argument_group("output")
-    output.add_argument("--json", action="store_true", help="Output standardized JSON to CLI stdout")
-    output.add_argument("--out", metavar="FILE", help="Save JSON output to FILE instead of printing")
+    output = parser.add_argument_group("output formats & file saving")
+    output.add_argument("--json", action="store_true", help="Output standardized JSON to CLI stdout (No files saved)")
+    output.add_argument("--out", metavar="FILE", help="Save JSON output directly to FILE")
     output.add_argument("--md", "--save", dest="md", action="store_true", help="Save formatted markdown file(s) to output/ directory")
     output.add_argument("--raw", action="store_true", help="Output raw unformatted scraper data")
     output.add_argument("--compact", action="store_true", help="Emit minified JSON")
@@ -275,6 +412,13 @@ def _handle_discover_courses(headless: bool, cdp: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 async def main_async(args: argparse.Namespace) -> None:
+    # --- topic guides ---
+    if args.guide:
+        guide_text = HELP_GUIDES.get(args.guide)
+        if guide_text:
+            print(guide_text.strip())
+        return
+
     headless = not args.visible
     cdp = args.cdp
     courses = load_courses()
@@ -720,13 +864,13 @@ async def main_async(args: argparse.Namespace) -> None:
         print(f"Scraped discussions for {len(target_cids)} courses.")
         return
 
-    print("No scraper action selected. Run with --help.", file=sys.stderr)
+    print("No scraper action selected. Run 'python3 main.py --help' to see commands.", file=sys.stderr)
 
 
 def main() -> None:
     args = _parse_args()
     if len(sys.argv) == 1:
-        print("Run with --help to see available commands.", file=sys.stderr)
+        print("Run 'python3 main.py --help' to see available commands.", file=sys.stderr)
         sys.exit(1)
 
     asyncio.run(main_async(args))
