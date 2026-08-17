@@ -5,14 +5,14 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from playwright.sync_api import sync_playwright
 
 from core.config import BLACKBOARD_BASE, load_courses, save_courses
-from core.export_json import build_export_doc, build_item, write_export
+from core.export_json import build_composite_schema, build_export_doc, build_item, write_export
 from core.session import _launch_context, _require_session, _require_session_async, check_session, check_session_async, login, login_auto
-from core.async_engine import AsyncSessionManager, AsyncCourseWorkerPool, EngineConfig
+from core.async_engine import AsyncSessionManager, AsyncCourseWorkerPool, EngineConfig, TaskProfile, get_optimal_concurrency
 
 # Scrapers
 from scrapers.activity import save_activity, scrape_activity, scrape_activity_async
@@ -29,7 +29,7 @@ from scrapers.search import find_items_async, grab_item_async
 
 
 # ---------------------------------------------------------------------------
-# Output helpers
+# Output & Formatting Helpers
 # ---------------------------------------------------------------------------
 
 def _safe_relpath(path: Path) -> str:
@@ -39,38 +39,29 @@ def _safe_relpath(path: Path) -> str:
         return str(path)
 
 
-def _emit_output(args: argparse.Namespace, items: list[dict]) -> None:
-    """Print JSON to stdout or write to --out file."""
+def _emit_json(args: argparse.Namespace, data: Any, source: str = "blackboard-scraper") -> None:
+    """Print structured JSON to stdout or save to file if --out is provided."""
     pretty = not args.compact
-    payload = build_export_doc(items, source=args.source, pretty=pretty)
+    if isinstance(data, dict) and "courses" in data and isinstance(data.get("courses"), dict):
+        # Full briefing bundle -> composite document
+        payload = build_composite_schema(data, source=source, pretty=pretty)
+    elif isinstance(data, list) and (not data or "kind" in data[0]):
+        payload = build_export_doc(data, source=source, pretty=pretty)
+    else:
+        if pretty:
+            payload = json.dumps(data, indent=2, ensure_ascii=False)
+        else:
+            payload = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+
     if args.out:
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(payload)
-        print(f"💾 JSON written to: {_safe_relpath(out_path)}", file=sys.stderr)
+        print(f"💾 JSON exported to: {_safe_relpath(out_path)}", file=sys.stderr)
     else:
         print(payload)
 
 
-def _emit_raw(args: argparse.Namespace, data: Any) -> None:
-    """Print raw scraper dicts (pre-transform) to stdout or --out file."""
-    pretty = not args.compact
-    if pretty:
-        payload = json.dumps(data, indent=2, ensure_ascii=False)
-    else:
-        payload = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
-    if args.out:
-        out_path = Path(args.out)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(payload)
-        print(f"💾 Raw data written to: {_safe_relpath(out_path)}", file=sys.stderr)
-    else:
-        print(payload)
-
-
-# ---------------------------------------------------------------------------
-# Console print helpers
-# ---------------------------------------------------------------------------
 
 def _print_profile(data: dict) -> None:
     if not data:
@@ -86,7 +77,7 @@ def _print_profile(data: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Course name cleaning
+# Smart Course Selection & Fuzzy Matching
 # ---------------------------------------------------------------------------
 
 _COURSE_CODE_RE = re.compile(r"\s*\([^)]*\)\s*(?:SP|FA|SU|WI)\d{4}\s*\([^)]*\)\s*$")
@@ -100,178 +91,47 @@ def _short_course_name(raw: str | None) -> str | None:
     return cleaned or raw
 
 
-# ---------------------------------------------------------------------------
-# build_item wrappers
-# ---------------------------------------------------------------------------
+def resolve_target_courses(course_arg: Optional[str], all_flag: bool, courses: Dict[str, str]) -> List[str]:
+    """
+    Smart multi-mode course selector:
+    - Supports exact Blackboard IDs: '_105737_1'
+    - Supports course codes: 'IS410', 'IS 410', 'ECON122', 'MATH 215'
+    - Supports fuzzy title keywords: 'Database', 'Accounting'
+    - Supports comma-separated list: 'IS410,ENGL100' or '_105737_1,_108410_1'
+    - Supports --all flag (returns all configured courses)
+    """
+    if all_flag:
+        return list(courses.keys())
 
-def _build_activity_items(activity: list[dict], default_group: str) -> list[dict]:
-    out: list[dict] = []
-    for entry in activity:
-        raw_preview = (entry.get("message") or "").strip()
-        date_str = (entry.get("date") or "").strip()
-        context = (entry.get("context") or "").strip()
-        course_name = _short_course_name(context)
+    if not course_arg:
+        return []
 
-        if raw_preview:
-            title = raw_preview.split("\n")[0][:120]
-        elif context:
-            title = f"Activity: {course_name or context}"
-        else:
-            title = "Activity update"
+    tokens = [t.strip() for t in course_arg.split(",") if t.strip()]
+    matched_ids: List[str] = []
 
-        out.append(
-            build_item(
-                kind="activity",
-                course_name=course_name,
-                title=title,
-                notes=None,
-                due_text=entry.get("due_date") or None,
-                source_ref=f"activity:{context}:{date_str}",
-                group_name=default_group,
-                metadata={"date": date_str, "raw_preview": raw_preview} if (date_str or raw_preview) else {},
-            )
-        )
-    return out
+    for token in tokens:
+        token_clean = token.lower().replace(" ", "").replace("_", "")
 
+        # 1. Exact ID match
+        if token in courses:
+            matched_ids.append(token)
+            continue
 
-def _build_calendar_items(calendar: list[dict], course_id: str | None, default_group: str) -> list[dict]:
-    out: list[dict] = []
-    for entry in calendar:
-        course_name = _short_course_name(entry.get("course"))
-        out.append(
-            build_item(
-                kind="calendar_due",
-                course_id=course_id,
-                course_name=course_name,
-                title=entry.get("title") or "Calendar item",
-                notes=None,
-                due_text=entry.get("due"),
-                source_ref=f"calendar:{course_id or 'global'}:{entry.get('title','')}:{entry.get('due','')}",
-                group_name=default_group,
-            )
-        )
-    return out
+        # 2. Match by course code or title keyword
+        found = False
+        for cid, cname in courses.items():
+            cname_clean = cname.lower().replace(" ", "").replace("_", "")
+            cid_clean = cid.lower().replace("_", "")
 
+            if token_clean in cname_clean or token_clean in cid_clean:
+                if cid not in matched_ids:
+                    matched_ids.append(cid)
+                found = True
 
-def _build_announcement_items(
-    announcements: list[dict],
-    course_id: str,
-    course_name: str,
-    default_group: str,
-) -> list[dict]:
-    out: list[dict] = []
-    for ann in announcements:
-        body = (ann.get("body") or "").strip()
-        meta = (ann.get("meta") or "").strip()
-        out.append(
-            build_item(
-                kind="announcement",
-                course_id=course_id,
-                course_name=_short_course_name(course_name),
-                title=ann.get("title") or "Announcement",
-                notes=body or None,
-                source_ref=f"announcement:{course_id}:{ann.get('title','')}",
-                group_name=default_group,
-                priority=3 if ann.get("unread") else 2,
-                is_starred=bool(ann.get("unread")),
-                metadata={
-                    "posted": meta,
-                    "unread": str(bool(ann.get("unread"))).lower(),
-                },
-            )
-        )
-    return out
+        if not found:
+            print(f"⚠️ Warning: Could not match course token '{token}' to any enrolled course.", file=sys.stderr)
 
-
-def _build_grade_items(
-    grades: list[dict],
-    course_id: str,
-    course_name: str,
-    default_group: str,
-) -> list[dict]:
-    out: list[dict] = []
-    for item in grades:
-        name = item.get("name") or "Grade item"
-        due = item.get("dueDate") or ""
-        status = item.get("status") or ""
-        grade = item.get("grade") or ""
-        notes_parts = []
-        if status:
-            notes_parts.append(f"Status: {status}")
-        if grade:
-            notes_parts.append(f"Grade: {grade}")
-        out.append(
-            build_item(
-                kind="grade",
-                course_id=course_id,
-                course_name=_short_course_name(course_name),
-                title=name,
-                notes="\n".join(notes_parts) or None,
-                due_text=due or None,
-                source_ref=f"grade:{course_id}:{name}:{due}",
-                group_name=default_group,
-                metadata={"status": status, "grade": grade},
-            )
-        )
-    return out
-
-
-def _build_outline_items(
-    outline: list[dict],
-    course_id: str,
-    course_name: str,
-    default_group: str,
-) -> list[dict]:
-    out: list[dict] = []
-    for item in outline:
-        out.append(
-            build_item(
-                kind="content_item",
-                course_id=course_id,
-                course_name=_short_course_name(course_name),
-                title=item.get("title") or "Content item",
-                notes=item.get("description") or None,
-                due_text=item.get("due_date") or None,
-                source_ref=f"outline:{course_id}:{item.get('content_id','')}",
-                group_name=default_group,
-                metadata={
-                    "content_type": item.get("content_type", "item"),
-                    "depth": item.get("depth", 0),
-                    "links": item.get("links", []),
-                },
-            )
-        )
-    return out
-
-
-def _build_assignment_items(
-    assignments: list[dict],
-    course_id: str,
-    course_name: str,
-    default_group: str,
-) -> list[dict]:
-    out: list[dict] = []
-    for item in assignments:
-        out.append(
-            build_item(
-                kind="assignment",
-                course_id=course_id,
-                course_name=_short_course_name(course_name),
-                title=item.get("title") or "Assignment",
-                notes=item.get("instructions") or None,
-                due_text=item.get("due_date") or None,
-                source_ref=f"assignment:{course_id}:{item.get('title','')}",
-                group_name=default_group,
-                metadata={
-                    "points_possible": item.get("points_possible", ""),
-                    "submission_status": item.get("submission_status", "Unattempted"),
-                    "attempts": item.get("attempts", ""),
-                    "is_timed_test": item.get("is_timed_test", False),
-                    "attachments": item.get("attachments", []),
-                },
-            )
-        )
-    return out
+    return matched_ids
 
 
 # ---------------------------------------------------------------------------
@@ -285,13 +145,13 @@ def _parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3 main.py --briefing                          # Print high-speed briefing to CLI
-  python3 main.py --due 7d                            # Print upcoming deadlines table to CLI
-  python3 main.py --outline --all                     # Print hierarchical course outlines to CLI
-  python3 main.py --assignments --all                 # Print assignment details & rubrics to CLI
-  python3 main.py --find "Project 1"                  # Search content across all courses
-  python3 main.py --outline --all --md                # Output to CLI AND save Markdown to output/
-  python3 main.py --grades --all --out grades.json    # Export grades as JSON to file
+  python3 main.py --briefing                          # Print high-speed briefing to CLI stdout
+  python3 main.py --due 7d                            # Print upcoming deadlines table to CLI stdout
+  python3 main.py --outline -c IS410                  # Print hierarchical outline tree for IS 410
+  python3 main.py --outline -c IS410,ENGL100          # Select multiple courses
+  python3 main.py --assignments --all --json          # Output all assignments as clean JSON to stdout
+  python3 main.py --briefing --out briefing.json      # Save composite school intelligence to file
+  python3 main.py --login --auto                      # One-time automated login with Duo text passcode
   python3 main.py --bot                               # Launch interactive Telegram bot daemon
         """,
     )
@@ -303,15 +163,15 @@ Examples:
     # --- authentication ---
     auth = parser.add_argument_group("authentication")
     auth.add_argument("--login", action="store_true", help="Login via SSO (skips if session is valid)")
-    auth.add_argument("--logout", action="store_true", help="Logout (clear session cookies, keep config credentials)")
-    auth.add_argument("--auto", "-a", action="store_true", help="With --login: fully automated SSO + Duo text passcode login")
+    auth.add_argument("--logout", action="store_true", help="Logout (clear session cookies)")
+    auth.add_argument("--auto", "-a", action="store_true", help="With --login: automated SSO + Duo text passcode login")
     auth.add_argument("--force", action="store_true", help="With --login: force re-login even if session exists")
     auth.add_argument("--username", "-u", help="Username for automated login (prompts if omitted)")
     auth.add_argument("--password", "-p", help="Password for automated login (prompts if omitted)")
-    auth.add_argument("--config-creds", action="store_true", help="With --login: use credentials from config.json")
-    auth.add_argument("--check-session", action="store_true", help="Test if the current session is valid")
-    auth.add_argument("--session-info", action="store_true", help="Show session creation / last-used timestamps")
-    auth.add_argument("--debug", action="store_true", help="Print detailed debug output (use with --check-session)")
+    auth.add_argument("--duo-passcode", help="Provide 6-digit Duo SMS passcode directly")
+    auth.add_argument("--check-session", action="store_true", help="Test if current session is valid")
+    auth.add_argument("--session-info", action="store_true", help="Show session timestamps")
+    auth.add_argument("--debug", action="store_true", help="Print debug output (use with --check-session)")
 
     # --- discovery ---
     disc = parser.add_argument_group("discovery")
@@ -337,16 +197,16 @@ Examples:
 
     # --- item filtering & selection ---
     filt = parser.add_argument_group("filtering & selection")
-    filt.add_argument("--type", help="Filter items by type (e.g. syllabus, document, assignment, folder, link)")
+    filt.add_argument("--course", "-c", help="Target course ID(s) or code(s), e.g. '_105737_1' or 'IS410,ENGL100'")
+    filt.add_argument("--all", action="store_true", help="Run against all configured courses")
+    filt.add_argument("--type", help="Filter outline items by type (e.g. syllabus, document, assignment, folder, link)")
     filt.add_argument("--filter", dest="keyword_filter", help="Filter items by text keyword")
 
-    # --- scope & performance ---
-    scope = parser.add_argument_group("scope & performance")
-    scope.add_argument("--course", "-c", help="Target course ID (e.g. _100001_1)")
-    scope.add_argument("--all", action="store_true", help="Run against all configured courses")
-    scope.add_argument("--concurrency", type=int, default=4, metavar="N", help="Max concurrent browser workers (default: 4)")
-    scope.add_argument("--visible", "-v", action="store_true", help="Show browser window (useful for debugging)")
-    scope.add_argument("--cdp", help="Connect to an existing browser via CDP URL (e.g. http://localhost:9222)")
+    # --- performance & execution ---
+    perf = parser.add_argument_group("performance & execution")
+    perf.add_argument("--concurrency", type=int, metavar="N", help="Override dynamic concurrency worker pool size")
+    perf.add_argument("--visible", "-v", action="store_true", help="Show browser window")
+    perf.add_argument("--cdp", help="Connect to existing browser via CDP URL")
 
     # --- telegram integration ---
     tg = parser.add_argument_group("telegram integration")
@@ -355,13 +215,12 @@ Examples:
 
     # --- output formats & file saving ---
     output = parser.add_argument_group("output")
-    output.add_argument("--json", action="store_true", help="Output JSON envelope to CLI stdout")
+    output.add_argument("--json", action="store_true", help="Output standardized JSON to CLI stdout")
     output.add_argument("--out", metavar="FILE", help="Save JSON output to FILE instead of printing")
     output.add_argument("--md", "--save", dest="md", action="store_true", help="Save formatted markdown file(s) to output/ directory")
-    output.add_argument("--raw", action="store_true", help="Output raw scraper data structures")
-    output.add_argument("--compact", action="store_true", help="Emit minified JSON (when outputting JSON)")
+    output.add_argument("--raw", action="store_true", help="Output raw unformatted scraper data")
+    output.add_argument("--compact", action="store_true", help="Emit minified JSON")
     output.add_argument("--source", default="blackboard-scraper", metavar="NAME", help="Value for the JSON source field")
-    output.add_argument("--group", default="School", metavar="NAME", help="Group name for exported items")
 
     return parser.parse_args()
 
@@ -430,10 +289,14 @@ async def main_async(args: argparse.Namespace) -> None:
 
     # --- course listing & auth ---
     if args.courses:
-        print("\n📚 Configured Courses:", file=sys.stderr)
-        for cid, name in courses.items():
-            print(f"  {cid}: {name}", file=sys.stderr)
-        print("", file=sys.stderr)
+        if args.json or args.out:
+            course_list = [{"course_id": cid, "course_name": name} for cid, name in courses.items()]
+            _emit_json(args, {"courses": course_list})
+        else:
+            print("\n📚 Configured Courses:")
+            for cid, name in courses.items():
+                print(f"  • {cid}: {name}")
+            print("")
         return
 
     if args.login:
@@ -480,15 +343,17 @@ async def main_async(args: argparse.Namespace) -> None:
     if not await _require_session_async(cdp):
         return
 
-    json_items: list[dict] = []
+    # --- resolve target courses ---
+    target_cids = resolve_target_courses(args.course, args.all, courses)
 
     # --- high-speed concurrent briefing ---
     if args.briefing:
+        concurrency = get_optimal_concurrency(TaskProfile.MEDIUM, args.concurrency)
         bundle = await run_briefing_async(
             headless=headless,
             cdp_url=cdp,
             write_markdown=args.md,
-            concurrency=args.concurrency,
+            concurrency=concurrency,
         )
 
         if args.telegram:
@@ -505,20 +370,11 @@ async def main_async(args: argparse.Namespace) -> None:
                 print(f"⚠️ Telegram notification error: {e}", file=sys.stderr)
 
         if args.raw:
-            _emit_raw(args, bundle)
+            _emit_json(args, bundle)
             return
 
         if args.json or args.out:
-            json_items.extend(_build_activity_items(bundle.get("activity", []), args.group))
-            json_items.extend(_build_calendar_items(bundle.get("calendar", []), None, args.group))
-            for course_id, course_data in bundle.get("courses", {}).items():
-                if isinstance(course_data, dict):
-                    course_name = course_data.get("course_name", courses.get(course_id, course_id))
-                    json_items.extend(
-                        _build_announcement_items(course_data.get("announcements", []), course_id, course_name, args.group)
-                    )
-                    json_items.extend(_build_grade_items(course_data.get("grades", []), course_id, course_name, args.group))
-            _emit_output(args, json_items)
+            _emit_json(args, bundle)
         else:
             # Default to clean CLI stdout digest
             print(format_briefing_cli(bundle))
@@ -527,7 +383,8 @@ async def main_async(args: argparse.Namespace) -> None:
     # --- due dates aggregator ---
     window = f"{args.upcoming}d" if args.upcoming else (args.due if args.due is not None else None)
     if window is not None:
-        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp))
+        concurrency = get_optimal_concurrency(TaskProfile.MEDIUM, args.concurrency)
+        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=concurrency))
         await session_manager.initialize()
         try:
             async with session_manager.acquire_page() as page:
@@ -542,13 +399,8 @@ async def main_async(args: argparse.Namespace) -> None:
         finally:
             await session_manager.close()
 
-        if args.raw:
-            _emit_raw(args, items)
-            return
-
-        if args.json or args.out:
-            json_items.extend(_build_calendar_items(items, None, args.group))
-            _emit_output(args, json_items)
+        if args.raw or args.json or args.out:
+            _emit_json(args, items)
         else:
             # Default to CLI table
             print(format_due_dates_table(items, window_filter=window))
@@ -556,16 +408,16 @@ async def main_async(args: argparse.Namespace) -> None:
 
     # --- course outline scraper ---
     if args.outline:
-        target_courses = list(courses.keys()) if args.all else ([args.course] if args.course else [])
-        if not target_courses:
-            print("❌ Specify --course <ID> or --all", file=sys.stderr)
+        if not target_cids:
+            print("❌ Specify course via -c <ID/Code> (e.g. -c IS410) or --all", file=sys.stderr)
             return
 
-        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=args.concurrency))
+        concurrency = get_optimal_concurrency(TaskProfile.HEAVY, args.concurrency)
+        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=concurrency))
         await session_manager.initialize()
         raw_all: dict[str, list[dict]] = {}
         try:
-            pool = AsyncCourseWorkerPool(session_manager)
+            pool = AsyncCourseWorkerPool(session_manager, task_profile=TaskProfile.HEAVY)
             async def _worker(cid, cname, page):
                 data = await scrape_course_outline_async(cid, page)
                 if args.type:
@@ -577,20 +429,21 @@ async def main_async(args: argparse.Namespace) -> None:
                     save_outline(data, cid)
                 return data
 
-            target_dict = {cid: courses.get(cid, cid) for cid in target_courses}
+            target_dict = {cid: courses.get(cid, cid) for cid in target_cids}
             raw_all = await pool.execute_task_per_course(target_dict, _worker)
         finally:
             await session_manager.close()
 
-        if args.raw:
-            _emit_raw(args, raw_all)
-            return
-
-        if args.json or args.out:
-            for cid, data in raw_all.items():
-                if isinstance(data, list):
-                    json_items.extend(_build_outline_items(data, cid, courses.get(cid, cid), args.group))
-            _emit_output(args, json_items)
+        if args.raw or args.json or args.out:
+            formatted_json = [
+                {
+                    "course_id": cid,
+                    "course_name": courses.get(cid, cid),
+                    "items": data if isinstance(data, list) else [],
+                }
+                for cid, data in raw_all.items()
+            ]
+            _emit_json(args, formatted_json)
         else:
             # Default to CLI outline tree
             for cid, data in raw_all.items():
@@ -602,16 +455,16 @@ async def main_async(args: argparse.Namespace) -> None:
 
     # --- deep assignments scraper ---
     if args.assignments:
-        target_courses = list(courses.keys()) if args.all else ([args.course] if args.course else [])
-        if not target_courses:
-            print("❌ Specify --course <ID> or --all", file=sys.stderr)
+        if not target_cids:
+            print("❌ Specify course via -c <ID/Code> (e.g. -c IS410) or --all", file=sys.stderr)
             return
 
-        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=args.concurrency))
+        concurrency = get_optimal_concurrency(TaskProfile.HEAVY, args.concurrency)
+        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=concurrency))
         await session_manager.initialize()
         raw_all_assign: dict[str, list[dict]] = {}
         try:
-            pool = AsyncCourseWorkerPool(session_manager)
+            pool = AsyncCourseWorkerPool(session_manager, task_profile=TaskProfile.HEAVY)
             async def _worker(cid, cname, page):
                 data = await scrape_course_assignments_async(cid, page)
                 if args.keyword_filter:
@@ -621,20 +474,21 @@ async def main_async(args: argparse.Namespace) -> None:
                     save_assignments(data, cid)
                 return data
 
-            target_dict = {cid: courses.get(cid, cid) for cid in target_courses}
+            target_dict = {cid: courses.get(cid, cid) for cid in target_cids}
             raw_all_assign = await pool.execute_task_per_course(target_dict, _worker)
         finally:
             await session_manager.close()
 
-        if args.raw:
-            _emit_raw(args, raw_all_assign)
-            return
-
-        if args.json or args.out:
-            for cid, data in raw_all_assign.items():
-                if isinstance(data, list):
-                    json_items.extend(_build_assignment_items(data, cid, courses.get(cid, cid), args.group))
-            _emit_output(args, json_items)
+        if args.raw or args.json or args.out:
+            formatted_json = [
+                {
+                    "course_id": cid,
+                    "course_name": courses.get(cid, cid),
+                    "assignments": data if isinstance(data, list) else [],
+                }
+                for cid, data in raw_all_assign.items()
+            ]
+            _emit_json(args, formatted_json)
         else:
             # Default to CLI summary
             for cid, data in raw_all_assign.items():
@@ -654,20 +508,20 @@ async def main_async(args: argparse.Namespace) -> None:
         finally:
             await session_manager.close()
 
-        print(f"\n🔎 Search Results for '{args.find}':")
-        if not matches:
-            print("  (No matching items found across courses)")
-        for m in matches:
-            due_str = f" (Due: {m['due_date']})" if m.get("due_date") else ""
-            print(f"• [{m['course_name']}] {m['title']} [{m['content_type']}]{due_str}")
+        if args.json or args.out:
+            _emit_json(args, matches)
+        else:
+            print(f"\n🔎 Search Results for '{args.find}':")
+            if not matches:
+                print("  (No matching items found across courses)")
+            for m in matches:
+                due_str = f" (Due: {m['due_date']})" if m.get("due_date") else ""
+                print(f"• [{m['course_name']}] {m['title']} [{m['content_type']}]{due_str}")
         return
 
     # --- item grabber ---
     if args.grab:
-        target_cid = args.course or (list(courses.keys())[0] if courses else None)
-        if not target_cid:
-            print("❌ Specify --course <ID> to grab item from.", file=sys.stderr)
-            return
+        target_cid = target_cids[0] if target_cids else list(courses.keys())[0]
         session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp))
         await session_manager.initialize()
         try:
@@ -676,43 +530,42 @@ async def main_async(args: argparse.Namespace) -> None:
         finally:
             await session_manager.close()
 
-        _emit_raw(args, item)
+        _emit_json(args, item)
         return
 
     # --- announcements ---
     if args.announcements:
-        target_courses = list(courses.keys()) if args.all else ([args.course] if args.course else [])
-        if not target_courses:
-            print("❌ Specify --course <ID> or --all", file=sys.stderr)
+        if not target_cids:
+            print("❌ Specify course via -c <ID/Code> (e.g. -c IS410) or --all", file=sys.stderr)
             return
 
-        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=args.concurrency))
+        concurrency = get_optimal_concurrency(TaskProfile.LIGHT, args.concurrency)
+        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=concurrency))
         await session_manager.initialize()
         raw_ann: dict[str, list[dict]] = {}
         try:
-            pool = AsyncCourseWorkerPool(session_manager)
+            pool = AsyncCourseWorkerPool(session_manager, task_profile=TaskProfile.LIGHT)
             async def _worker(cid, cname, page):
                 data = await scrape_announcements_async(cid, page)
                 if args.md:
                     save_announcements(data, cid)
                 return data
 
-            target_dict = {cid: courses.get(cid, cid) for cid in target_courses}
+            target_dict = {cid: courses.get(cid, cid) for cid in target_cids}
             raw_ann = await pool.execute_task_per_course(target_dict, _worker)
         finally:
             await session_manager.close()
 
-        if args.raw:
-            _emit_raw(args, raw_ann)
-            return
-
-        if args.json or args.out:
-            for cid, data in raw_ann.items():
-                if isinstance(data, list):
-                    json_items.extend(
-                        _build_announcement_items(data, cid, courses.get(cid, cid), args.group)
-                    )
-            _emit_output(args, json_items)
+        if args.raw or args.json or args.out:
+            formatted_json = [
+                {
+                    "course_id": cid,
+                    "course_name": courses.get(cid, cid),
+                    "announcements": data if isinstance(data, list) else [],
+                }
+                for cid, data in raw_ann.items()
+            ]
+            _emit_json(args, formatted_json)
         else:
             # Default to CLI output
             for cid, data in raw_ann.items():
@@ -730,36 +583,37 @@ async def main_async(args: argparse.Namespace) -> None:
 
     # --- grades ---
     if args.grades:
-        target_courses = list(courses.keys()) if args.all else ([args.course] if args.course else [])
-        if not target_courses:
-            print("❌ Specify --course <ID> or --all", file=sys.stderr)
+        if not target_cids:
+            print("❌ Specify course via -c <ID/Code> (e.g. -c IS410) or --all", file=sys.stderr)
             return
 
-        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=args.concurrency))
+        concurrency = get_optimal_concurrency(TaskProfile.LIGHT, args.concurrency)
+        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=concurrency))
         await session_manager.initialize()
         raw_gr: dict[str, list[dict]] = {}
         try:
-            pool = AsyncCourseWorkerPool(session_manager)
+            pool = AsyncCourseWorkerPool(session_manager, task_profile=TaskProfile.LIGHT)
             async def _worker(cid, cname, page):
                 data = await scrape_grades_async(cid, page)
                 if args.md:
                     save_grades(data, cid)
                 return data
 
-            target_dict = {cid: courses.get(cid, cid) for cid in target_courses}
+            target_dict = {cid: courses.get(cid, cid) for cid in target_cids}
             raw_gr = await pool.execute_task_per_course(target_dict, _worker)
         finally:
             await session_manager.close()
 
-        if args.raw:
-            _emit_raw(args, raw_gr)
-            return
-
-        if args.json or args.out:
-            for cid, data in raw_gr.items():
-                if isinstance(data, list):
-                    json_items.extend(_build_grade_items(data, cid, courses.get(cid, cid), args.group))
-            _emit_output(args, json_items)
+        if args.raw or args.json or args.out:
+            formatted_json = [
+                {
+                    "course_id": cid,
+                    "course_name": courses.get(cid, cid),
+                    "grades": data if isinstance(data, list) else [],
+                }
+                for cid, data in raw_gr.items()
+            ]
+            _emit_json(args, formatted_json)
         else:
             # Default to CLI table
             for cid, data in raw_gr.items():
@@ -780,18 +634,15 @@ async def main_async(args: argparse.Namespace) -> None:
         await session_manager.initialize()
         try:
             async with session_manager.acquire_page() as page:
-                calendar = await scrape_calendar_async(page, args.course)
+                target_cid = target_cids[0] if target_cids else None
+                calendar = await scrape_calendar_async(page, target_cid)
                 if args.md:
-                    save_calendar(calendar, args.course)
+                    save_calendar(calendar, target_cid)
         finally:
             await session_manager.close()
 
-        if args.raw:
-            _emit_raw(args, calendar)
-            return
-        if args.json or args.out:
-            json_items.extend(_build_calendar_items(calendar, args.course, args.group))
-            _emit_output(args, json_items)
+        if args.raw or args.json or args.out:
+            _emit_json(args, calendar)
         else:
             print(format_due_dates_table(calendar, window_filter="calendar"))
         return
@@ -808,12 +659,8 @@ async def main_async(args: argparse.Namespace) -> None:
         finally:
             await session_manager.close()
 
-        if args.raw:
-            _emit_raw(args, activity)
-            return
-        if args.json or args.out:
-            json_items.extend(_build_activity_items(activity, args.group))
-            _emit_output(args, json_items)
+        if args.raw or args.json or args.out:
+            _emit_json(args, activity)
         else:
             print("\n🌊 Activity Stream:")
             print("━" * 50)
@@ -831,7 +678,10 @@ async def main_async(args: argparse.Namespace) -> None:
             ctx, page = _launch_context(p, headless, cdp)
             data = scrape_profile(page)
             if data:
-                _print_profile(data)
+                if args.json or args.out:
+                    _emit_json(args, data)
+                else:
+                    _print_profile(data)
                 if args.md:
                     save_profile(data)
             ctx.close()
@@ -839,6 +689,9 @@ async def main_async(args: argparse.Namespace) -> None:
 
     # --- discussions ---
     if args.discussions:
+        if not target_cids:
+            print("❌ Specify course via -c <ID/Code> or --all", file=sys.stderr)
+            return
         kwargs = {
             "max_post_clicks": getattr(args, "max_posts", None),
             "max_participant_clicks": getattr(args, "max_parts", None),
@@ -846,30 +699,25 @@ async def main_async(args: argparse.Namespace) -> None:
             "participants_only": getattr(args, "participants_only", False),
             "titles_only": getattr(args, "titles_only", False),
         }
-        target_courses = list(courses.keys()) if args.all else ([args.course] if args.course else [])
-        if not target_courses:
-            print("❌ Specify --course <ID> or --all", file=sys.stderr)
-            return
         raw_all_disc: list[dict] = []
         with sync_playwright() as p:
             ctx, _ = _launch_context(p, headless, cdp)
-            for course_id in target_courses:
+            for course_id in target_cids:
                 page = ctx.new_page()
                 data = scrape_discussions(course_id, page, **kwargs)
                 if args.md:
                     save_discussions(data, course_id, titles_only=getattr(args, "titles_only", False))
-                if args.raw:
-                    raw_all_disc.extend(data)
-                else:
-                    json_items.extend(
-                        _build_discussion_items(data, course_id, courses.get(course_id, course_id), args.group)
-                    )
+                raw_all_disc.append({
+                    "course_id": course_id,
+                    "course_name": courses.get(course_id, course_id),
+                    "discussions": data
+                })
                 page.close()
             ctx.close()
-        if args.raw:
-            _emit_raw(args, raw_all_disc)
+        if args.raw or args.json or args.out:
+            _emit_json(args, raw_all_disc)
             return
-        _emit_output(args, json_items)
+        print(f"Scraped discussions for {len(target_cids)} courses.")
         return
 
     print("No scraper action selected. Run with --help.", file=sys.stderr)
