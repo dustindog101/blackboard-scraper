@@ -514,8 +514,10 @@ async def main_async(args: argparse.Namespace) -> None:
                 headless=headless,
                 cdp_url=cdp,
                 auto_exp=auto_exp_mode,
+                force=args.force,
             )
         return
+
 
 
     if args.logout:

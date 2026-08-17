@@ -659,10 +659,11 @@ def login(force: bool = False, username: str = None, password: str = None, cdp_u
         context.close()
 
 
-def login_auto(username: str = None, password: str = None, headless: bool = False, cdp_url: str = None, auto_exp: bool = False):
+def login_auto(username: str = None, password: str = None, headless: bool = False, cdp_url: str = None, auto_exp: bool = False, force: bool = False):
     """
     Automated login via SSO + Duo text passcode.
     When auto_exp=True, automatically listens for incoming macOS SMS/iMessage 2FA passcodes.
+    When force=True, clears cookies and forces a full re-authentication.
     """
     if auto_exp:
         print("\n⚡ [EXPERIMENTAL] Automated SSO Login with Real-Time macOS SMS 2FA Extraction")
@@ -674,6 +675,7 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
     if cdp_url:
         print("🔌 Ignoring --login --auto since you are connected to an existing CDP browser.")
         return
+
 
 
     config = load_config().get("auto_login", {})
@@ -706,6 +708,9 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
         try:
             login_stage = "launching browser context"
             context, page = _launch_context(p, headless=headless)
+            if force:
+                context.clear_cookies()
+                print("   🧹 Forced clean re-authentication: session cookies cleared.")
         except SystemExit:
             return
 
@@ -762,16 +767,18 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 print("   ⚠️  Did not find username/password fields. May already be at Duo or logged in.")
 
             # --- 3. CHECK IF ALREADY AUTHENTICATED ---
-            login_stage = "checking for direct Blackboard redirect"
-            for _ in range(6):
-                page.wait_for_timeout(1000)
-                if "blackboard.umbc.edu/ultra" in page.url and _is_authenticated_session(page):
-                    print("   ✅ Already authenticated (active session detected). Skipping Duo.")
-                    _save_session(context)
-                    track_session_usage("login")
-                    print("✨ Auto-Login Successful!")
-                    context.close()
-                    return
+            if not force:
+                login_stage = "checking for direct Blackboard redirect"
+                for _ in range(6):
+                    page.wait_for_timeout(1000)
+                    if "blackboard.umbc.edu/ultra" in page.url and _is_authenticated_session(page):
+                        print("   ✅ Already authenticated (active session detected). Skipping Duo.")
+                        _save_session(context)
+                        track_session_usage("login")
+                        print("✨ Auto-Login Successful!")
+                        context.close()
+                        return
+
 
             # --- 4. DETECT DUO ---
             # wait_for_url won't fire if we're already on Duo — check first
