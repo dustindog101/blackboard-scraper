@@ -522,8 +522,9 @@ async def main_async(args: argparse.Namespace) -> None:
 
     if args.logout:
         from core.session import logout as do_logout
-        do_logout(keep_config_creds=True)
+        await asyncio.to_thread(do_logout, keep_config_creds=True)
         return
+
 
     if args.check_session:
         ok = await check_session_async(debug=args.debug, headless=headless)
