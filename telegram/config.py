@@ -1,6 +1,8 @@
+import json
 import os
+from pathlib import Path
 from typing import Any, Dict
-from core.config import load_config
+from core.config import CONFIG_FILE, load_config
 
 
 def get_telegram_config() -> Dict[str, Any]:
@@ -15,7 +17,7 @@ def get_telegram_config() -> Dict[str, Any]:
     admin_chat_id_raw = os.getenv("TELEGRAM_ADMIN_CHAT_ID") or tg_config.get("admin_chat_id")
 
     admin_chat_id = None
-    if admin_chat_id_raw:
+    if admin_chat_id_raw is not None and str(admin_chat_id_raw).strip():
         try:
             admin_chat_id = int(admin_chat_id_raw)
         except ValueError:
@@ -27,8 +29,7 @@ def get_telegram_config() -> Dict[str, Any]:
     else:
         enabled = tg_config.get("enabled", False)
 
-    # Must have both token and admin chat ID to be active
-    is_active = bool(enabled and bot_token and admin_chat_id)
+    is_active = bool(enabled and bot_token)
 
     allowed_chats = tg_config.get("allowed_chat_ids", [])
     if admin_chat_id and admin_chat_id not in allowed_chats:
@@ -48,3 +49,16 @@ def get_telegram_config() -> Dict[str, Any]:
             "announcements": {"enabled": True},
         }),
     }
+
+
+def save_admin_chat_id(chat_id: Any) -> None:
+    """Saves the detected admin chat ID into config.json."""
+    try:
+        cfg = load_config()
+        if "telegram" not in cfg:
+            cfg["telegram"] = {}
+        cfg["telegram"]["admin_chat_id"] = chat_id
+        cfg["telegram"]["enabled"] = True
+        CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+    except Exception as e:
+        print(f"⚠️ Could not save admin_chat_id: {e}")
