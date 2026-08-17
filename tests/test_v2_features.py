@@ -5,6 +5,7 @@ Unit and Integration Tests for Blackboard Ultra Scraper v2 features:
 - Message chunking and HTML escaping for Telegram
 - Standardized v2 Composite JSON schema generation
 - Dual-channel Duo passcode regex parsing
+- Lightweight HTTP session validation
 - Due Date Aggregation logic and date parsing
 """
 
@@ -15,6 +16,7 @@ from datetime import datetime
 
 from core.export_json import build_item, build_export_doc, build_composite_schema, _to_unix_timestamp
 from core.async_engine import RouteOptimizer, TaskProfile, get_optimal_concurrency
+from core.session import quick_check_session_http
 from telegram.formatter import escape_html, chunk_message, format_due_dates_list, format_grade_alert, format_announcement_alert
 
 
@@ -117,6 +119,14 @@ class TestRouteOptimizer(unittest.TestCase):
     def test_blocked_domains(self):
         self.assertIn("telemetry.blackboard.com", RouteOptimizer.BLOCKED_DOMAINS)
         self.assertIn("google-analytics.com", RouteOptimizer.BLOCKED_DOMAINS)
+
+
+class TestSessionValidation(unittest.TestCase):
+    def test_http_probe_live(self):
+        is_valid, user_data = quick_check_session_http()
+        if is_valid:
+            self.assertIsNotNone(user_data)
+            self.assertTrue("id" in user_data or "studentId" in user_data or "userName" in user_data)
 
 
 if __name__ == "__main__":

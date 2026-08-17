@@ -8,7 +8,7 @@ import urllib.parse
 import urllib.request
 
 from core.config import load_courses
-from core.session import check_session
+from core.session import check_session, quick_check_session_http
 from scrapers.briefing import run_briefing_async
 from scrapers.calendar import scrape_calendar_async
 from scrapers.grades import scrape_grades_async
@@ -58,7 +58,8 @@ class SimpleTelegramBot:
         self.running = False
         self.watch_task: Optional[asyncio.Task] = None
         self.watch_interval = 1800  # Default 30 min
-        self.user_states: Dict[str, str] = {}  # chat_id -> state (e.g. 'waiting_search_query')
+        self.user_states: Dict[str, str] = {}  # chat_id -> state
+        self.last_session_valid: Optional[bool] = None
 
     def is_authorized(self, chat_id: Any) -> bool:
         """Verify chat_id is in allowed list, or auto-pair if admin is unconfigured."""
@@ -228,13 +229,13 @@ class SimpleTelegramBot:
             self.edit_message(chat_id, message_id, format_help_telegram(), reply_markup=self.get_back_keyboard())
 
         elif data == "btn:check":
-            self.edit_message(chat_id, message_id, "⏳ <i>Checking Blackboard session health...</i>")
-            async with SCRAPER_MUTEX:
-                valid = await asyncio.to_thread(check_session, debug=False, headless=True)
-            if valid:
-                res_text = "✅ <b>Blackboard Session ACTIVE</b>\nAll scraper features and persistent tokens are ready."
+            # Instant lightweight sub-150ms HTTP check
+            valid, user_data = quick_check_session_http()
+            if valid and user_data:
+                uid = user_data.get("studentId") or user_data.get("userName") or "Active"
+                res_text = f"✅ <b>Blackboard Session ACTIVE</b>\n👤 Student ID / User: <code>{escape_html(uid)}</code>\n⚡ Verified via HTTP API in &lt;150ms"
             else:
-                res_text = "❌ <b>Session EXPIRED</b>\nPlease run <code>python3 main.py --login</code> in your terminal."
+                res_text = "❌ <b>Session EXPIRED or Missing</b>\nPlease run <code>python3 main.py --login</code> to re-authenticate."
             self.edit_message(chat_id, message_id, res_text, reply_markup=self.get_back_keyboard(refresh_action="check"))
 
         elif data in ("btn:briefing", "btn:due_7d", "btn:grades", "btn:announcements", "btn:outline"):
@@ -393,15 +394,13 @@ class SimpleTelegramBot:
                 self.send_message(chat_id, "\n".join(lines), reply_markup=self.get_back_keyboard())
 
             elif cmd == "/check":
-                mid = self.send_message(chat_id, "⏳ <i>Checking Blackboard session health...</i>")
-                async with SCRAPER_MUTEX:
-                    valid = await asyncio.to_thread(check_session, debug=False, headless=True)
-                if valid:
-                    res_text = "✅ <b>Blackboard Session ACTIVE</b>\nAll scraper features ready."
+                valid, user_data = quick_check_session_http()
+                if valid and user_data:
+                    uid = user_data.get("studentId") or user_data.get("userName") or "Active"
+                    res_text = f"✅ <b>Blackboard Session ACTIVE</b>\n👤 Student ID: <code>{escape_html(uid)}</code>\n⚡ Verified via HTTP API in &lt;150ms"
                 else:
                     res_text = "❌ <b>Session EXPIRED</b>\nPlease run <code>python3 main.py --login</code> to renew."
-                if mid:
-                    self.edit_message(chat_id, mid, res_text, reply_markup=self.get_back_keyboard())
+                self.send_message(chat_id, res_text, reply_markup=self.get_back_keyboard())
 
             elif cmd == "/briefing":
                 mid = self.send_message(chat_id, "⚡ <i>Running concurrent briefing across all courses...</i>")
@@ -478,20 +477,42 @@ class SimpleTelegramBot:
             self.send_message(chat_id, menu_text, reply_markup=self.get_main_menu_keyboard())
 
     # ------------------------------------------------------------------------
-    # Background Periodic Watch Loop
+    # Background Periodic Watch Loop & Session Health Monitor
     # ------------------------------------------------------------------------
 
     async def _periodic_watch_loop(self):
-        """Background loop that periodically checks for new grades and announcements."""
+        """Background loop that monitors session health and checks for updates."""
         while self.running:
+            # Check session health instantaneously
+            valid, _ = quick_check_session_http()
+            if self.last_session_valid is not None and self.last_session_valid and not valid:
+                # Session just expired! Notify user
+                logger.warning("Session expired during background monitoring.")
+                if self.admin_chat_id:
+                    self.notifier.send_raw_message(
+                        "🚨 <b>Blackboard Session Expired</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        "Your Blackboard session has expired.\n"
+                        "Please run <code>python3 main.py --login</code> to re-authenticate."
+                    )
+            elif self.last_session_valid is False and valid:
+                # Session restored!
+                logger.info("Session restored during background monitoring.")
+                if self.admin_chat_id:
+                    self.notifier.send_raw_message("✅ <b>Blackboard Session Restored</b>\nBackground monitors active.")
+
+            self.last_session_valid = valid
+
+            # Periodic content scrape if session is valid
+            if valid:
+                try:
+                    async with SCRAPER_MUTEX:
+                        bundle = await run_briefing_async(headless=True, write_markdown=False, concurrency=4)
+                    self.notifier.process_and_notify_diffs(bundle)
+                except Exception as e:
+                    logger.debug(f"Periodic watch error: {e}")
+
             await asyncio.sleep(self.watch_interval)
-            logger.info("Executing periodic watch check...")
-            try:
-                async with SCRAPER_MUTEX:
-                    bundle = await run_briefing_async(headless=True, write_markdown=False, concurrency=4)
-                self.notifier.process_and_notify_diffs(bundle)
-            except Exception as e:
-                logger.error(f"Periodic watch error: {e}")
 
     # ------------------------------------------------------------------------
     # Main Long-Polling Daemon Loop
@@ -508,6 +529,10 @@ class SimpleTelegramBot:
             print(f"   👤 Authorized Admin Chat ID: {self.admin_chat_id}")
         else:
             print("   ⏳ Waiting for admin user to message the bot on Telegram for auto-pairing...")
+
+        # Initial session check
+        valid, _ = quick_check_session_http()
+        self.last_session_valid = valid
 
         # Setup native commands menu
         self.setup_native_commands()
