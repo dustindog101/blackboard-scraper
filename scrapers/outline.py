@@ -458,8 +458,40 @@ async def scrape_course_outline_async(
 
 
 # ============================================================================
-# 5. File Downloader Helper
+# 5. File & Attachment Downloader Helpers
 # ============================================================================
+
+def fetch_item_attachments(
+    course_id: str,
+    content_id: str,
+    cookie_header: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Fetches real attachment IDs, filenames, and download URLs for a specific content item.
+    """
+    cookie_header = cookie_header or get_cookie_header()
+    if not cookie_header:
+        return []
+
+    url = f"{BLACKBOARD_BASE}/learn/api/public/v1/courses/{course_id}/contents/{content_id}/attachments"
+    data = _api_get(url, cookie_header, timeout=8.0)
+    if not data or "results" not in data:
+        return []
+
+    attachments = []
+    for att in data.get("results", []):
+        att_id = att.get("id")
+        file_name = att.get("fileName", "attachment")
+        mime_type = att.get("mimeType", "application/octet-stream")
+        dl_url = f"{BLACKBOARD_BASE}/learn/api/public/v1/courses/{course_id}/contents/{content_id}/attachments/{att_id}/download"
+        attachments.append({
+            "id": att_id,
+            "file_name": file_name,
+            "mime_type": mime_type,
+            "download_url": dl_url,
+        })
+    return attachments
+
 
 def download_course_file(
     download_url: str,
@@ -493,7 +525,47 @@ def download_course_file(
     except Exception as e:
         logger.error(f"Failed to download file from {download_url} to {destination_path}: {e}")
         return False
-        return False
+
+
+def download_content_item_files(
+    course_id: str,
+    content_id: str,
+    destination_dir: Path,
+    default_filename: str = "downloaded_file",
+    cookie_header: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Resolves true attachment IDs for an item and downloads all associated files.
+    Returns list of downloaded file info dicts.
+    """
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    attachments = fetch_item_attachments(course_id, content_id, cookie_header)
+    downloaded = []
+
+    if attachments:
+        for att in attachments:
+            fname = att.get("file_name") or default_filename
+            dest = destination_dir / fname
+            success = download_course_file(att["download_url"], dest, cookie_header)
+            if success:
+                downloaded.append({
+                    "file_name": fname,
+                    "saved_to": str(dest),
+                    "size_bytes": dest.stat().st_size if dest.exists() else 0,
+                })
+    else:
+        # Fallback to direct content attachment download endpoint
+        fallback_url = f"{BLACKBOARD_BASE}/learn/api/public/v1/courses/{course_id}/contents/{content_id}/attachments/default/download"
+        dest = destination_dir / default_filename
+        success = download_course_file(fallback_url, dest, cookie_header)
+        if success:
+            downloaded.append({
+                "file_name": default_filename,
+                "saved_to": str(dest),
+                "size_bytes": dest.stat().st_size if dest.exists() else 0,
+            })
+
+    return downloaded
 
 
 # ============================================================================
@@ -501,7 +573,7 @@ def download_course_file(
 # ============================================================================
 
 def format_outline_tree(data: List[Dict[str, Any]], course_name: str, course_id: str = "") -> str:
-    """Formats outline items into a clear hierarchical CLI view with icons and breadcrumbs."""
+    """Formats outline items into a clear, beautiful hierarchical tree view with visual branch connectors."""
     type_icons = {
         "syllabus": "📜",
         "folder": "📁",
@@ -524,28 +596,71 @@ def format_outline_tree(data: List[Dict[str, Any]], course_name: str, course_id:
         lines.append("  (Course is currently closed or has no content items)")
         return "\n".join(lines)
 
-    for item in data:
-        depth = item.get("depth", 0)
-        indent = "  " * depth
-        icon = type_icons.get(item.get("content_type", "item"), "📌")
-        title = item.get("title", "Untitled")
-        ctype = item.get("content_type", "item")
-        due = f" — (Due: {item['due_date']})" if item.get("due_date") else ""
-        dl_tag = " 💾 [File Ready]" if item.get("is_downloadable") else ""
+    # Build parent -> children map
+    tree: Dict[Optional[str], List[Dict[str, Any]]] = {}
+    for it in data:
+        pid = it.get("parent_id")
+        tree.setdefault(pid, []).append(it)
 
-        lines.append(f"{indent}{icon} {title} [{ctype}]{dl_tag}{due}")
-        if item.get("description"):
-            desc = item["description"].replace("\n", " ").strip()
-            if len(desc) > 130:
-                desc = desc[:127] + "..."
-            lines.append(f"{indent}   > 💬 {desc}")
+    def render_nodes(parent_id: Optional[str], prefix: str = ""):
+        children = tree.get(parent_id, [])
+        total = len(children)
+        for i, node in enumerate(children):
+            is_last = (i == total - 1)
+            connector = "└── " if is_last else "├── "
+            child_prefix = "    " if is_last else "│   "
 
-        if item.get("external_url"):
-            lines.append(f"{indent}   └ 🔗 {item['external_url']}")
-        elif item.get("download_url"):
-            lines.append(f"{indent}   └ 📥 ID: {item.get('content_id')}")
+            icon = type_icons.get(node.get("content_type", "item"), "📌")
+            title = node.get("title", "Untitled")
+            ctype = node.get("content_type", "item")
+            due = f" (Due: {node['due_date']})" if node.get("due_date") else ""
+            
+            # Show download ID tag for files/documents so user can copy ID
+            id_tag = f" [ID: {node.get('content_id')}]" if node.get("is_downloadable") or ctype in ("file", "document", "syllabus") else ""
 
+            lines.append(f"{prefix}{connector}{icon} {title} [{ctype}]{id_tag}{due}")
+
+            if node.get("description"):
+                desc = node["description"].replace("\n", " ").strip()
+                if len(desc) > 95:
+                    desc = desc[:92] + "..."
+                lines.append(f"{prefix}{child_prefix}   💬 {desc}")
+
+            if node.get("external_url"):
+                lines.append(f"{prefix}{child_prefix}   🔗 {node['external_url']}")
+
+            # Recursively render children
+            if node.get("has_children") or node.get("content_id") in tree:
+                render_nodes(node.get("content_id"), prefix + child_prefix)
+
+    # Render starting from root (parent_id is None)
+    render_nodes(None, "")
     return "\n".join(lines)
+
+
+def clean_outline_json(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Prunes bloated null/empty fields from outline items for clean, compact JSON output."""
+    cleaned = []
+    for item in data:
+        node: Dict[str, Any] = {
+            "id": item.get("content_id"),
+            "title": item.get("title"),
+            "type": item.get("content_type", "item"),
+        }
+        if item.get("parent_path"):
+            node["path"] = " / ".join(item["parent_path"])
+        if item.get("description"):
+            node["description"] = item["description"].strip()
+        if item.get("is_downloadable"):
+            node["is_downloadable"] = True
+        if item.get("download_url"):
+            node["download_url"] = item["download_url"]
+        if item.get("external_url"):
+            node["external_url"] = item["external_url"]
+        if item.get("due_date"):
+            node["due_date"] = item["due_date"]
+        cleaned.append(node)
+    return cleaned
 
 
 def save_outline(data: List[Dict[str, Any]], course_id: str) -> Path:
@@ -587,7 +702,7 @@ def save_outline(data: List[Dict[str, Any]], course_id: str) -> Path:
             icon = type_icons.get(item.get("content_type", "item"), "📌")
             title = item.get("title", "Untitled")
             due = f" — _(Due: {item['due_date']})_" if item.get("due_date") else ""
-            dl_str = " `[Downloadable]`" if item.get("is_downloadable") else ""
+            dl_str = f" `[ID: {item.get('content_id')}]`" if item.get("is_downloadable") else ""
 
             lines.append(f"{indent}- {icon} **{title}** [{item.get('content_type', 'item')}]{dl_str}{due}")
             if item.get("description"):
@@ -598,8 +713,6 @@ def save_outline(data: List[Dict[str, Any]], course_id: str) -> Path:
 
             if item.get("external_url"):
                 lines.append(f"{indent}  └ 🔗 [{item.get('title', 'Link')}]({item['external_url']})")
-            for att in item.get("attachments", []):
-                lines.append(f"{indent}  └ 📥 `{att.get('file_name', 'File')}` (ID: `{att.get('id')}`)")
 
     filepath.write_text("\n".join(lines))
     return filepath

@@ -11,40 +11,43 @@ This skill teaches agents how to operate, debug, and query the **UMBC Blackboard
 
 ## ⚡ Quick Reference: Most Common Commands
 
-Always run commands with the local virtual environment: `./.venv/bin/python main.py <flags>` from `/Users/king/Desktop/school files/tools/blackboard-scraper`.
+Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** from any terminal directory (or `./.venv/bin/python main.py <flags>` from the repo root).
 
 | Goal | CLI Command | Output / Behavior |
 | :--- | :--- | :--- |
-| **Daily Academic Briefing** | `python3 main.py --briefing` | Parallel scrape across all enrolled courses (Deadlines + Grades + Announcements) |
-| **Upcoming Deadlines** | `python3 main.py --due 7d` | Scrapes global calendar and course activity stream |
-| **Latest Grades** | `python3 main.py --grades` | Fetches grades, letter grades, and instructor feedback |
-| **Recent Announcements** | `python3 main.py --announcements` | Retrieves latest course-wide announcements |
-| **Keyword Search** | `python3 main.py --search "Syllabus"` | Deep content search across course outline trees |
-| **Course Outline Tree** | `python3 main.py --outline -c IS410` | Dumps complete outline folders, items, and files |
-| **Active Course Discovery** | `python3 main.py --discover` | Intelligently isolates current active term (Fall 2026) in <200ms |
-| **Session Health Probe** | `python3 main.py --check-session` | Ultra-fast HTTP REST API probe (<150ms) |
-| **Session Lifespan Stats** | `python3 main.py --session-stats` | Displays telemetry, rolling average lifespan, and auto-refresh timing |
-| **Automated 2FA Login** | `python3 main.py --auto-exp` | Full SSO login with real-time macOS SMS Duo code interception |
-| **Telegram Bot Status** | `python3 main.py --bot-status` | Inspects bot daemon PID, RSS memory, and session status |
-| **Restart Bot Daemon** | `python3 main.py --bot-restart` | Gracefully reloads Telegram daemon |
-| **Launch Menubar App** | `python3 menubar.py` | Starts native macOS status bar app (`🎓 BB 🟢`) |
+| **Daily Academic Briefing** | `bb --briefing` | Parallel scrape across all enrolled courses (Deadlines + Grades + Announcements) |
+| **Upcoming Deadlines** | `bb --due 7d` | Scrapes global calendar and course activity stream |
+| **Latest Grades** | `bb --grades` | Fetches grades, letter grades, and instructor feedback |
+| **Recent Announcements** | `bb --announcements` | Retrieves latest course-wide announcements |
+| **Keyword Search** | `bb --search "Syllabus"` | Deep content search across course outline trees |
+| **Course Outline Tree** | `bb --outline -c MATH215` | Beautiful hierarchical tree with IDs & icons (`├──`, `└──`) |
+| **Clean Outline JSON** | `bb --outline -c MATH215 --json` | Compact, streamlined JSON without bloated empty fields |
+| **Download File / Note** | `bb --download "Worksheet_1.pdf"` | Auto-discovers course and downloads file directly to disk |
+| **Download by Item ID** | `bb --download _8825690_1` | Downloads specific Blackboard item/notebook by exact ID |
+| **Active Course Discovery** | `bb --discover` | Intelligently isolates current active term (Fall 2026) in <200ms |
+| **Session Health Probe** | `bb --check-session` | Ultra-fast HTTP REST API probe (<150ms) |
+| **Session Lifespan Stats** | `bb --session-stats` | Displays telemetry, rolling average lifespan, and auto-refresh timing |
+| **Automated 2FA Login** | `bb --auto-exp` | Full SSO login with real-time macOS SMS Duo code interception |
+| **Telegram Bot Status** | `bb --bot-status` | Inspects bot daemon PID, RSS memory, and session status |
+| **Restart Bot Daemon** | `bb --bot-restart` | Gracefully reloads Telegram daemon |
+| **Launch Menubar App** | `bb --menubar` | Starts native macOS status bar app (`🎓 BB 🟢`) |
 
 ---
 
 ## 🧭 Agent Decision Tree: Handling User Prompts
 
 ### 1. "What do I have due this week?" / "Check my deadlines"
-1. Verify session: `python3 main.py --check-session`.
-2. If expired: run `python3 main.py --auto-exp` to refresh session with zero typing.
-3. Run: `python3 main.py --due 7d --json` (or `main.py --briefing`).
+1. Verify session: `bb --check-session`.
+2. If expired: run `bb --auto-exp` to refresh session with zero typing.
+3. Run: `bb --due 7d --json` (or `bb --briefing`).
 4. Format output nicely with Course Name, Assignment Title, Due Date, and Points.
 
 ### 2. "Check my grades" / "Did any new grades post?"
-1. Run `python3 main.py --grades`.
+1. Run `bb --grades`.
 2. Report each course's current running average, recently graded items, and feedback.
 
 ### 3. "Log me in" / "Refresh my Blackboard session"
-1. Run `python3 main.py --auto-exp --force`.
+1. Run `bb --auto-exp --force`.
 2. The engine will:
    - Load student credentials from `config.json` (`BH69617`).
    - Fill username and password on UMBC SSO portal.
@@ -53,12 +56,16 @@ Always run commands with the local virtual environment: `./.venv/bin/python main
    - Submit the passcode and save fresh session cookies.
 
 ### 4. "Search for [Topic] in my classes" (e.g. "Find the syllabus for database")
-1. Run `python3 main.py --search "Syllabus"`.
+1. Run `bb --search "Syllabus"`.
 2. Returns matching document links, descriptions, and parent folder paths.
 
-### 5. "Which courses am I enrolled in?"
-1. Run `python3 main.py --courses`.
-2. If courses appear outdated or user changed semesters, run `python3 main.py --discover` to auto-detect the current semester.
+### 5. "Download [File / Note / Worksheet]"
+1. Run `bb --download "<file_name_or_id>"` (e.g. `bb --download "Math215_Worksheet_1.pdf"` or `bb --download "Chapter01.ipynb"`).
+2. The downloader will automatically locate the correct course and save the file into `downloads/<CourseName>/`.
+
+### 6. "Which courses am I enrolled in?"
+1. Run `bb --courses`.
+2. If courses appear outdated or user changed semesters, run `bb --discover` to auto-detect the current semester.
 
 ---
 

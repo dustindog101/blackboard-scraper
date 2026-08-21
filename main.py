@@ -22,7 +22,7 @@ from scrapers.discussions import save_discussions, scrape_discussions
 from scrapers.grades import save_grades, scrape_grades, scrape_grades_async
 from scrapers.profile import save_profile, scrape_profile, scrape_profile_async
 from scrapers.briefing import run_briefing_async, run_briefing, format_briefing_cli
-from scrapers.outline import scrape_course_outline_async, save_outline, format_outline_tree, download_course_file
+from scrapers.outline import scrape_course_outline_async, save_outline, format_outline_tree, download_course_file, clean_outline_json, download_content_item_files
 from scrapers.assignments import scrape_course_assignments_async, save_assignments, format_assignments_summary
 from scrapers.due_dates import aggregate_due_dates_async, save_due_dates, format_due_dates_table
 from scrapers.search import find_items_async, grab_item_async
@@ -267,25 +267,26 @@ clean terminal UI by default, and standardized v2 JSON schemas.
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 ═══════════════════════════════════════════════════════════════════════
-💡 QUICK START EXAMPLES
+💡 QUICK START EXAMPLES (Global CLI: bb / blackboard / bbscraper)
 ═══════════════════════════════════════════════════════════════════════
-  python3 main.py --briefing                          # Print high-speed briefing to CLI stdout
-  python3 main.py --due 7d                            # Print upcoming deadlines table to CLI stdout
-  python3 main.py --outline -c IS410                  # Print outline tree for IS 410 (by course code)
-  python3 main.py --outline -c IS410,ENGL100          # Select multiple courses
-  python3 main.py --assignments --all --json          # Output all assignments as clean JSON
-  python3 main.py --briefing --out briefing.json      # Save composite school intelligence to file
-  python3 main.py --outline --all --type syllabus     # Grab syllabi across courses
-  python3 main.py --find "Project 1"                  # Search content across all courses
-  python3 main.py --login --auto                      # One-time automated login with Duo text passcode
-  python3 main.py --bot                               # Launch interactive Telegram bot daemon
+  bb --briefing                                       # Print high-speed briefing to CLI stdout
+  bb --due 7d                                         # Print upcoming deadlines table to CLI stdout
+  bb --outline -c MATH215                             # View hierarchical outline tree with IDs
+  bb --outline -c MATH215 --json                      # Clean, compact outline JSON export
+  bb --search "Python"                                # Search content across all courses
+  bb --download "Chapter01.ipynb"                     # Auto-detects course and downloads file
+  bb --download _8825690_1                            # Download by exact Blackboard item ID
+  bb --grades -c MATH215                              # View gradebook and feedback
+  bb --profile                                        # View student profile (<150ms)
+  bb --auto-exp                                       # Fully automated SSO login + Duo 2FA SMS capture
+  bb --bot -d                                         # Launch Telegram bot daemon in background
 
 📖 DETAILED TOPIC GUIDES:
-  python3 main.py --guide auth                        # Authentication & Headless execution
-  python3 main.py --guide courses                     # Course selection & multi-course syntax
-  python3 main.py --guide schema                      # Standardized v2 JSON schemas
-  python3 main.py --guide telegram                    # Telegram bot & notifications
-  python3 main.py --guide concurrency                 # Adaptive async worker engine
+  bb --guide auth                                     # Authentication & Headless execution
+  bb --guide courses                                  # Course selection & multi-course syntax
+  bb --guide schema                                   # Standardized v2 JSON schemas
+  bb --guide telegram                                 # Telegram bot & notifications
+  bb --guide concurrency                              # Adaptive async worker engine
         """,
     )
 
@@ -653,12 +654,22 @@ async def main_async(args: argparse.Namespace) -> None:
         results = await asyncio.gather(*tasks)
         raw_all = dict(results)
 
-        if args.raw or args.json or args.out:
+        if args.raw:
             formatted_json = [
                 {
                     "course_id": cid,
                     "course_name": courses.get(cid, cid),
                     "items": data if isinstance(data, list) else [],
+                }
+                for cid, data in raw_all.items()
+            ]
+            _emit_json(args, formatted_json)
+        elif args.json or args.out:
+            formatted_json = [
+                {
+                    "course_id": cid,
+                    "course_name": courses.get(cid, cid),
+                    "items": clean_outline_json(data) if isinstance(data, list) else [],
                 }
                 for cid, data in raw_all.items()
             ]
@@ -743,11 +754,14 @@ async def main_async(args: argparse.Namespace) -> None:
 
     # --- item grabber & downloader ---
     if args.grab:
-        target_cid = target_cids[0] if target_cids else list(courses.keys())[0]
-        cname = courses.get(target_cid, target_cid)
-        c_short = _short_course_name(cname) or target_cid
-        download_folder = Path(args.out_dir) / c_short.replace(" ", "_")
-        item = await grab_item_async(args.grab, target_cid, page=None, download_dir=download_folder)
+        download_folder = Path(args.out_dir)
+        item = await grab_item_async(
+            target_id_or_title=args.grab,
+            courses=courses,
+            target_cids=target_cids if target_cids else None,
+            page=None,
+            download_dir=download_folder,
+        )
 
         if args.json or args.out:
             _emit_json(args, item)
