@@ -20,9 +20,9 @@ from scrapers.announcements import save_announcements, scrape_announcements, scr
 from scrapers.calendar import save_calendar, scrape_calendar, scrape_calendar_async
 from scrapers.discussions import save_discussions, scrape_discussions
 from scrapers.grades import save_grades, scrape_grades, scrape_grades_async
-from scrapers.profile import save_profile, scrape_profile
+from scrapers.profile import save_profile, scrape_profile, scrape_profile_async
 from scrapers.briefing import run_briefing_async, run_briefing, format_briefing_cli
-from scrapers.outline import scrape_course_outline_async, save_outline, format_outline_tree
+from scrapers.outline import scrape_course_outline_async, save_outline, format_outline_tree, download_course_file
 from scrapers.assignments import scrape_course_assignments_async, save_assignments, format_assignments_summary
 from scrapers.due_dates import aggregate_due_dates_async, save_due_dates, format_due_dates_table
 from scrapers.search import find_items_async, grab_item_async
@@ -335,8 +335,9 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     scrapers.add_argument("--due", nargs="?", const="7d", default=None, metavar="WINDOW", help="Aggregate cross-course due dates (e.g. 7d, 14d, overdue)")
     scrapers.add_argument("--upcoming", type=int, metavar="DAYS", help="Alias for --due <N>d")
     scrapers.add_argument("--exclude-completed", action="store_true", help="With --due: exclude submitted/graded items")
-    scrapers.add_argument("--find", metavar="QUERY", help="Search for content/assignments matching query across courses")
-    scrapers.add_argument("--grab", metavar="ITEM_ID", help="Grab and download specific content item")
+    scrapers.add_argument("--find", "--search", metavar="QUERY", help="Search for content/assignments matching query across courses")
+    scrapers.add_argument("--grab", "--download", metavar="ITEM_ID", help="Grab and download specific content item or file")
+    scrapers.add_argument("--out-dir", default="downloads", help="Destination directory for downloaded course files (default: ./downloads)")
     scrapers.add_argument("--profile", action="store_true", help="Show student profile information")
 
     # --- item filtering & selection ---
@@ -636,27 +637,21 @@ async def main_async(args: argparse.Namespace) -> None:
             print("❌ Specify course via -c <ID/Code> (e.g. -c IS410) or --all", file=sys.stderr)
             return
 
-        concurrency = get_optimal_concurrency(TaskProfile.HEAVY, args.concurrency)
-        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=concurrency))
-        await session_manager.initialize()
         raw_all: dict[str, list[dict]] = {}
-        try:
-            pool = AsyncCourseWorkerPool(session_manager, task_profile=TaskProfile.HEAVY)
-            async def _worker(cid, cname, page):
-                data = await scrape_course_outline_async(cid, page)
-                if args.type:
-                    data = [item for item in data if item.get("content_type", "").lower() == args.type.lower()]
-                if args.keyword_filter:
-                    kw = args.keyword_filter.lower()
-                    data = [item for item in data if kw in item.get("title", "").lower() or kw in item.get("description", "").lower()]
-                if args.md:
-                    save_outline(data, cid)
-                return data
+        async def _fetch_outline(cid: str) -> tuple[str, list[dict]]:
+            data = await scrape_course_outline_async(cid)
+            if args.type:
+                data = [item for item in data if item.get("content_type", "").lower() == args.type.lower()]
+            if args.keyword_filter:
+                kw = args.keyword_filter.lower()
+                data = [item for item in data if kw in item.get("title", "").lower() or kw in item.get("description", "").lower()]
+            if args.md:
+                save_outline(data, cid)
+            return cid, data
 
-            target_dict = {cid: courses.get(cid, cid) for cid in target_cids}
-            raw_all = await pool.execute_task_per_course(target_dict, _worker)
-        finally:
-            await session_manager.close()
+        tasks = [_fetch_outline(cid) for cid in target_cids]
+        results = await asyncio.gather(*tasks)
+        raw_all = dict(results)
 
         if args.raw or args.json or args.out:
             formatted_json = [
@@ -724,37 +719,38 @@ async def main_async(args: argparse.Namespace) -> None:
 
     # --- omnisearch ---
     if args.find:
-        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp))
-        await session_manager.initialize()
-        try:
-            async with session_manager.acquire_page() as page:
-                matches = await find_items_async(args.find, courses, page)
-        finally:
-            await session_manager.close()
+        matches = await find_items_async(args.find, courses, page=None, type_filter=args.type)
 
         if args.json or args.out:
             _emit_json(args, matches)
         else:
             print(f"\n🔎 Search Results for '{args.find}':")
+            print("━" * 50)
             if not matches:
                 print("  (No matching items found across courses)")
             for m in matches:
                 due_str = f" (Due: {m['due_date']})" if m.get("due_date") else ""
-                print(f"• [{m['course_name']}] {m['title']} [{m['content_type']}]{due_str}")
+                dl_str = " 💾 [File Ready]" if m.get("is_downloadable") else ""
+                path_str = f" [{ ' > '.join(m.get('parent_path', [])) }]" if m.get("parent_path") else ""
+                print(f"• [{m['course_name']}]{path_str} {m['title']} [{m['content_type']}]{dl_str}{due_str}")
+                if m.get("description"):
+                    print(f"  > 💬 {m['description'][:130]}")
+                if m.get("download_url"):
+                    print(f"  └ 📥 ID: {m.get('content_id')}")
+                elif m.get("external_url"):
+                    print(f"  └ 🔗 {m['external_url']}")
         return
 
-    # --- item grabber ---
+    # --- item grabber & downloader ---
     if args.grab:
         target_cid = target_cids[0] if target_cids else list(courses.keys())[0]
-        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp))
-        await session_manager.initialize()
-        try:
-            async with session_manager.acquire_page() as page:
-                item = await grab_item_async(args.grab, target_cid, page)
-        finally:
-            await session_manager.close()
+        cname = courses.get(target_cid, target_cid)
+        c_short = _short_course_name(cname) or target_cid
+        download_folder = Path(args.out_dir) / c_short.replace(" ", "_")
+        item = await grab_item_async(args.grab, target_cid, page=None, download_dir=download_folder)
 
-        _emit_json(args, item)
+        if args.json or args.out:
+            _emit_json(args, item)
         return
 
     # --- announcements ---
@@ -898,17 +894,14 @@ async def main_async(args: argparse.Namespace) -> None:
 
     # --- profile ---
     if args.profile:
-        with sync_playwright() as p:
-            ctx, page = _launch_context(p, headless, cdp)
-            data = scrape_profile(page)
-            if data:
-                if args.json or args.out:
-                    _emit_json(args, data)
-                else:
-                    _print_profile(data)
-                if args.md:
-                    save_profile(data)
-            ctx.close()
+        data = await scrape_profile_async()
+        if data:
+            if args.json or args.out:
+                _emit_json(args, data)
+            else:
+                _print_profile(data)
+            if args.md:
+                save_profile(data)
         return
 
     # --- discussions ---

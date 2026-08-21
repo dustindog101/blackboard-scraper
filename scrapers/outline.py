@@ -1,30 +1,241 @@
 import asyncio
+import json
 import logging
+import re
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeout
 
-from core.config import BLACKBOARD_BASE, load_courses
+from core.config import BLACKBOARD_BASE, SESSION_DIR, load_courses
 from core.output import ensure_output_dir
 from core.async_engine import AdaptiveDOM
 
 logger = logging.getLogger("blackboard.scrapers.outline")
 
 
-async def scrape_course_outline_async(
+# ============================================================================
+# 1. Session & REST API Helpers
+# ============================================================================
+
+def get_cookie_header() -> Optional[str]:
+    """Extract Cookie header string from .session/cookies.json."""
+    cookie_file = SESSION_DIR / "cookies.json"
+    if not cookie_file.exists():
+        return None
+    try:
+        cookies_list = json.loads(cookie_file.read_text())
+        return "; ".join([
+            f"{c['name']}={c['value']}"
+            for c in cookies_list
+            if "blackboard.umbc.edu" in c.get("domain", "") or "umbc.edu" in c.get("domain", "")
+        ])
+    except Exception:
+        return None
+
+
+def _api_get(url: str, cookie_header: str, timeout: float = 10.0) -> Optional[Dict[str, Any]]:
+    """Execute authenticated HTTP GET against Blackboard REST API."""
+    headers = {
+        "Cookie": cookie_header,
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+    }
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403, 404):
+            return {"_http_status": e.code, "error": str(e.reason)}
+        logger.debug(f"HTTP Error {e.code} for {url}: {e}")
+        return None
+    except Exception as e:
+        logger.debug(f"Network error for {url}: {e}")
+        return None
+
+
+def normalize_content_type(handler_id: str, title: str, html_desc: str = "") -> str:
+    """Classifies Blackboard content handler IDs into clean canonical types."""
+    handler = (handler_id or "").lower()
+    t_lower = (title or "").lower()
+    d_lower = (html_desc or "").lower()
+
+    if "syllabus" in t_lower or "syllabus" in d_lower:
+        return "syllabus"
+    if "folder" in handler:
+        return "folder"
+    if "lesson" in handler or "learning-module" in handler or "learningmodule" in handler:
+        return "learning_module"
+    if "file" in handler:
+        return "file"
+    if "externallink" in handler or "weblink" in handler:
+        return "link"
+    if "assignment" in handler or "asmt" in handler:
+        return "assignment"
+    if "test" in handler or "quiz" in handler or "exam" in handler:
+        return "test"
+    if "discussion" in handler:
+        return "discussion"
+    if "document" in handler or "doc" in handler:
+        return "document"
+    if "blti" in handler or "lti" in handler:
+        return "lti_tool"
+    return "item"
+
+
+def _clean_title(raw_title: str, parent_path: List[str]) -> str:
+    """Cleans up internal artifact titles (like 'ultraDocumentBody')."""
+    if not raw_title or raw_title.strip() == "ultraDocumentBody":
+        if parent_path:
+            return f"{parent_path[-1]} Document"
+        return "Course Document"
+    return raw_title.strip()
+
+
+# ============================================================================
+# 2. High-Speed REST API Tree Crawler (Primary Engine)
+# ============================================================================
+
+def _crawl_api_tree(
+    course_id: str,
+    cookie_header: str,
+    parent_id: Optional[str] = None,
+    parent_path: Optional[List[str]] = None,
+    depth: int = 0,
+    max_depth: int = 6,
+) -> List[Dict[str, Any]]:
+    """
+    Recursively extracts the full course outline tree via Blackboard REST API.
+    Handles folders, learning modules, files, direct attachments, external links, and descriptions.
+    """
+    if depth > max_depth:
+        return []
+
+    parent_path = parent_path or []
+    if parent_id:
+        url = f"{BLACKBOARD_BASE}/learn/api/public/v1/courses/{course_id}/contents/{parent_id}/children"
+    else:
+        url = f"{BLACKBOARD_BASE}/learn/api/public/v1/courses/{course_id}/contents"
+
+    data = _api_get(url, cookie_header)
+    if not data:
+        return []
+
+    if "_http_status" in data:
+        if data["_http_status"] in (401, 403):
+            logger.debug(f"Course {course_id} is closed/unavailable (HTTP {data['_http_status']}).")
+        return []
+
+    results = data.get("results", [])
+    extracted: List[Dict[str, Any]] = []
+
+    for item in results:
+        avail = item.get("availability", {}).get("available", "Yes")
+        if avail.lower() == "no":
+            continue
+
+        cid = item.get("id", "")
+        raw_title = item.get("title", "Untitled Item")
+        title = _clean_title(raw_title, parent_path)
+        desc = item.get("description", "") or ""
+        handler_id = item.get("contentHandler", {}).get("id", "")
+        content_type = normalize_content_type(handler_id, title, desc)
+        has_children = bool(item.get("hasChildren")) or content_type in ("folder", "learning_module")
+
+        # Resolve attachments / direct download URLs
+        attachments: List[Dict[str, Any]] = []
+        download_url: Optional[str] = None
+        is_downloadable = False
+
+        if content_type == "file":
+            is_downloadable = True
+            file_meta = item.get("contentHandler", {}).get("file", {})
+            file_name = file_meta.get("fileName") or title
+            mime_type = file_meta.get("mimeType") or "application/octet-stream"
+            download_url = f"{BLACKBOARD_BASE}/learn/api/public/v1/courses/{course_id}/contents/{cid}/attachments/default/download"
+            attachments.append({
+                "id": cid,
+                "file_name": file_name,
+                "mime_type": mime_type,
+                "download_url": download_url,
+            })
+
+        # Resolve external link URL
+        external_url: Optional[str] = None
+        if content_type == "link":
+            external_url = item.get("contentHandler", {}).get("url")
+
+        # Format links list for backward compatibility
+        links: List[Dict[str, str]] = []
+        if external_url:
+            links.append({"text": title, "url": external_url})
+        for att in attachments:
+            if att.get("download_url"):
+                links.append({"text": att.get("file_name", "Download"), "url": att["download_url"]})
+
+        node = {
+            "content_id": cid,
+            "parent_id": parent_id,
+            "parent_path": list(parent_path),
+            "title": title,
+            "content_type": content_type,
+            "description": desc.strip(),
+            "depth": depth,
+            "has_children": has_children,
+            "is_downloadable": is_downloadable,
+            "download_url": download_url,
+            "attachments": attachments,
+            "external_url": external_url,
+            "links": links,
+            "due_date": "",
+            "created": item.get("created"),
+            "modified": item.get("modified"),
+        }
+        extracted.append(node)
+
+        # Recursively traverse children if item is a folder or module
+        if has_children:
+            child_items = _crawl_api_tree(
+                course_id=course_id,
+                cookie_header=cookie_header,
+                parent_id=cid,
+                parent_path=parent_path + [title],
+                depth=depth + 1,
+                max_depth=max_depth,
+            )
+            extracted.extend(child_items)
+
+    return extracted
+
+
+def scrape_course_outline_api(course_id: str, max_depth: int = 6) -> List[Dict[str, Any]]:
+    """Primary REST API course outline scraper."""
+    cookie_header = get_cookie_header()
+    if not cookie_header:
+        logger.debug("No session cookies available for API outline scraper.")
+        return []
+    return _crawl_api_tree(course_id, cookie_header, max_depth=max_depth)
+
+
+# ============================================================================
+# 3. Modern Playwright DOM Scraper (Fallback Engine)
+# ============================================================================
+
+async def scrape_course_outline_playwright_async(
     course_id: str,
     page: Page,
     max_depth: int = 4,
 ) -> List[Dict[str, Any]]:
     """
-    Scrapes full course outline across Blackboard Ultra and Classic layouts.
+    Fallback browser DOM scraper for Blackboard Ultra & Classic layouts.
     Traverses learning modules, folders, documents, syllabi, attachments, and external links.
     """
     courses = load_courses()
     course_name = courses.get(course_id, course_id)
 
-    # Step 1: Navigate to Ultra Outline URL
     url = f"{BLACKBOARD_BASE}/ultra/courses/{course_id}/outline"
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=25_000)
@@ -32,10 +243,13 @@ async def scrape_course_outline_async(
         logger.debug(f"Navigation error for {course_name}: {e}")
         return []
 
-    # Step 2: Check for course availability or error banners
+    # Check for course availability or error banners with modern selectors
     matched_sel, _ = await AdaptiveDOM.wait_for_any_selector(
         page,
         [
+            ".course-content-container",
+            "section.course-outline-content",
+            "[bb-cache-compilation='course-outline']",
             "div.course-outline-tree",
             "bb-course-outline",
             "div[role='tree']",
@@ -54,7 +268,7 @@ async def scrape_course_outline_async(
     if not matched_sel or "notification-modal" in matched_sel or "You can't access" in matched_sel or "not currently available" in matched_sel:
         return []
 
-    # Step 3: Ultra layout handling - Expand collapsible folders and learning modules
+    # Expand collapsible folders and learning modules
     for depth in range(max_depth):
         expand_buttons = page.locator("button[aria-expanded='false'], button.accordion-toggle[aria-expanded='false']")
         count = await expand_buttons.count()
@@ -76,7 +290,7 @@ async def scrape_course_outline_async(
             break
         await asyncio.sleep(0.3)
 
-    # Step 4: Extract items for Ultra AND Classic Blackboard layouts
+    # Extract items for Ultra AND Classic Blackboard layouts
     extracted_items = await page.evaluate("""() => {
         const items = [];
         const seenIds = new Set();
@@ -87,20 +301,21 @@ async def scrape_course_outline_async(
             'div[role="treeitem"], ' +
             'div.course-outline-item, ' +
             'div.element-details, ' +
-            'li.content-item'
+            'li.content-item, ' +
+            '[data-analytics-id*="outline"], ' +
+            'div.element-card'
         );
 
         ultraNodes.forEach((el, index) => {
             const titleEl = el.querySelector('h3, h4, span.title, a.element-details-link, [class*="itemName"], .js-title');
             const title = titleEl ? titleEl.innerText.trim() : (el.getAttribute('aria-label') || '').trim();
-            if (!title) return;
+            if (!title || title === 'Course Content') return;
 
             const analyticsId = el.getAttribute('data-analytics-id') || el.getAttribute('data-content-id') || '';
             const contentId = analyticsId || `outline_node_${index}`;
             if (seenIds.has(contentId)) return;
             seenIds.add(contentId);
 
-            // Determine content type
             const html = el.outerHTML.toLowerCase();
             let contentType = 'item';
             if (html.includes('syllabus') || title.toLowerCase().includes('syllabus')) contentType = 'syllabus';
@@ -111,23 +326,20 @@ async def scrape_course_outline_async(
             else if (html.includes('test') || html.includes('quiz') || html.includes('exam')) contentType = 'test';
             else if (html.includes('discussion')) contentType = 'discussion';
             else if (html.includes('weblink') || html.includes('external-link')) contentType = 'link';
-            else if (html.includes('file') || html.includes('attachment') || html.includes('.pdf')) contentType = 'file';
+            else if (html.includes('file') || html.includes('attachment') || html.includes('.pdf') || html.includes('.ipynb')) contentType = 'file';
 
-            // Due Date
             let dueDate = '';
             const dueEl = el.querySelector('[class*="dueDate"], [class*="due-date"], [class*="gradingDetail"]');
             if (dueEl) {
                 dueDate = dueEl.innerText.replace(/due\\s*date[:\\s]*/i, '').trim();
             }
 
-            // Description / Snippet
             let description = '';
             const descEl = el.querySelector('.element-details-summary, [class*="description"], .js-description, p');
             if (descEl && descEl !== titleEl) {
                 description = descEl.innerText.trim();
             }
 
-            // Links / Attachments
             const links = [];
             el.querySelectorAll('a[href]').forEach(a => {
                 const href = a.href;
@@ -137,7 +349,6 @@ async def scrape_course_outline_async(
                 }
             });
 
-            // Calculate tree depth from nesting parents
             let depth = 0;
             let parent = el.parentElement;
             while (parent && depth < 10) {
@@ -149,11 +360,18 @@ async def scrape_course_outline_async(
 
             items.push({
                 content_id: contentId,
+                parent_id: null,
+                parent_path: [],
                 title: title,
                 content_type: contentType,
                 due_date: dueDate,
                 description: description,
                 depth: depth,
+                has_children: contentType === 'folder' || contentType === 'learning_module',
+                is_downloadable: contentType === 'file',
+                download_url: links.length > 0 ? links[0].url : null,
+                attachments: [],
+                external_url: contentType === 'link' && links.length > 0 ? links[0].url : null,
                 links: links
             });
         });
@@ -185,11 +403,18 @@ async def scrape_course_outline_async(
 
                 items.push({
                     content_id: contentId,
+                    parent_id: null,
+                    parent_path: [],
                     title: title,
                     content_type: contentType,
                     due_date: '',
                     description: el.querySelector('.details, .vtbegenerated')?.innerText.trim() || '',
                     depth: 0,
+                    has_children: contentType === 'folder',
+                    is_downloadable: contentType === 'file',
+                    download_url: links.length > 0 ? links[0].url : null,
+                    attachments: [],
+                    external_url: contentType === 'link' && links.length > 0 ? links[0].url : null,
                     links: links
                 });
             });
@@ -201,8 +426,77 @@ async def scrape_course_outline_async(
     return extracted_items
 
 
+# ============================================================================
+# 4. Async Dispatcher (REST API Fast Path with DOM Fallback)
+# ============================================================================
+
+async def scrape_course_outline_async(
+    course_id: str,
+    page: Optional[Page] = None,
+    max_depth: int = 6,
+) -> List[Dict[str, Any]]:
+    """
+    Unified entrypoint: Runs high-speed REST API crawler first (<300ms).
+    Falls back gracefully to Playwright DOM extraction if needed.
+    """
+    # Fast path: REST API extraction
+    try:
+        api_results = await asyncio.to_thread(scrape_course_outline_api, course_id, max_depth)
+        if api_results:
+            return api_results
+    except Exception as e:
+        logger.debug(f"API outline fetch exception for {course_id}: {e}")
+
+    # Fallback path: Playwright browser DOM scraper
+    if page:
+        try:
+            return await scrape_course_outline_playwright_async(course_id, page, max_depth=max_depth)
+        except Exception as e:
+            logger.debug(f"Playwright outline error for {course_id}: {e}")
+
+    return []
+
+
+# ============================================================================
+# 5. File Downloader Helper
+# ============================================================================
+
+def download_course_file(
+    download_url: str,
+    destination_path: Path,
+    cookie_header: Optional[str] = None,
+) -> bool:
+    """
+    Downloads an authenticated course file or attachment to local disk.
+    Creates parent directories automatically.
+    """
+    cookie_header = cookie_header or get_cookie_header()
+    if not cookie_header:
+        logger.error("Cannot download file: Missing session cookies.")
+        return False
+
+    headers = {
+        "Cookie": cookie_header,
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    }
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        req = urllib.request.Request(download_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as resp, open(destination_path, "wb") as f:
+            f.write(resp.read())
+        return True
+    except Exception as e:
+        logger.error(f"Failed to download file from {download_url} to {destination_path}: {e}")
+        return False
+
+
+# ============================================================================
+# 6. Formatting & Markdown Exporters
+# ============================================================================
+
 def format_outline_tree(data: List[Dict[str, Any]], course_name: str, course_id: str = "") -> str:
-    """Formats outline into a readable hierarchical CLI string."""
+    """Formats outline items into a clear hierarchical CLI view with icons and breadcrumbs."""
     type_icons = {
         "syllabus": "📜",
         "folder": "📁",
@@ -214,13 +508,12 @@ def format_outline_tree(data: List[Dict[str, Any]], course_name: str, course_id:
         "discussion": "💬",
         "link": "🔗",
         "file": "📎",
+        "lti_tool": "🛠️",
         "item": "📌",
     }
 
-    lines = [
-        f"📚 Course Outline: {course_name} ({course_id})" if course_id else f"📚 Course Outline: {course_name}",
-        "━" * 50,
-    ]
+    header = f"📚 Course Outline: {course_name} ({course_id})" if course_id else f"📚 Course Outline: {course_name}"
+    lines = [header, "━" * len(header)]
 
     if not data:
         lines.append("  (Course is currently closed or has no content items)")
@@ -231,19 +524,21 @@ def format_outline_tree(data: List[Dict[str, Any]], course_name: str, course_id:
         indent = "  " * depth
         icon = type_icons.get(item.get("content_type", "item"), "📌")
         title = item.get("title", "Untitled")
-        due = f" — (Due: {item['due_date']})" if item.get("due_date") else ""
         ctype = item.get("content_type", "item")
+        due = f" — (Due: {item['due_date']})" if item.get("due_date") else ""
+        dl_tag = " 💾 [File Ready]" if item.get("is_downloadable") else ""
 
-        lines.append(f"{indent}{icon} {title} [{ctype}]{due}")
+        lines.append(f"{indent}{icon} {title} [{ctype}]{dl_tag}{due}")
         if item.get("description"):
             desc = item["description"].replace("\n", " ").strip()
-            if len(desc) > 120:
-                desc = desc[:117] + "..."
-            lines.append(f"{indent}   > {desc}")
+            if len(desc) > 130:
+                desc = desc[:127] + "..."
+            lines.append(f"{indent}   > 💬 {desc}")
 
-        for l in item.get("links", []):
-            if l.get("url") and not l["url"].endswith("#"):
-                lines.append(f"{indent}   └ 🔗 {l.get('text', 'Link')}: {l['url']}")
+        if item.get("external_url"):
+            lines.append(f"{indent}   └ 🔗 {item['external_url']}")
+        elif item.get("download_url"):
+            lines.append(f"{indent}   └ 📥 ID: {item.get('content_id')}")
 
     return "\n".join(lines)
 
@@ -277,6 +572,7 @@ def save_outline(data: List[Dict[str, Any]], course_id: str) -> Path:
             "discussion": "💬",
             "link": "🔗",
             "file": "📎",
+            "lti_tool": "🛠️",
             "item": "📌",
         }
 
@@ -286,17 +582,20 @@ def save_outline(data: List[Dict[str, Any]], course_id: str) -> Path:
             icon = type_icons.get(item.get("content_type", "item"), "📌")
             title = item.get("title", "Untitled")
             due = f" — _(Due: {item['due_date']})_" if item.get("due_date") else ""
+            dl_str = " `[Downloadable]`" if item.get("is_downloadable") else ""
 
-            lines.append(f"{indent}- {icon} **{title}** [{item.get('content_type', 'item')}]{due}")
+            lines.append(f"{indent}- {icon} **{title}** [{item.get('content_type', 'item')}]{dl_str}{due}")
             if item.get("description"):
                 desc_snippet = item['description'].replace("\n", " ").strip()
                 if len(desc_snippet) > 160:
                     desc_snippet = desc_snippet[:157] + "..."
                 lines.append(f"{indent}  > _{desc_snippet}_")
 
-            for l in item.get("links", []):
-                if l.get("url") and not l["url"].endswith("#"):
-                    lines.append(f"{indent}  └ 🔗 [{l.get('text', 'Open Link')}]({l['url']})")
+            if item.get("external_url"):
+                lines.append(f"{indent}  └ 🔗 [{item.get('title', 'Link')}]({item['external_url']})")
+            for att in item.get("attachments", []):
+                lines.append(f"{indent}  └ 📥 `{att.get('file_name', 'File')}` (ID: `{att.get('id')}`)")
 
     filepath.write_text("\n".join(lines))
     return filepath
+

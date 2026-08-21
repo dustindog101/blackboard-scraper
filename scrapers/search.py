@@ -7,7 +7,7 @@ from playwright.async_api import Page
 
 from core.config import BLACKBOARD_BASE, load_courses
 from core.output import ensure_output_dir
-from scrapers.outline import scrape_course_outline_async
+from scrapers.outline import download_course_file, scrape_course_outline_async
 
 logger = logging.getLogger("blackboard.scrapers.search")
 
@@ -15,37 +15,35 @@ logger = logging.getLogger("blackboard.scrapers.search")
 async def find_items_async(
     query: str,
     courses: Dict[str, str],
-    page: Page,
+    page: Optional[Page] = None,
     type_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Searches across courses for content items, assignments, or documents matching `query`.
+    Searches across courses for content items, assignments, documents, or files matching `query`.
+    Searches item title, parent folder hierarchy, descriptions, and attachment filenames.
     """
     print(f"🔍 Searching for '{query}' across {len(courses)} courses...")
     query_lower = query.lower()
     matches: List[Dict[str, Any]] = []
 
     for cid, cname in courses.items():
-        outline = await scrape_course_outline_async(cid, page, max_depth=3)
+        outline = await scrape_course_outline_async(cid, page=page, max_depth=6)
         for item in outline:
             title = item.get("title", "")
             desc = item.get("description", "")
             ctype = item.get("content_type", "")
+            parent_path_str = " / ".join(item.get("parent_path", []))
+            attachment_names = " ".join([a.get("file_name", "") for a in item.get("attachments", [])])
 
             if type_filter and type_filter.lower() not in ctype.lower():
                 continue
 
-            if query_lower in title.lower() or query_lower in desc.lower():
-                matches.append({
-                    "course_id": cid,
-                    "course_name": cname,
-                    "title": title,
-                    "content_type": ctype,
-                    "due_date": item.get("due_date", ""),
-                    "description": desc,
-                    "links": item.get("links", []),
-                    "content_id": item.get("content_id", ""),
-                })
+            searchable_text = f"{title} {desc} {parent_path_str} {attachment_names}".lower()
+            if query_lower in searchable_text:
+                match_record = dict(item)
+                match_record["course_id"] = cid
+                match_record["course_name"] = cname
+                matches.append(match_record)
 
     print(f"   ✅ Found {len(matches)} matching items.")
     return matches
@@ -54,14 +52,17 @@ async def find_items_async(
 async def grab_item_async(
     target_id_or_title: str,
     course_id: str,
-    page: Page,
+    page: Optional[Page] = None,
     download_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
-    Pulls complete content for a specific item (instructions, attachments, document text).
+    Pulls complete content for a specific item (instructions, attachments, download links).
+    Optionally downloads file attachments to disk if `download_dir` is provided.
     """
-    print(f"📦 Grabbing item '{target_id_or_title}' in course {course_id}...")
-    outline = await scrape_course_outline_async(course_id, page, max_depth=4)
+    courses = load_courses()
+    course_name = courses.get(course_id, course_id)
+    print(f"📦 Grabbing item '{target_id_or_title}' in {course_name} ({course_id})...")
+    outline = await scrape_course_outline_async(course_id, page=page, max_depth=6)
 
     target_item = None
     target_lower = target_id_or_title.lower()
@@ -71,8 +72,25 @@ async def grab_item_async(
             break
 
     if not target_item:
-        print(f"   ❌ Item '{target_id_or_title}' not found in {course_id}.")
+        print(f"   ❌ Item '{target_id_or_title}' not found in {course_name}.")
         return {}
 
-    print(f"   Found item: {target_item['title']} [{target_item['content_type']}]")
+    print(f"   ✅ Found: {target_item['title']} [{target_item['content_type']}]")
+
+    # Download attachments if download_dir is specified
+    if download_dir and target_item.get("is_downloadable"):
+        download_dir = Path(download_dir)
+        for att in target_item.get("attachments", []):
+            dl_url = att.get("download_url")
+            fname = att.get("file_name", "downloaded_file")
+            if dl_url:
+                dest = download_dir / fname
+                print(f"   📥 Downloading '{fname}' to {dest}...")
+                success = download_course_file(dl_url, dest)
+                if success:
+                    print(f"   ✨ Saved: {dest}")
+                else:
+                    print(f"   ⚠️ Download failed for {fname}")
+
     return target_item
+
