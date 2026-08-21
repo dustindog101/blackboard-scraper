@@ -468,12 +468,16 @@ def download_course_file(
 ) -> bool:
     """
     Downloads an authenticated course file or attachment to local disk.
+    Supports both absolute and relative Blackboard URLs.
     Creates parent directories automatically.
     """
     cookie_header = cookie_header or get_cookie_header()
     if not cookie_header:
         logger.error("Cannot download file: Missing session cookies.")
         return False
+
+    if download_url.startswith("/"):
+        download_url = f"{BLACKBOARD_BASE}{download_url}"
 
     headers = {
         "Cookie": cookie_header,
@@ -488,6 +492,7 @@ def download_course_file(
         return True
     except Exception as e:
         logger.error(f"Failed to download file from {download_url} to {destination_path}: {e}")
+        return False
         return False
 
 

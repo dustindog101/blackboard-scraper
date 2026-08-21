@@ -80,7 +80,24 @@ async def grab_item_async(
     # Download attachments if download_dir is specified
     if download_dir and target_item.get("is_downloadable"):
         download_dir = Path(download_dir)
-        for att in target_item.get("attachments", []):
+        attachments = target_item.get("attachments") or []
+
+        # Fallback for DOM-scraped items with direct link or content ID
+        if not attachments:
+            if target_item.get("download_url"):
+                attachments = [{
+                    "file_name": target_item.get("title", "downloaded_file"),
+                    "download_url": target_item["download_url"],
+                }]
+            elif target_item.get("content_id"):
+                cid = target_item["content_id"]
+                dl_url = f"{BLACKBOARD_BASE}/learn/api/public/v1/courses/{course_id}/contents/{cid}/attachments/default/download"
+                attachments = [{
+                    "file_name": target_item.get("title", "downloaded_file"),
+                    "download_url": dl_url,
+                }]
+
+        for att in attachments:
             dl_url = att.get("download_url")
             fname = att.get("file_name", "downloaded_file")
             if dl_url:
