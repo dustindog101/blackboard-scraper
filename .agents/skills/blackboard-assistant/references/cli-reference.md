@@ -44,9 +44,21 @@ python3 main.py --announcements
 python3 main.py --search "Syllabus"
 python3 main.py --search "Midterm Exam" -c ECON122
 
-# Inspect course outline folder tree
+# Inspect course outline (shallow summary by default with folder item counts)
 python3 main.py --outline -c IS410
-python3 main.py --outline -c IS410 --deep
+
+# Selectively expand a specific folder by name or ID
+python3 main.py --outline -c IS410 -f "Homework"
+python3 main.py --outline -c IS410 -f _105740_1
+
+# Inspect full recursive tree (all folders expanded)
+python3 main.py --outline -c IS410 --expand-all
+
+# Limit tree depth
+python3 main.py --outline -c IS410 --depth 2
+
+# Launch interactive terminal folder explorer
+python3 main.py --outline -c IS410 -i
 ```
 
 ### Course Discovery & Term Isolation

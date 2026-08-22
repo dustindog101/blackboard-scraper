@@ -19,8 +19,10 @@ Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** 
 | **Upcoming Deadlines** | `bb --due 7d` | Scrapes global calendar and course activity stream |
 | **Latest Grades** | `bb --grades` | Fetches grades, letter grades, and instructor feedback |
 | **Recent Announcements** | `bb --announcements` | Retrieves latest course-wide announcements |
-| **Keyword Search** | `bb --search "Syllabus"` | Deep content search across course outline trees |
-| **Course Outline Tree** | `bb --outline -c MATH215` | Beautiful hierarchical tree with IDs & icons (`├──`, `└──`) |
+| **Course Outline (Shallow)** | `bb --outline -c MATH215` | Default shallow view with folder item counts & IDs |
+| **Selective Folder Expansion** | `bb --outline -c MATH215 -f "Homework"` | Selectively expands target folder by name or ID |
+| **Full Outline Tree** | `bb --outline -c MATH215 --expand-all` | Full recursive tree with all subfolders expanded |
+| **Interactive Folder Explorer** | `bb --outline -c MATH215 -i` | Interactive terminal menu to browse & expand folders |
 | **Clean Outline JSON** | `bb --outline -c MATH215 --json` | Compact, streamlined JSON without bloated empty fields |
 | **Download File / Note** | `bb --download "Worksheet_1.pdf"` | Auto-discovers course and downloads file directly to disk |
 | **Download by Item ID** | `bb --download _8825690_1` | Downloads specific Blackboard item/notebook by exact ID |

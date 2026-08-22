@@ -569,11 +569,162 @@ def download_content_item_files(
 
 
 # ============================================================================
-# 6. Formatting & Markdown Exporters
+# 6. Folder Statistics & Selective Expansion Helpers
 # ============================================================================
 
-def format_outline_tree(data: List[Dict[str, Any]], course_name: str, course_id: str = "") -> str:
-    """Formats outline items into a clear, beautiful hierarchical tree view with visual branch connectors."""
+def compute_folder_stats(data: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """
+    Computes recursive item statistics for every folder/learning module in outline data.
+    Returns mapping: content_id -> {
+        "total_descendants": int,
+        "item_count": int,
+        "subfolder_count": int,
+        "type_counts": Dict[str, int],
+        "summary_str": str,
+    }
+    """
+    children_map: Dict[Optional[str], List[Dict[str, Any]]] = {}
+    for item in data:
+        pid = item.get("parent_id")
+        children_map.setdefault(pid, []).append(item)
+
+    stats: Dict[str, Dict[str, Any]] = {}
+
+    def get_descendants(parent_id: str) -> List[Dict[str, Any]]:
+        desc = []
+        for child in children_map.get(parent_id, []):
+            desc.append(child)
+            cid = child.get("content_id")
+            if cid:
+                desc.extend(get_descendants(cid))
+        return desc
+
+    for item in data:
+        cid = item.get("content_id")
+        ctype = item.get("content_type", "")
+        if not cid or (ctype not in ("folder", "learning_module") and not item.get("has_children")):
+            continue
+
+        descendants = get_descendants(cid)
+        subfolders = [d for d in descendants if d.get("content_type") in ("folder", "learning_module") or d.get("has_children")]
+        leaves = [d for d in descendants if d.get("content_type") not in ("folder", "learning_module") and not d.get("has_children")]
+
+        type_counts: Dict[str, int] = {}
+        for d in leaves:
+            t = d.get("content_type", "item")
+            type_counts[t] = type_counts.get(t, 0) + 1
+
+        total_desc = len(descendants)
+        type_summary_parts = []
+        order = ["assignment", "file", "document", "syllabus", "test", "quiz", "discussion", "link", "item"]
+        for t in order:
+            if t in type_counts:
+                cnt = type_counts[t]
+                plural = f"{cnt} {t}s" if cnt > 1 and not t.endswith("s") else f"{cnt} {t}"
+                type_summary_parts.append(plural)
+        for t, cnt in sorted(type_counts.items()):
+            if t not in order:
+                plural = f"{cnt} {t}s" if cnt > 1 else f"{cnt} {t}"
+                type_summary_parts.append(plural)
+
+        if total_desc == 0:
+            summary_str = "(0 items)"
+        else:
+            breakdown = f": {', '.join(type_summary_parts)}" if type_summary_parts else ""
+            sub_info = f" in {len(subfolders)} subfolders" if len(subfolders) > 0 else ""
+            item_word = "item" if total_desc == 1 else "items"
+            summary_str = f"({total_desc} {item_word}{sub_info}{breakdown})"
+
+        stats[cid] = {
+            "total_descendants": total_desc,
+            "item_count": len(leaves),
+            "subfolder_count": len(subfolders),
+            "type_counts": type_counts,
+            "summary_str": summary_str,
+        }
+
+    return stats
+
+
+def filter_outline_by_folder(data: List[Dict[str, Any]], folder_query: str) -> List[Dict[str, Any]]:
+    """
+    Finds matching folder/module by exact content_id or case-insensitive title match,
+    and returns that folder and all its descendant items.
+    """
+    if not folder_query or not data:
+        return []
+
+    q_lower = folder_query.strip().lower()
+
+    # 1. Exact content_id match
+    matching_roots = [it for it in data if it.get("content_id", "").lower() == q_lower]
+
+    # 2. Exact title match
+    if not matching_roots:
+        matching_roots = [it for it in data if it.get("title", "").strip().lower() == q_lower]
+
+    # 3. Substring match in title among folders/containers
+    if not matching_roots:
+        matching_roots = [
+            it for it in data
+            if q_lower in it.get("title", "").lower()
+            and (it.get("content_type") in ("folder", "learning_module") or it.get("has_children"))
+        ]
+
+    # 4. Fallback substring match across any item
+    if not matching_roots:
+        matching_roots = [it for it in data if q_lower in it.get("title", "").lower()]
+
+    if not matching_roots:
+        return []
+
+    # Map children
+    children_map: Dict[Optional[str], List[Dict[str, Any]]] = {}
+    for item in data:
+        pid = item.get("parent_id")
+        children_map.setdefault(pid, []).append(item)
+
+    def collect_subtree(root_node: Dict[str, Any]) -> List[Dict[str, Any]]:
+        nodes = [root_node]
+        cid = root_node.get("content_id")
+        if cid:
+            for child in children_map.get(cid, []):
+                nodes.extend(collect_subtree(child))
+        return nodes
+
+    result: List[Dict[str, Any]] = []
+    seen_ids = set()
+    for root in matching_roots:
+        for node in collect_subtree(root):
+            nid = node.get("content_id")
+            if nid not in seen_ids:
+                seen_ids.add(nid)
+                result.append(node)
+
+    return result
+
+
+# ============================================================================
+# 7. Formatting & Markdown Exporters
+# ============================================================================
+
+def format_outline_tree(
+    data: List[Dict[str, Any]],
+    course_name: str,
+    course_id: str = "",
+    target_folder: Optional[str] = None,
+    expand_all: bool = False,
+    depth: Optional[int] = None,
+) -> str:
+    """
+    Formats outline items into a clear, beautiful hierarchical tree view.
+    
+    Modes:
+    - Default (Shallow Summary): Renders root items directly, and collapses top-level folders with item count breakdowns.
+    - target_folder: Renders the subtree for a specific folder matched by name or ID.
+    - expand_all=True: Recursively expands all folders down to leaves (legacy behavior).
+    - depth=N: Limits expansion up to N depth levels.
+    """
     type_icons = {
         "syllabus": "📜",
         "folder": "📁",
@@ -589,12 +740,85 @@ def format_outline_tree(data: List[Dict[str, Any]], course_name: str, course_id:
         "item": "📌",
     }
 
+    if not data:
+        header = f"📚 Course Outline: {course_name} ({course_id})" if course_id else f"📚 Course Outline: {course_name}"
+        return f"{header}\n{'━' * len(header)}\n  (Course is currently closed or has no content items)"
+
+    folder_stats = compute_folder_stats(data)
+
+    # 1. Targeted Folder Expansion
+    if target_folder:
+        filtered = filter_outline_by_folder(data, target_folder)
+        if not filtered:
+            available_folders = [
+                f"  • {it.get('title')} [ID: {it.get('content_id')}]"
+                for it in data
+                if it.get("content_type") in ("folder", "learning_module") or it.get("has_children")
+            ]
+            folders_str = "\n".join(available_folders) if available_folders else "  (No folders found)"
+            return (
+                f"❌ No folder or module matching '{target_folder}' found in {course_name}.\n\n"
+                f"📁 Available folders in this course:\n{folders_str}\n"
+            )
+
+        root_folder = filtered[0]
+        header = (
+            f"📚 Course Outline: {course_name} ({course_id}) ➔ 📁 {root_folder.get('title', 'Folder')}"
+            if course_id
+            else f"📚 Course Outline: {course_name} ➔ 📁 {root_folder.get('title', 'Folder')}"
+        )
+        lines = [header, "━" * len(header)]
+
+        # Build subtree map
+        tree: Dict[Optional[str], List[Dict[str, Any]]] = {}
+        for it in filtered:
+            pid = it.get("parent_id")
+            tree.setdefault(pid, []).append(it)
+
+        # Base parent is the parent_id of the matching root(s)
+        base_parent_ids = {it.get("parent_id") for it in filtered if it.get("content_id") == root_folder.get("content_id")}
+
+        def render_targeted_nodes(parent_id: Optional[str], prefix: str = "", current_depth: int = 0):
+            children = tree.get(parent_id, [])
+            total = len(children)
+            for i, node in enumerate(children):
+                is_last = (i == total - 1)
+                connector = "└── " if is_last else "├── "
+                child_prefix = "    " if is_last else "│   "
+
+                icon = type_icons.get(node.get("content_type", "item"), "📌")
+                title = node.get("title", "Untitled")
+                ctype = node.get("content_type", "item")
+                cid = node.get("content_id", "")
+                due = f" (Due: {node['due_date']})" if node.get("due_date") else ""
+                id_tag = f" [ID: {cid}]" if node.get("is_downloadable") or ctype in ("file", "document", "syllabus", "folder", "learning_module") else ""
+
+                is_container = ctype in ("folder", "learning_module") or node.get("has_children")
+                stat = folder_stats.get(cid, {})
+                stat_str = f" {stat.get('summary_str', '')}" if is_container and cid != root_folder.get("content_id") else ""
+
+                lines.append(f"{prefix}{connector}{icon} {title} [{ctype}]{id_tag}{due}{stat_str}")
+
+                if node.get("description"):
+                    desc = node["description"].replace("\n", " ").strip()
+                    if len(desc) > 95:
+                        desc = desc[:92] + "..."
+                    lines.append(f"{prefix}{child_prefix}   💬 {desc}")
+
+                if node.get("external_url"):
+                    lines.append(f"{prefix}{child_prefix}   🔗 {node['external_url']}")
+
+                if (is_container or cid in tree) and (depth is None or current_depth < depth):
+                    render_targeted_nodes(cid, prefix + child_prefix, current_depth + 1)
+
+        for bpid in base_parent_ids:
+            render_targeted_nodes(bpid, "", 0)
+
+        return "\n".join(lines)
+
+    # 2. General Rendering (Shallow vs Expand-All vs Depth-Limited)
     header = f"📚 Course Outline: {course_name} ({course_id})" if course_id else f"📚 Course Outline: {course_name}"
     lines = [header, "━" * len(header)]
-
-    if not data:
-        lines.append("  (Course is currently closed or has no content items)")
-        return "\n".join(lines)
 
     # Build parent -> children map
     tree: Dict[Optional[str], List[Dict[str, Any]]] = {}
@@ -602,7 +826,9 @@ def format_outline_tree(data: List[Dict[str, Any]], course_name: str, course_id:
         pid = it.get("parent_id")
         tree.setdefault(pid, []).append(it)
 
-    def render_nodes(parent_id: Optional[str], prefix: str = ""):
+    is_shallow = not expand_all and depth is None
+
+    def render_nodes(parent_id: Optional[str], prefix: str = "", current_depth: int = 0):
         children = tree.get(parent_id, [])
         total = len(children)
         for i, node in enumerate(children):
@@ -613,10 +839,31 @@ def format_outline_tree(data: List[Dict[str, Any]], course_name: str, course_id:
             icon = type_icons.get(node.get("content_type", "item"), "📌")
             title = node.get("title", "Untitled")
             ctype = node.get("content_type", "item")
+            cid = node.get("content_id", "")
             due = f" (Due: {node['due_date']})" if node.get("due_date") else ""
-            
-            # Show download ID tag for files/documents so user can copy ID
-            id_tag = f" [ID: {node.get('content_id')}]" if node.get("is_downloadable") or ctype in ("file", "document", "syllabus") else ""
+
+            is_container = ctype in ("folder", "learning_module") or node.get("has_children")
+            stat = folder_stats.get(cid, {})
+
+            # Show ID tag for easy referencing / downloads
+            id_tag = f" [ID: {cid}]" if is_container or node.get("is_downloadable") or ctype in ("file", "document", "syllabus") else ""
+
+            # In shallow mode, containers show count breakdown and do NOT expand children
+            if is_shallow and is_container:
+                count_str = f" {stat.get('summary_str', '')}"
+                lines.append(f"{prefix}{connector}{icon} {title} [{ctype}]{id_tag}{due}{count_str}")
+                if node.get("description"):
+                    desc = node["description"].replace("\n", " ").strip()
+                    if len(desc) > 95:
+                        desc = desc[:92] + "..."
+                    lines.append(f"{prefix}{child_prefix}   💬 {desc}")
+                continue
+
+            # In depth-limited mode, if reached max depth, display summary without expanding
+            if depth is not None and current_depth >= depth and is_container:
+                count_str = f" {stat.get('summary_str', '')}"
+                lines.append(f"{prefix}{connector}{icon} {title} [{ctype}]{id_tag}{due}{count_str}")
+                continue
 
             lines.append(f"{prefix}{connector}{icon} {title} [{ctype}]{id_tag}{due}")
 
@@ -630,12 +877,83 @@ def format_outline_tree(data: List[Dict[str, Any]], course_name: str, course_id:
                 lines.append(f"{prefix}{child_prefix}   🔗 {node['external_url']}")
 
             # Recursively render children
-            if node.get("has_children") or node.get("content_id") in tree:
-                render_nodes(node.get("content_id"), prefix + child_prefix)
+            if node.get("has_children") or cid in tree:
+                render_nodes(cid, prefix + child_prefix, current_depth + 1)
 
     # Render starting from root (parent_id is None)
-    render_nodes(None, "")
+    render_nodes(None, "", 0)
+
+    # If in shallow mode and containers were present, add helpful navigation hint
+    has_containers = any(it.get("content_type") in ("folder", "learning_module") or it.get("has_children") for it in data)
+    if is_shallow and has_containers:
+        lines.append("")
+        lines.append("💡 Tip: Use '--folder <name|ID>' to expand a folder, or '--expand-all' / '--deep' for full outline tree.")
+
     return "\n".join(lines)
+
+
+def interactive_folder_picker(data: List[Dict[str, Any]], course_name: str, course_id: str = "") -> None:
+    """Interactive CLI menu to browse and expand course folders."""
+    stats = compute_folder_stats(data)
+    containers = [it for it in data if it.get("content_type") in ("folder", "learning_module") or it.get("has_children")]
+
+    if not containers:
+        print(f"ℹ️ No collapsible folders or modules found in {course_name}.")
+        print(format_outline_tree(data, course_name, course_id, expand_all=True))
+        return
+
+    while True:
+        header = f"📚 Course Folders: {course_name} ({course_id})" if course_id else f"📚 Course Folders: {course_name}"
+        print("\n" + header)
+        print("━" * len(header))
+
+        for idx, folder in enumerate(containers, 1):
+            cid = folder.get("content_id", "")
+            title = folder.get("title", "Untitled")
+            ctype = folder.get("content_type", "folder")
+            stat = stats.get(cid, {})
+            summary = stat.get("summary_str", "")
+            icon = "📁" if ctype == "folder" else "📦"
+            path_str = f" ({' / '.join(folder.get('parent_path', []))})" if folder.get("parent_path") else ""
+            print(f" [{idx}] {icon} {title} [ID: {cid}]{path_str} {summary}")
+
+        print("━" * len(header))
+        print("Commands: Enter number(s) (e.g. '1' or '1,3'), 'all' for full tree, 's' for root summary, 'q' to quit.")
+        try:
+            choice = input("\n👉 Select folder to expand: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nExiting folder explorer.")
+            break
+
+        if not choice or choice.lower() in ("q", "quit", "exit"):
+            break
+
+        if choice.lower() in ("all", "*"):
+            print("\n" + format_outline_tree(data, course_name, course_id, expand_all=True))
+            continue
+
+        if choice.lower() in ("s", "summary"):
+            print("\n" + format_outline_tree(data, course_name, course_id))
+            continue
+
+        try:
+            selected_indices = [int(p.strip()) for p in choice.split(",") if p.strip().isdigit()]
+        except ValueError:
+            print("❌ Invalid input. Please enter folder numbers like '1' or '2,3'.")
+            continue
+
+        if not selected_indices:
+            print("❌ Invalid choice. Try again.")
+            continue
+
+        for idx in selected_indices:
+            if 1 <= idx <= len(containers):
+                target_f = containers[idx - 1]
+                t_cid = target_f.get("content_id")
+                print("\n" + format_outline_tree(data, course_name, course_id, target_folder=t_cid))
+            else:
+                print(f"⚠️ Index {idx} out of range.")
+
 
 
 def clean_outline_json(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

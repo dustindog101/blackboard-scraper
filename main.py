@@ -22,7 +22,16 @@ from scrapers.discussions import save_discussions, scrape_discussions
 from scrapers.grades import save_grades, scrape_grades, scrape_grades_async
 from scrapers.profile import save_profile, scrape_profile, scrape_profile_async
 from scrapers.briefing import run_briefing_async, run_briefing, format_briefing_cli
-from scrapers.outline import scrape_course_outline_async, save_outline, format_outline_tree, download_course_file, clean_outline_json, download_content_item_files
+from scrapers.outline import (
+    scrape_course_outline_async,
+    save_outline,
+    format_outline_tree,
+    download_course_file,
+    clean_outline_json,
+    download_content_item_files,
+    filter_outline_by_folder,
+    interactive_folder_picker,
+)
 from scrapers.assignments import scrape_course_assignments_async, save_assignments, format_assignments_summary
 from scrapers.due_dates import aggregate_due_dates_async, save_due_dates, format_due_dates_table
 from scrapers.search import find_items_async, grab_item_async
@@ -271,7 +280,10 @@ clean terminal UI by default, and standardized v2 JSON schemas.
 ═══════════════════════════════════════════════════════════════════════
   bb --briefing                                       # Print high-speed briefing to CLI stdout
   bb --due 7d                                         # Print upcoming deadlines table to CLI stdout
-  bb --outline -c MATH215                             # View hierarchical outline tree with IDs
+  bb --outline -c MATH215                             # View shallow outline summary with folder counts
+  bb --outline -c MATH215 -f "Homework"               # Selectively expand a specific folder
+  bb --outline -c MATH215 --expand-all                # View full recursive outline tree
+  bb --outline -c MATH215 -i                          # Interactive terminal folder explorer
   bb --outline -c MATH215 --json                      # Clean, compact outline JSON export
   bb --search "Python"                                # Search content across all courses
   bb --download "Chapter01.ipynb"                     # Auto-detects course and downloads file
@@ -345,6 +357,10 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     filt = parser.add_argument_group("filtering & course selection")
     filt.add_argument("--course", "-c", help="Target course ID(s) or code(s), e.g. 'IS410' or 'IS410,ENGL100'")
     filt.add_argument("--all", action="store_true", help="Run against all configured courses")
+    filt.add_argument("--folder", "-f", metavar="FOLDER", help="Expand specific folder or module by name or ID (e.g. -f 'Homework' or -f _105740_1)")
+    filt.add_argument("--expand-all", "--deep", "--all-folders", dest="expand_all", action="store_true", help="Expand all folders and display full recursive outline tree")
+    filt.add_argument("--depth", type=int, metavar="N", help="Limit outline display depth (e.g. --depth 1 for top-level, --depth 2 for 1 level inside)")
+    filt.add_argument("--interactive", "-i", action="store_true", help="Interactive terminal menu to select and explore course folders")
     filt.add_argument("--type", help="Filter outline items by type (e.g. syllabus, document, assignment, folder, link)")
     filt.add_argument("--filter", dest="keyword_filter", help="Filter items by text keyword")
 
@@ -641,6 +657,8 @@ async def main_async(args: argparse.Namespace) -> None:
         raw_all: dict[str, list[dict]] = {}
         async def _fetch_outline(cid: str) -> tuple[str, list[dict]]:
             data = await scrape_course_outline_async(cid)
+            if args.folder and (args.json or args.out or args.raw):
+                data = filter_outline_by_folder(data, args.folder)
             if args.type:
                 data = [item for item in data if item.get("content_type", "").lower() == args.type.lower()]
             if args.keyword_filter:
@@ -653,6 +671,13 @@ async def main_async(args: argparse.Namespace) -> None:
         tasks = [_fetch_outline(cid) for cid in target_cids]
         results = await asyncio.gather(*tasks)
         raw_all = dict(results)
+
+        if args.interactive:
+            for cid, data in raw_all.items():
+                cname = courses.get(cid, cid)
+                if isinstance(data, list):
+                    interactive_folder_picker(data, cname, cid)
+            return
 
         if args.raw:
             formatted_json = [
@@ -675,11 +700,18 @@ async def main_async(args: argparse.Namespace) -> None:
             ]
             _emit_json(args, formatted_json)
         else:
-            # Default to CLI outline tree
+            # Default to CLI outline tree (shallow summary by default, with folder / expand-all / depth support)
             for cid, data in raw_all.items():
                 cname = courses.get(cid, cid)
                 if isinstance(data, list):
-                    print(format_outline_tree(data, cname, cid))
+                    print(format_outline_tree(
+                        data,
+                        cname,
+                        cid,
+                        target_folder=args.folder,
+                        expand_all=args.expand_all,
+                        depth=args.depth,
+                    ))
                     print("")
         return
 

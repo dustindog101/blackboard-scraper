@@ -84,6 +84,19 @@ This document provides a detailed breakdown of all available commands in the `ma
 **Description:** Iterates through course gradebooks, scraping MUI data tables to extract Assignment Title, Due Date, Status (Graded/Submitted/Upcoming), and the actual Score.
 **Output:** `output/grades/<COURSE_ID>.md`
 
+### `--outline`
+**Usage:** `python3 main.py --outline -c <COURSE_ID>`
+**Modifiers:**
+- `--folder`, `-f <query>`: Selectively expand and display only the specified folder/module by name or ID (e.g. `-f Homework` or `-f _105740_1`).
+- `--expand-all`, `--deep`: Recursively expand all course folders (full tree view).
+- `--depth <N>`: Limit outline display to `<N>` depth levels (e.g. `--depth 1` for top-level, `--depth 2` for 1 level inside).
+- `--interactive`, `-i`: Launch interactive terminal menu to browse and expand folders on demand.
+- `--all`: Scrape outlines across all configured courses.
+- `--type <type>`: Filter items by type (`syllabus`, `document`, `assignment`, `folder`, `link`, `file`).
+- `--filter <text>`: Filter items by keyword substring.
+**Description:** Extracts course hierarchy including folders, modules, assignments, documents, files, and syllabi. By default, renders a clean shallow outline showing root items and collapsing top-level folders with rich item count breakdowns (e.g. `12 items: 8 assignments, 4 files`).
+**Output:** Terminal (and `output/outlines/<COURSE_ID>.md` if `--md` used).
+
 ### `--discussions`
 **Usage:** `python3 main.py --discussions -c <COURSE_ID>`
 **Modifiers:**

@@ -232,11 +232,16 @@ python3 main.py --briefing --out briefing.json      # JSON to file
 python3 main.py --briefing --telegram               # Push to Telegram
 ```
 
-### 2. Course Outline & Syllabus Extractor (`--outline`)
-Traverses nested learning modules, folders, documents, syllabi, and files across Ultra and Classic layouts:
+### 2. Course Outline & Selective Folder Explorer (`--outline`)
+Traverses course outlines with smart shallow summary views, folder item counting, selective folder expansion, and interactive browsing:
 ```bash
+python3 main.py --outline -c IS410                  # Shallow summary with folder item counts (Default)
+python3 main.py --outline -c IS410 -f "Homework"     # Selectively expand specific folder by name
+python3 main.py --outline -c IS410 -f _105740_1      # Selectively expand specific folder by ID
+python3 main.py --outline -c IS410 --expand-all     # Deep recursive tree (all folders expanded)
+python3 main.py --outline -c IS410 --depth 2        # Limit expansion to 2 depth levels
+python3 main.py --outline -c IS410 -i               # Interactive terminal folder explorer menu
 python3 main.py --outline --all                     # All courses
-python3 main.py --outline -c IS410                  # Single course
 python3 main.py --outline --all --type syllabus     # Syllabi only
 python3 main.py --outline --all --type assignment   # Assignments only
 python3 main.py --outline --all --type document     # Lecture docs only
@@ -348,6 +353,10 @@ python3 telegram_bot.py
 | | `--profile` | Student profile information |
 | **Selection & Filter**| `--course, -c <ID/Code>` | Target course(s) (e.g. `IS410` or `IS410,ENGL100`) |
 | | `--all` | Target all configured courses |
+| | `--folder, -f <query>` | Expand specific folder/module by name or ID |
+| | `--expand-all, --deep` | Recursively expand all folders (full tree view) |
+| | `--depth <N>` | Limit display expansion to `<N>` depth levels |
+| | `--interactive, -i` | Interactive terminal folder browser menu |
 | | `--type <type>` | Filter outline by type (`syllabus`, `document`, `assignment`, `folder`) |
 | | `--filter <text>` | Filter items by keyword substring |
 | **Output Formats** | `--json` | Output structured JSON to CLI stdout |
