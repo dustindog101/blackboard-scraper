@@ -16,11 +16,19 @@ import unittest
 from unittest.mock import patch, MagicMock
 from datetime import datetime
 
+import sys
 from core.export_json import build_item, build_export_doc, build_composite_schema, _to_unix_timestamp
 from core.async_engine import RouteOptimizer, TaskProfile, get_optimal_concurrency
 from core.session import quick_check_session_http
 from telegram.formatter import escape_html, chunk_message, format_due_dates_list, format_grade_alert, format_announcement_alert
-from ui.menubar import BlackboardMenuBarApp
+
+try:
+    import rumps
+    from ui.menubar import BlackboardMenuBarApp
+    HAS_RUMPS = True
+except ImportError:
+    HAS_RUMPS = False
+    BlackboardMenuBarApp = None
 
 
 class TestSmartConcurrency(unittest.TestCase):
@@ -153,6 +161,7 @@ class TestSessionValidation(unittest.TestCase):
             self.assertTrue("id" in user_data or "studentId" in user_data or "userName" in user_data)
 
 
+@unittest.skipUnless(sys.platform == "darwin" and HAS_RUMPS, "Menubar tests require macOS and rumps package")
 class TestMenuBarApp(unittest.TestCase):
     def test_menubar_instantiation(self):
         app = BlackboardMenuBarApp()

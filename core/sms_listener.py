@@ -4,6 +4,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,8 @@ COCOA_EPOCH_OFFSET = 978307200
 
 def get_current_max_rowid() -> int:
     """Get the current highest message ROWID in chat.db to track subsequent incoming SMS."""
+    if sys.platform != "darwin":
+        return 0
     db_path = Path.home() / "Library" / "Messages" / "chat.db"
     if not db_path.exists():
         return 0
@@ -55,6 +58,8 @@ def get_latest_duo_sms_sqlite(
     Query macOS Messages SQLite database for incoming 2FA passcodes.
     Matches messages newer than start_rowid or within the timestamp window.
     """
+    if sys.platform != "darwin":
+        return None
     db_path = Path.home() / "Library" / "Messages" / "chat.db"
     if not db_path.exists():
         return None
@@ -137,6 +142,8 @@ def get_latest_duo_sms_imsg(
     after_unix_timestamp: Optional[float] = None,
 ) -> Optional[Tuple[str, float, str, str]]:
     """Fallback method using `imsg` CLI tool to search recent messages."""
+    if sys.platform != "darwin":
+        return None
     imsg_bin = "/opt/homebrew/bin/imsg"
     if not os.path.exists(imsg_bin):
         return None
@@ -189,6 +196,8 @@ def wait_for_duo_sms_passcode(
     Actively listens for a newly arrived Duo SMS message on macOS Messages.
     Accepts ANY incoming sender number and automatically extracts the 6 or 7 digit code.
     """
+    if sys.platform != "darwin":
+        return None
     print(f"⏳ Real-time SMS Listener active (tracking chat.db ROWID > {start_rowid or 0}, timeout: {timeout_seconds}s)...")
     start_time = time.time()
     last_ping = start_time

@@ -1,7 +1,9 @@
 import asyncio
 import json
-import time
+import os
 import re
+import sys
+import time
 from getpass import getpass
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 from datetime import datetime, timezone
@@ -600,23 +602,37 @@ def prompt_credentials_tui(default_auto_exp: bool = True) -> tuple[Optional[str]
         save_choice = input("\n 💾 Save credentials to config.json for future automated logins? [Y/n]: ").strip().lower()
         save_to_config = save_choice not in ("n", "no")
 
+        is_mac = sys.platform == "darwin"
         print("\n ⚡ Select Login Mode:")
-        print("    [1] Auto-Exp (Automated SSO + macOS SMS 2FA Interception) [Recommended]")
-        print("    [2] Auto SSO (Automated SSO + Terminal/Telegram Passcode Entry)")
-        print("    [3] Visible Browser (Manual Login Window)")
+        if is_mac:
+            print("    [1] Auto-Exp (Automated SSO + macOS SMS 2FA Interception) [Recommended]")
+            print("    [2] Auto SSO (Automated SSO + Terminal/Telegram Passcode Entry)")
+            print("    [3] Visible Browser (Manual Login Window)")
+            default_choice = "1" if default_auto_exp else "2"
+        else:
+            print("    [1] Auto SSO (Automated SSO + Terminal/Telegram Passcode Entry) [Recommended]")
+            print("    [2] Visible Browser (Manual Login Window)")
+            default_choice = "1"
 
-        default_choice = "1" if default_auto_exp else "2"
-        mode_choice = input(f" 👉 Select mode [1/2/3] (default: {default_choice}): ").strip() or default_choice
+        mode_choice = input(f" 👉 Select mode (default: {default_choice}): ").strip() or default_choice
         print("═" * 66 + "\n")
 
-        if mode_choice == "1":
-            chosen_mode = "auto_exp"
-        elif mode_choice == "2":
-            chosen_mode = "auto"
-        elif mode_choice == "3":
-            chosen_mode = "manual"
+        if is_mac:
+            if mode_choice == "1":
+                chosen_mode = "auto_exp"
+            elif mode_choice == "2":
+                chosen_mode = "auto"
+            elif mode_choice == "3":
+                chosen_mode = "manual"
+            else:
+                chosen_mode = "auto_exp" if default_auto_exp else "auto"
         else:
-            chosen_mode = "auto_exp" if default_auto_exp else "auto"
+            if mode_choice == "1":
+                chosen_mode = "auto"
+            elif mode_choice == "2":
+                chosen_mode = "manual"
+            else:
+                chosen_mode = "auto"
 
         return raw_usr, raw_pwd, save_to_config, chosen_mode
 
@@ -959,18 +975,19 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 stop_event = threading.Event()
                 trigger_time = time.time()
 
-                # A. Real-time macOS SMS/iMessage Listener (auto_exp mode or default helper)
-                def _sms_worker():
-                    try:
-                        from core.sms_listener import wait_for_duo_sms_passcode
-                        c = wait_for_duo_sms_passcode(start_rowid=start_rowid, after_unix_timestamp=trigger_time, timeout_seconds=90)
-                        if c and not stop_event.is_set():
-                            result_queue.put(("sms", c))
-                    except Exception as e:
-                        pass
-                threading.Thread(target=_sms_worker, daemon=True).start()
+                is_mac = sys.platform == "darwin"
 
-
+                # A. Real-time macOS SMS/iMessage Listener (macOS only)
+                if is_mac:
+                    def _sms_worker():
+                        try:
+                            from core.sms_listener import wait_for_duo_sms_passcode
+                            c = wait_for_duo_sms_passcode(start_rowid=start_rowid, after_unix_timestamp=trigger_time, timeout_seconds=90)
+                            if c and not stop_event.is_set():
+                                result_queue.put(("sms", c))
+                        except Exception:
+                            pass
+                    threading.Thread(target=_sms_worker, daemon=True).start()
 
                 # B. Telegram prompt
                 if tg_notifier:
@@ -993,7 +1010,8 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 if attempt > 1:
                     print("  ❌ Incorrect passcode. Please check your phone for the latest code.")
                 print(f"  📲 Duo text passcode sent to your phone{sent_to_hint} (Attempt {attempt}/{max_attempts}).")
-                print("  ⚡ Listening for incoming macOS SMS passcode in real-time...")
+                if is_mac:
+                    print("  ⚡ Listening for incoming macOS SMS passcode in real-time...")
                 if tg_notifier:
                     print("  💡 You can also reply directly in Telegram or type it below.")
                 print("=" * 60)
@@ -1001,7 +1019,8 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 # C. CLI terminal fallback
                 def _cli_worker():
                     try:
-                        cli_input = input("  🔑 Enter your Duo passcode (or wait for SMS auto-capture): ").strip()
+                        prompt_label = "  🔑 Enter your Duo passcode (or wait for SMS auto-capture): " if is_mac else "  🔑 Enter your Duo passcode: "
+                        cli_input = input(prompt_label).strip()
                         if cli_input and not stop_event.is_set():
                             result_queue.put(("cli", cli_input))
                     except (EOFError, KeyboardInterrupt):

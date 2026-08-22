@@ -28,13 +28,14 @@ def get_process_memory_mb(pid: int) -> float:
         pass
 
     # Fallback to ps command on Unix/macOS
-    try:
-        out = subprocess.check_output(["ps", "-o", "rss=", "-p", str(pid)]).decode().strip()
-        if out:
-            # RSS in KB
-            return round(int(out) / 1024, 2)
-    except Exception:
-        pass
+    if sys.platform != "win32":
+        try:
+            out = subprocess.check_output(["ps", "-o", "rss=", "-p", str(pid)]).decode().strip()
+            if out:
+                # RSS in KB
+                return round(int(out) / 1024, 2)
+        except Exception:
+            pass
     return 0.0
 
 
@@ -110,15 +111,27 @@ def start_bot_daemon() -> bool:
     script_path = Path(__file__).resolve().parent.parent / "telegram_bot.py"
     python_bin = sys.executable
 
+    popen_kwargs = {
+        "stdout": None,
+        "stderr": subprocess.STDOUT,
+        "stdin": subprocess.DEVNULL,
+        "cwd": str(script_path.parent),
+    }
+
+    if sys.platform == "win32":
+        # Windows detached process flags
+        detached_flags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        new_group_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        popen_kwargs["creationflags"] = detached_flags | new_group_flags
+    else:
+        popen_kwargs["start_new_session"] = True
+
     with open(LOG_FILE, "a") as log_f:
         log_f.write(f"\n--- Bot Daemon Started at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+        popen_kwargs["stdout"] = log_f
         proc = subprocess.Popen(
             [python_bin, str(script_path)],
-            stdout=log_f,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            cwd=str(script_path.parent),
+            **popen_kwargs,
         )
 
     # Allow a second to confirm PID lock
@@ -153,8 +166,9 @@ def stop_bot_daemon() -> bool:
                 return True
 
         # Force kill if still unresponsive
-        print("⚠️ Process did not terminate in 5s. Sending SIGKILL...")
-        os.kill(pid, signal.SIGKILL)
+        print("⚠️ Process did not terminate in 5s. Sending termination signal...")
+        sig_kill = getattr(signal, "SIGKILL", signal.SIGTERM)
+        os.kill(pid, sig_kill)
         time.sleep(0.5)
         PID_FILE.unlink(missing_ok=True)
         print("✅ Telegram Bot Daemon force terminated.")

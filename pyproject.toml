@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blackboard-scraper"
+version = "2.0.0"
+description = "High-performance headless scraper and academic intelligence engine for Blackboard Ultra"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Amanuel Hailie" }
+]
+dependencies = [
+    "playwright>=1.40.0",
+    "beautifulsoup4>=4.12.0",
+]
+
+[project.optional-dependencies]
+menubar = [
+    "rumps>=0.4.0; sys_platform == 'darwin'",
+]
+
+[project.scripts]
+bb = "main:main"
+blackboard = "main:main"
+bbscraper = "main:main"
+
+[tool.setuptools]
+py-modules = ["main", "menubar", "telegram_bot"]
+packages = ["core", "scrapers", "telegram", "ui"]

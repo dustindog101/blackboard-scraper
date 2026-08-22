@@ -39,39 +39,55 @@ An automated, high-performance headless scraper and academic intelligence engine
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick Start (Lightweight CLI-First)
+
+The base scraper is 100% lightweight and cross-platform (Windows, macOS, Linux). It requires only `playwright` and `beautifulsoup4`.
 
 ### 1. Installation
 
+#### On macOS / Linux:
 ```bash
-cd "tools/blackboard-scraper"
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
+./install-cli.sh   # Registers global 'bb', 'blackboard', and 'bbscraper' commands
 ```
 
-### 2. Authenticate (One-time)
+#### On Windows (PowerShell):
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+playwright install chromium
+.\install-cli.ps1   # Or: pip install -e .
+```
+
+---
+
+### 2. Authenticate (One-Time)
 
 ```bash
-# Automated SSO + Duo SMS passcode
+# Option A: Fast automated SSO login
 python3 main.py --login --auto
 
-# Or open visible browser window
+# Option B: Open visible browser window to solve SSO & Duo manually
 python3 main.py --login
 ```
+
+---
 
 ### 3. Run Commands (100% Headless)
 
 ```bash
 # Get your daily school briefing
-python3 main.py --briefing
+bb --briefing
 
 # Check upcoming deadlines for the next 7 days
-python3 main.py --due 7d
+bb --due 7d
 
 # View course outline and syllabi
-python3 main.py --outline --all
+bb --outline --all
 ```
 
 ---
@@ -339,6 +355,24 @@ python3 telegram_bot.py
 
 ---
 
+## 🖥️ Optional macOS Menubar App (`--menubar`)
+
+For macOS users who want background status monitoring and click-to-scrape controls in their macOS menu bar (`🎓 BB 🟢`):
+
+```bash
+# Install optional macOS menubar extra
+pip install -e .[menubar]
+# or
+pip install rumps
+
+# Launch Menubar app
+bb --menubar
+# or
+python3 menubar.py
+```
+
+---
+
 ## 📋 Complete CLI Flag Reference
 
 | Category | Flag | Description |
@@ -374,6 +408,7 @@ python3 telegram_bot.py
 | | `--compact` | Minified JSON output |
 | **Performance** | `--concurrency <N>` | Override dynamic worker pool size |
 | | `--visible, -v` | Launch visible browser window for debugging |
+| **GUI & Menubar** | `--menubar` | Launch optional native macOS Menubar app |
 | **Telegram** | `--telegram` | Send briefing/alerts to configured chat |
 | | `--bot` | Launch interactive Telegram bot daemon |
 

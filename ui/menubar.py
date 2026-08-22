@@ -10,7 +10,12 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import rumps
+try:
+    import rumps
+    _BaseApp = rumps.App
+except ImportError:
+    rumps = None
+    _BaseApp = object
 
 from core.config import CONFIG_FILE, SESSION_DIR, load_config, load_courses
 from core.session import check_session, login_auto, quick_check_session_http
@@ -27,7 +32,30 @@ logger = logging.getLogger("blackboard.menubar")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _safe_clear_menu(menu_item: rumps.MenuItem) -> None:
+def open_path(path: Path | str) -> None:
+    """Cross-platform helper to open a file or directory in the default system handler."""
+    path_str = str(path)
+    try:
+        if sys.platform == "win32":
+            os.startfile(path_str)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", path_str])
+        else:
+            subprocess.run(["xdg-open", path_str])
+    except Exception as e:
+        logger.debug(f"Failed to open path '{path_str}': {e}")
+
+
+def is_menubar_supported() -> tuple[bool, str]:
+    """Check if the Menubar GUI is supported on the current platform and has dependencies."""
+    if sys.platform != "darwin":
+        return False, "The menubar app is only supported on macOS (requires Apple Cocoa NSStatusBar)."
+    if rumps is None:
+        return False, "The menubar app requires 'rumps'. Install it via: pip install rumps"
+    return True, ""
+
+
+def _safe_clear_menu(menu_item: Any) -> None:
     """Safely clear submenu items without crashing if Cocoa NSMenu is uninitialized."""
     try:
         if getattr(menu_item, "_menu", None) is not None:
@@ -39,7 +67,7 @@ def _safe_clear_menu(menu_item: rumps.MenuItem) -> None:
         pass
 
 
-class BlackboardMenuBarApp(rumps.App):
+class BlackboardMenuBarApp(_BaseApp):
     """
     Native macOS Menubar Application for Blackboard Ultra Scraper & Telegram Bot.
     Provides live status monitoring, one-click controls, background scraping,
@@ -322,7 +350,7 @@ class BlackboardMenuBarApp(rumps.App):
         log_file = SESSION_DIR / "bot.log"
         if not log_file.exists():
             log_file.write_text("--- Telegram Bot Log Created ---\n")
-        subprocess.run(["open", str(log_file)])
+        open_path(log_file)
 
     # ------------------------------------------------------------------------
     # Scraper Action Handlers (Non-blocking threads)
@@ -603,16 +631,15 @@ class BlackboardMenuBarApp(rumps.App):
 
     def on_open_config(self, _):
         """Open config.json in default text editor."""
-        subprocess.run(["open", str(CONFIG_FILE)])
-
+        open_path(CONFIG_FILE)
 
     def on_open_project_folder(self, _):
-        """Open project directory in Finder."""
-        subprocess.run(["open", str(PROJECT_ROOT)])
+        """Open project directory in Finder / File Explorer."""
+        open_path(PROJECT_ROOT)
 
     def on_open_session_dir(self, _):
-        """Open session cache directory in Finder."""
-        subprocess.run(["open", str(SESSION_DIR)])
+        """Open session cache directory in Finder / File Explorer."""
+        open_path(SESSION_DIR)
 
     def on_run_tests(self, _):
         """Run unit test suite in background thread."""
@@ -638,6 +665,10 @@ class BlackboardMenuBarApp(rumps.App):
 
 def run_menubar():
     """Launch the Menubar application."""
+    supported, reason = is_menubar_supported()
+    if not supported:
+        print(f"⚠️ {reason}")
+        return
     app = BlackboardMenuBarApp()
     app.run()
 
