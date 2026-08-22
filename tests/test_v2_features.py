@@ -13,6 +13,7 @@ Unit and Integration Tests for Blackboard Ultra Scraper v2 features:
 import json
 import re
 import unittest
+from unittest.mock import patch, MagicMock
 from datetime import datetime
 
 from core.export_json import build_item, build_export_doc, build_composite_schema, _to_unix_timestamp
@@ -205,6 +206,107 @@ class TestSessionTracker(unittest.TestCase):
             self.assertIn("BLACKBOARD SESSION LIFESPAN TELEMETRY", cli_text)
 
 
+class TestConfigInitializationAndCredentials(unittest.TestCase):
+    def test_ensure_config_exists_and_blank_creation(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        import core.config as config_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_cfg_path = Path(tmpdir) / "config.json"
+            with patch.object(config_mod, "CONFIG_FILE", test_cfg_path):
+                self.assertFalse(test_cfg_path.exists())
+                
+                # Should create blank config
+                created, cfg = config_mod.ensure_config_exists(notify=False)
+                self.assertTrue(created)
+                self.assertTrue(test_cfg_path.exists())
+                self.assertIn("courses", cfg)
+                self.assertIn("auto_login", cfg)
+                self.assertEqual(cfg["auto_login"]["username"], "")
+                self.assertEqual(cfg["auto_login"]["password"], "")
+
+                # Second call should not re-create
+                created2, cfg2 = config_mod.ensure_config_exists(notify=False)
+                self.assertFalse(created2)
+
+    def test_has_auto_login_credentials(self):
+        from core.config import has_auto_login_credentials
+
+        self.assertFalse(has_auto_login_credentials({}))
+        self.assertFalse(has_auto_login_credentials({"auto_login": {"username": "", "password": ""}}))
+        self.assertFalse(has_auto_login_credentials({"auto_login": {"username": "user123", "password": ""}}))
+        self.assertTrue(has_auto_login_credentials({"auto_login": {"username": "user123", "password": "securepassword"}}))
+
+    def test_save_auto_login_credentials(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        import core.config as config_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_cfg_path = Path(tmpdir) / "config.json"
+            test_cfg_path.write_text(json.dumps({"courses": {"_1001_1": "Test Course"}}))
+            with patch.object(config_mod, "CONFIG_FILE", test_cfg_path):
+                config_mod.save_auto_login_credentials("student1", "secret123")
+                saved = json.loads(test_cfg_path.read_text())
+                self.assertEqual(saved["auto_login"]["username"], "student1")
+                self.assertEqual(saved["auto_login"]["password"], "secret123")
+                # Ensure existing courses preserved
+                self.assertIn("_1001_1", saved["courses"])
+
+
+class TestTUIAuthPromptAndAutoRecovery(unittest.TestCase):
+    @patch("builtins.input", side_effect=["testuser@umbc.edu", "y", "1"])
+    @patch("core.session.getpass", return_value="mypassword123")
+    def test_prompt_credentials_tui_success(self, mock_getpass, mock_input):
+        from core.session import prompt_credentials_tui
+
+        usr, pwd, save_creds, mode = prompt_credentials_tui(default_auto_exp=True)
+        self.assertEqual(usr, "testuser@umbc.edu")
+        self.assertEqual(pwd, "mypassword123")
+        self.assertTrue(save_creds)
+        self.assertEqual(mode, "auto_exp")
+
+    @patch("builtins.input", side_effect=KeyboardInterrupt)
+    def test_prompt_credentials_tui_cancel(self, mock_input):
+        from core.session import prompt_credentials_tui
+
+        usr, pwd, save_creds, mode = prompt_credentials_tui(default_auto_exp=True)
+        self.assertIsNone(usr)
+        self.assertIsNone(pwd)
+        self.assertFalse(save_creds)
+        self.assertEqual(mode, "")
+
+    @patch("sys.stdin.isatty", return_value=False)
+    @patch("core.session.ensure_config_exists", return_value=(True, {"courses": {}, "auto_login": {}}))
+    def test_login_auto_non_interactive_no_credentials(self, mock_ensure, mock_isatty):
+        import io
+        from contextlib import redirect_stdout
+        from core.session import login_auto
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            login_auto(username=None, password=None, headless=True)
+        output_str = out.getvalue()
+        self.assertIn("No login detected and no credentials found in config.json", output_str)
+
+    @patch("core.session.quick_check_session_http", side_effect=[(False, None), (True, {"studentId": "BH69617"})])
+    @patch("core.session.check_session", return_value=False)
+    @patch("core.session.ensure_config_exists", return_value=(False, {"auto_login": {"username": "BH69617", "password": "pass"}}))
+    @patch("core.session.has_auto_login_credentials", return_value=True)
+    @patch("core.session.login_auto")
+    def test_require_session_auto_recovery_with_credentials(self, mock_login_auto, mock_has_creds, mock_ensure, mock_check, mock_http):
+        from core.session import _require_session
+
+        res = _require_session()
+        self.assertTrue(res)
+        mock_login_auto.assert_called_once_with(username=None, password=None, headless=True, cdp_url=None, auto_exp=True, force=False)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
 

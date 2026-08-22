@@ -156,14 +156,20 @@ HELP_GUIDES: Dict[str, str] = {
    - All CLI commands, background cron jobs, and Telegram bot commands run
      completely in the background with zero browser popups and zero user intervention.
 
-2. One-Time Automated SSO Login:
+2. One-Time Setup & Automated SSO Logins:
+   $ python3 main.py --auto-exp
+   - If no config or login is detected, a template config.json is automatically created.
+   - Launches an interactive TUI setup wizard to enter UMBC email/username and password.
+   - Automatically intercepts incoming macOS Duo 2FA SMS passcodes in <3ms.
+   - Saves cookies for seamless headless operation.
+
+3. Standard Automated Login:
    $ python3 main.py --login --auto
    - Automatically fills your UMBC username and password on WebAuth.
    - Dispatches Duo 2FA SMS passcode to your phone.
-   - Enter the 6-digit passcode into the terminal prompt.
-   - Playwright automatically trusts the browser and saves cookies.
+   - Accepts 6-digit passcode via macOS SMS capture, Telegram reply, or terminal prompt.
 
-3. Visible Manual Login Fallback:
+4. Visible Manual Login Fallback:
    $ python3 main.py --login
    - Opens a visible browser if you prefer Duo Push, TouchID, or Security Keys.
 """,

@@ -13,7 +13,58 @@ DEFAULT_COURSES = {
     "_100001_1": "CIS 101 Introduction to Computing",
 }
 
+DEFAULT_BLANK_CONFIG = {
+    "courses": {},
+    "auto_login": {
+        "username": "",
+        "password": ""
+    },
+    "telegram": {
+        "enabled": False,
+        "bot_token": "",
+        "admin_chat_id": None
+    }
+}
+
 LOGIN_INDICATORS = ["login", "sso", "accounts.google", "webauth", "duosecurity", "idp/profile"]
+
+
+def ensure_config_exists(notify: bool = True) -> tuple[bool, dict]:
+    """
+    Ensure config.json exists. If missing, create a blank config and optionally notify.
+    Returns (created: bool, config: dict).
+    """
+    if not CONFIG_FILE.exists():
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(json.dumps(DEFAULT_BLANK_CONFIG, indent=2))
+        if notify:
+            print(f"⚠️ No login detected. Blank config created at: {CONFIG_FILE.name}")
+        return True, dict(DEFAULT_BLANK_CONFIG)
+    return False, load_config()
+
+
+def has_auto_login_credentials(config: dict | None = None) -> bool:
+    """Check whether valid auto_login credentials (username and password) exist."""
+    cfg = config if config is not None else load_config()
+    auto = cfg.get("auto_login", {})
+    if not isinstance(auto, dict):
+        return False
+    usr = str(auto.get("username") or "").strip()
+    pwd = str(auto.get("password") or "").strip()
+    return bool(usr and pwd)
+
+
+def save_auto_login_credentials(username: str, password: str) -> None:
+    """Save or update auto_login credentials in config.json."""
+    data = load_config()
+    if not data:
+        data = json.loads(json.dumps(DEFAULT_BLANK_CONFIG))
+    if "auto_login" not in data or not isinstance(data["auto_login"], dict):
+        data["auto_login"] = {}
+    data["auto_login"]["username"] = username.strip()
+    data["auto_login"]["password"] = password
+    CONFIG_FILE.write_text(json.dumps(data, indent=2))
+    print("   💾 Saved credentials to config.json for future logins.")
 
 
 def load_config() -> dict:
@@ -54,4 +105,5 @@ def save_courses(courses: dict[str, str], overwrite: bool = False):
         data["courses"] = existing
 
     CONFIG_FILE.write_text(json.dumps(data, indent=2))
+
 

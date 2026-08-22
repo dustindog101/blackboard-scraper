@@ -6,10 +6,20 @@ from getpass import getpass
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout, Error as PlaywrightError
 
-from core.config import BLACKBOARD_BASE, LOGIN_INDICATORS, SESSION_DIR, load_config
+from core.config import (
+    BLACKBOARD_BASE,
+    CONFIG_FILE,
+    LOGIN_INDICATORS,
+    SESSION_DIR,
+    ensure_config_exists,
+    has_auto_login_credentials,
+    load_config,
+    save_auto_login_credentials,
+)
 
 # ============================================================
 # Browser helpers
@@ -563,6 +573,58 @@ def check_session(quiet: bool = False, debug: bool = False, headless: bool = Tru
 
 
 
+def prompt_credentials_tui(default_auto_exp: bool = True) -> tuple[Optional[str], Optional[str], bool, str]:
+    """
+    Interactive terminal setup wizard for UMBC credentials and auto-login mode.
+    Returns (username, password, save_to_config, chosen_mode).
+    chosen_mode is one of "auto_exp", "auto", or "manual".
+    Returns (None, None, False, "") if user cancels or inputs are invalid.
+    """
+    print("\n" + "═" * 66)
+    print(" 🎓 UMBC Blackboard Login & Setup Wizard")
+    print("═" * 66)
+    print(" No active session or saved credentials detected.")
+    print(" Let's configure your UMBC credentials to proceed with auto-login.\n")
+
+    try:
+        raw_usr = input(" 📧 UMBC Email / Campus ID (e.g. ab12345 or user@umbc.edu): ").strip()
+        if not raw_usr:
+            print("❌ Username cannot be empty.")
+            return None, None, False, ""
+
+        raw_pwd = getpass(" 🔑 UMBC Password: ").strip()
+        if not raw_pwd:
+            print("❌ Password cannot be empty.")
+            return None, None, False, ""
+
+        save_choice = input("\n 💾 Save credentials to config.json for future automated logins? [Y/n]: ").strip().lower()
+        save_to_config = save_choice not in ("n", "no")
+
+        print("\n ⚡ Select Login Mode:")
+        print("    [1] Auto-Exp (Automated SSO + macOS SMS 2FA Interception) [Recommended]")
+        print("    [2] Auto SSO (Automated SSO + Terminal/Telegram Passcode Entry)")
+        print("    [3] Visible Browser (Manual Login Window)")
+
+        default_choice = "1" if default_auto_exp else "2"
+        mode_choice = input(f" 👉 Select mode [1/2/3] (default: {default_choice}): ").strip() or default_choice
+        print("═" * 66 + "\n")
+
+        if mode_choice == "1":
+            chosen_mode = "auto_exp"
+        elif mode_choice == "2":
+            chosen_mode = "auto"
+        elif mode_choice == "3":
+            chosen_mode = "manual"
+        else:
+            chosen_mode = "auto_exp" if default_auto_exp else "auto"
+
+        return raw_usr, raw_pwd, save_to_config, chosen_mode
+
+    except (KeyboardInterrupt, EOFError):
+        print("\n\n❌ Login setup cancelled by user.")
+        return None, None, False, ""
+
+
 def login(force: bool = False, username: str = None, password: str = None, cdp_url: str = None):
     """
     Handle the SSO login flow.
@@ -576,6 +638,9 @@ def login(force: bool = False, username: str = None, password: str = None, cdp_u
         print("🔌 Ignoring --login since you are connected to an existing CDP browser.")
         print("   Please login directly in your attached browser window.")
         return
+
+    # Ensure config exists
+    ensure_config_exists(notify=True)
 
     # Auto-load credentials from config if not provided via CLI
     if not username or not password:
@@ -665,40 +730,45 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
     When auto_exp=True, automatically listens for incoming macOS SMS/iMessage 2FA passcodes.
     When force=True, clears cookies and forces a full re-authentication.
     """
+    if cdp_url:
+        print("🔌 Ignoring --login --auto since you are connected to an existing CDP browser.")
+        return
+
+    # Ensure config exists. If missing, blank config is created with notification.
+    created_blank, cfg = ensure_config_exists(notify=True)
+
+    usr = username or cfg.get("auto_login", {}).get("username")
+    pwd = password or cfg.get("auto_login", {}).get("password")
+
+    # If credentials are not present, check if we can prompt via TUI or fail gracefully
+    if not usr or not pwd:
+        import sys
+        if sys.stdin.isatty():
+            usr, pwd, save_creds, chosen_mode = prompt_credentials_tui(default_auto_exp=auto_exp or True)
+            if not usr or not pwd:
+                return
+            if save_creds:
+                save_auto_login_credentials(usr, pwd)
+            if chosen_mode == "manual":
+                login(force=force, username=usr, password=pwd, cdp_url=cdp_url)
+                return
+            if chosen_mode == "auto_exp":
+                auto_exp = True
+            elif chosen_mode == "auto":
+                auto_exp = False
+        else:
+            print("❌ No login detected and no credentials found in config.json.")
+            if not created_blank:
+                print("   A blank config has been created or verified at: config.json")
+            print("   Please populate config.json['auto_login'] or run: bb --auto-exp")
+            return
+
     if auto_exp:
         print("\n⚡ [EXPERIMENTAL] Automated SSO Login with Real-Time macOS SMS 2FA Extraction")
     else:
         print("\n⚠️  [EXPERIMENTAL] --login --auto is an experimental feature.")
         print("   UMBC's SSO or Duo configuration may change at any time, breaking this feature without notice.")
         print("   If login fails, run: python3 main.py --login\n")
-
-    if cdp_url:
-        print("🔌 Ignoring --login --auto since you are connected to an existing CDP browser.")
-        return
-
-
-
-    config = load_config().get("auto_login", {})
-    usr = username or config.get("username")
-    pwd = password or config.get("password")
-
-    if not usr:
-        try:
-            usr = input("   🔐 Enter your UMBC username: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("❌ Username prompt cancelled.")
-            return
-
-    if not pwd:
-        try:
-            pwd = getpass("   🔐 Enter your UMBC password: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\n❌ Password prompt cancelled.")
-            return
-
-    if not usr or not pwd:
-        print("❌ Username and Password are required. Either pass them via CLI, set them in config.json['auto_login'], or enter them when prompted.")
-        return
 
     print(f"   📋 Credentials loaded (username: {usr})")
     print("🚀 Starting Automated SSO Login...")
@@ -1059,29 +1129,122 @@ def _save_session(context) -> None:
 
 
 async def _require_session_async(cdp_url: str = None) -> bool:
-    """Fast check for session before async scraping."""
+    """Fast check for session before async scraping with auto-recovery and TUI setup."""
     if cdp_url:
         return True
-    cookie_file = Path(SESSION_DIR) / "cookies.json"
-    if cookie_file.exists():
+
+    # 1. Fast sub-150ms HTTP probe
+    valid, user_data = quick_check_session_http()
+    if valid:
         return True
+
+    # 2. Browser fallback check
     valid = await check_session_async(quiet=True, headless=True)
-    if not valid:
-        print("❌ Session invalid or expired. Run: python3 main.py --login")
-    return valid
+    if valid:
+        return True
+
+    # 3. Session missing or expired -> Check config & credentials
+    print("\n⚠️ No active Blackboard session detected.")
+    created_blank, cfg = ensure_config_exists(notify=True)
+
+    if has_auto_login_credentials(cfg):
+        print("🔄 Valid credentials found in config.json. Attempting automated login refresh (auto-exp)...")
+        await asyncio.to_thread(
+            login_auto,
+            username=None,
+            password=None,
+            headless=True,
+            cdp_url=None,
+            auto_exp=True,
+            force=False,
+        )
+        valid, _ = quick_check_session_http()
+        if valid:
+            print("✅ Session successfully refreshed. Proceeding...")
+            return True
+
+    # 4. No credentials -> interactive TUI setup wizard if terminal is available
+    import sys
+    if sys.stdin.isatty():
+        usr, pwd, save_creds, chosen_mode = prompt_credentials_tui(default_auto_exp=True)
+        if usr and pwd:
+            if save_creds:
+                save_auto_login_credentials(usr, pwd)
+            if chosen_mode == "manual":
+                await asyncio.to_thread(login, False, usr, pwd, None)
+            else:
+                await asyncio.to_thread(
+                    login_auto,
+                    username=usr,
+                    password=pwd,
+                    headless=True,
+                    cdp_url=None,
+                    auto_exp=(chosen_mode == "auto_exp"),
+                    force=False,
+                )
+            valid, _ = quick_check_session_http()
+            if valid:
+                print("✅ Session successfully established. Proceeding...")
+                return True
+
+    print("❌ Session invalid or expired. Run: python3 main.py --auto-exp or python3 main.py --login")
+    return False
 
 
 def _require_session(cdp_url: str = None) -> bool:
-    """Check session before scraping. Returns True if valid."""
+    """Check session before scraping with auto-recovery and TUI setup."""
     if cdp_url:
         return True
-    cookie_file = Path(SESSION_DIR) / "cookies.json"
-    if cookie_file.exists():
+
+    valid, _ = quick_check_session_http()
+    if valid:
         return True
-    if not check_session(quiet=True, headless=True):
-        print("❌ Session invalid or expired. Run: python3 main.py --login")
-        if not cdp_url:
-            print("   Tip: run with --visible to let the browser handle login.")
-        return False
-    return True
+
+    valid = check_session(quiet=True, headless=True)
+    if valid:
+        return True
+
+    print("\n⚠️ No active Blackboard session detected.")
+    created_blank, cfg = ensure_config_exists(notify=True)
+
+    if has_auto_login_credentials(cfg):
+        print("🔄 Valid credentials found in config.json. Attempting automated login refresh (auto-exp)...")
+        login_auto(
+            username=None,
+            password=None,
+            headless=True,
+            cdp_url=None,
+            auto_exp=True,
+            force=False,
+        )
+        valid, _ = quick_check_session_http()
+        if valid:
+            print("✅ Session successfully refreshed. Proceeding...")
+            return True
+
+    import sys
+    if sys.stdin.isatty():
+        usr, pwd, save_creds, chosen_mode = prompt_credentials_tui(default_auto_exp=True)
+        if usr and pwd:
+            if save_creds:
+                save_auto_login_credentials(usr, pwd)
+            if chosen_mode == "manual":
+                login(False, usr, pwd, None)
+            else:
+                login_auto(
+                    username=usr,
+                    password=pwd,
+                    headless=True,
+                    cdp_url=None,
+                    auto_exp=(chosen_mode == "auto_exp"),
+                    force=False,
+                )
+            valid, _ = quick_check_session_http()
+            if valid:
+                print("✅ Session successfully established. Proceeding...")
+                return True
+
+    print("❌ Session invalid or expired. Run: python3 main.py --auto-exp or python3 main.py --login")
+    return False
+
 
