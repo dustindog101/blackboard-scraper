@@ -15,6 +15,16 @@ from pathlib import Path
 # Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 
+# Ensure Windows console streams support UTF-8
+if sys.platform == "win32":
+    try:
+        if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from telegram.bot import run_bot
 from telegram.daemon import start_bot_daemon, stop_bot_daemon, restart_bot_daemon, get_bot_status
 from core.session import quick_check_session_http
