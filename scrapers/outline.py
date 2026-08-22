@@ -708,6 +708,22 @@ def filter_outline_by_folder(data: List[Dict[str, Any]], folder_query: str) -> L
 # 7. Formatting & Markdown Exporters
 # ============================================================================
 
+OUTLINE_TYPE_ICONS = {
+    "syllabus": "📜",
+    "folder": "📁",
+    "learning_module": "📦",
+    "document": "📄",
+    "assignment": "📝",
+    "test": "🧪",
+    "quiz": "🧪",
+    "discussion": "💬",
+    "link": "🔗",
+    "file": "📎",
+    "lti_tool": "🛠️",
+    "item": "📌",
+}
+
+
 def format_outline_tree(
     data: List[Dict[str, Any]],
     course_name: str,
@@ -718,28 +734,13 @@ def format_outline_tree(
 ) -> str:
     """
     Formats outline items into a clear, beautiful hierarchical tree view.
-    
+
     Modes:
     - Default (Shallow Summary): Renders root items directly, and collapses top-level folders with item count breakdowns.
     - target_folder: Renders the subtree for a specific folder matched by name or ID.
     - expand_all=True: Recursively expands all folders down to leaves (legacy behavior).
-    - depth=N: Limits expansion up to N depth levels.
+    - depth=N: Limits expansion up to N levels (e.g. depth=1 for top-level only, depth=2 for 1 level inside).
     """
-    type_icons = {
-        "syllabus": "📜",
-        "folder": "📁",
-        "learning_module": "📦",
-        "document": "📄",
-        "assignment": "📝",
-        "test": "🧪",
-        "quiz": "🧪",
-        "discussion": "💬",
-        "link": "🔗",
-        "file": "📎",
-        "lti_tool": "🛠️",
-        "item": "📌",
-    }
-
     if not data:
         header = f"📚 Course Outline: {course_name} ({course_id})" if course_id else f"📚 Course Outline: {course_name}"
         return f"{header}\n{'━' * len(header)}\n  (Course is currently closed or has no content items)"
@@ -751,9 +752,9 @@ def format_outline_tree(
         filtered = filter_outline_by_folder(data, target_folder)
         if not filtered:
             available_folders = [
-                f"  • {it.get('title')} [ID: {it.get('content_id')}]"
-                for it in data
-                if it.get("content_type") in ("folder", "learning_module") or it.get("has_children")
+                f"  • {item.get('title')} [ID: {item.get('content_id')}]"
+                for item in data
+                if item.get("content_type") in ("folder", "learning_module") or item.get("has_children")
             ]
             folders_str = "\n".join(available_folders) if available_folders else "  (No folders found)"
             return (
@@ -769,33 +770,35 @@ def format_outline_tree(
         )
         lines = [header, "━" * len(header)]
 
-        # Build subtree map
         tree: Dict[Optional[str], List[Dict[str, Any]]] = {}
-        for it in filtered:
-            pid = it.get("parent_id")
-            tree.setdefault(pid, []).append(it)
+        for item in filtered:
+            tree.setdefault(item.get("parent_id"), []).append(item)
 
-        # Base parent is the parent_id of the matching root(s)
-        base_parent_ids = {it.get("parent_id") for it in filtered if it.get("content_id") == root_folder.get("content_id")}
+        base_parent_ids = {item.get("parent_id") for item in filtered if item.get("content_id") == root_folder.get("content_id")}
 
         def render_targeted_nodes(parent_id: Optional[str], prefix: str = "", current_depth: int = 0):
             children = tree.get(parent_id, [])
             total = len(children)
-            for i, node in enumerate(children):
-                is_last = (i == total - 1)
+            for idx, node in enumerate(children):
+                is_last = (idx == total - 1)
                 connector = "└── " if is_last else "├── "
                 child_prefix = "    " if is_last else "│   "
 
-                icon = type_icons.get(node.get("content_type", "item"), "📌")
-                title = node.get("title", "Untitled")
                 ctype = node.get("content_type", "item")
-                cid = node.get("content_id", "")
+                icon = OUTLINE_TYPE_ICONS.get(ctype, "📌")
+                title = node.get("title", "Untitled")
+                content_id = node.get("content_id", "")
                 due = f" (Due: {node['due_date']})" if node.get("due_date") else ""
-                id_tag = f" [ID: {cid}]" if node.get("is_downloadable") or ctype in ("file", "document", "syllabus", "folder", "learning_module") else ""
+                id_tag = f" [ID: {content_id}]" if node.get("is_downloadable") or ctype in ("file", "document", "syllabus", "folder", "learning_module") else ""
 
                 is_container = ctype in ("folder", "learning_module") or node.get("has_children")
-                stat = folder_stats.get(cid, {})
-                stat_str = f" {stat.get('summary_str', '')}" if is_container and cid != root_folder.get("content_id") else ""
+                stat = folder_stats.get(content_id, {})
+
+                # Only show summary count if container will NOT be expanded (e.g. hit max depth)
+                will_expand = is_container and (depth is None or (current_depth + 1) < depth)
+                stat_str = ""
+                if is_container and not will_expand and content_id != root_folder.get("content_id"):
+                    stat_str = f" {stat.get('summary_str', '')}"
 
                 lines.append(f"{prefix}{connector}{icon} {title} [{ctype}]{id_tag}{due}{stat_str}")
 
@@ -808,11 +811,11 @@ def format_outline_tree(
                 if node.get("external_url"):
                     lines.append(f"{prefix}{child_prefix}   🔗 {node['external_url']}")
 
-                if (is_container or cid in tree) and (depth is None or current_depth < depth):
-                    render_targeted_nodes(cid, prefix + child_prefix, current_depth + 1)
+                if (is_container or content_id in tree) and will_expand:
+                    render_targeted_nodes(content_id, prefix + child_prefix, current_depth + 1)
 
-        for bpid in base_parent_ids:
-            render_targeted_nodes(bpid, "", 0)
+        for base_pid in base_parent_ids:
+            render_targeted_nodes(base_pid, "", 0)
 
         return "\n".join(lines)
 
@@ -820,35 +823,31 @@ def format_outline_tree(
     header = f"📚 Course Outline: {course_name} ({course_id})" if course_id else f"📚 Course Outline: {course_name}"
     lines = [header, "━" * len(header)]
 
-    # Build parent -> children map
-    tree: Dict[Optional[str], List[Dict[str, Any]]] = {}
-    for it in data:
-        pid = it.get("parent_id")
-        tree.setdefault(pid, []).append(it)
+    tree = {}
+    for item in data:
+        tree.setdefault(item.get("parent_id"), []).append(item)
 
     is_shallow = not expand_all and depth is None
 
     def render_nodes(parent_id: Optional[str], prefix: str = "", current_depth: int = 0):
         children = tree.get(parent_id, [])
         total = len(children)
-        for i, node in enumerate(children):
-            is_last = (i == total - 1)
+        for idx, node in enumerate(children):
+            is_last = (idx == total - 1)
             connector = "└── " if is_last else "├── "
             child_prefix = "    " if is_last else "│   "
 
-            icon = type_icons.get(node.get("content_type", "item"), "📌")
-            title = node.get("title", "Untitled")
             ctype = node.get("content_type", "item")
-            cid = node.get("content_id", "")
+            icon = OUTLINE_TYPE_ICONS.get(ctype, "📌")
+            title = node.get("title", "Untitled")
+            content_id = node.get("content_id", "")
             due = f" (Due: {node['due_date']})" if node.get("due_date") else ""
 
             is_container = ctype in ("folder", "learning_module") or node.get("has_children")
-            stat = folder_stats.get(cid, {})
+            stat = folder_stats.get(content_id, {})
+            id_tag = f" [ID: {content_id}]" if is_container or node.get("is_downloadable") or ctype in ("file", "document", "syllabus") else ""
 
-            # Show ID tag for easy referencing / downloads
-            id_tag = f" [ID: {cid}]" if is_container or node.get("is_downloadable") or ctype in ("file", "document", "syllabus") else ""
-
-            # In shallow mode, containers show count breakdown and do NOT expand children
+            # In shallow mode (default), containers show count breakdown and do NOT expand
             if is_shallow and is_container:
                 count_str = f" {stat.get('summary_str', '')}"
                 lines.append(f"{prefix}{connector}{icon} {title} [{ctype}]{id_tag}{due}{count_str}")
@@ -859,10 +858,15 @@ def format_outline_tree(
                     lines.append(f"{prefix}{child_prefix}   💬 {desc}")
                 continue
 
-            # In depth-limited mode, if reached max depth, display summary without expanding
-            if depth is not None and current_depth >= depth and is_container:
+            # In depth-limited mode (e.g. depth=1 means level 1 only, depth=2 means 1 level inside)
+            if depth is not None and (current_depth + 1) >= depth and is_container:
                 count_str = f" {stat.get('summary_str', '')}"
                 lines.append(f"{prefix}{connector}{icon} {title} [{ctype}]{id_tag}{due}{count_str}")
+                if node.get("description"):
+                    desc = node["description"].replace("\n", " ").strip()
+                    if len(desc) > 95:
+                        desc = desc[:92] + "..."
+                    lines.append(f"{prefix}{child_prefix}   💬 {desc}")
                 continue
 
             lines.append(f"{prefix}{connector}{icon} {title} [{ctype}]{id_tag}{due}")
@@ -877,14 +881,14 @@ def format_outline_tree(
                 lines.append(f"{prefix}{child_prefix}   🔗 {node['external_url']}")
 
             # Recursively render children
-            if node.get("has_children") or cid in tree:
-                render_nodes(cid, prefix + child_prefix, current_depth + 1)
+            if node.get("has_children") or content_id in tree:
+                render_nodes(content_id, prefix + child_prefix, current_depth + 1)
 
     # Render starting from root (parent_id is None)
     render_nodes(None, "", 0)
 
     # If in shallow mode and containers were present, add helpful navigation hint
-    has_containers = any(it.get("content_type") in ("folder", "learning_module") or it.get("has_children") for it in data)
+    has_containers = any(item.get("content_type") in ("folder", "learning_module") or item.get("has_children") for item in data)
     if is_shallow and has_containers:
         lines.append("")
         lines.append("💡 Tip: Use '--folder <name|ID>' to expand a folder, or '--expand-all' / '--deep' for full outline tree.")
@@ -999,25 +1003,10 @@ def save_outline(data: List[Dict[str, Any]], course_id: str) -> Path:
     if not data:
         lines.append("_No course content found or course is unavailable._")
     else:
-        type_icons = {
-            "syllabus": "📜",
-            "folder": "📁",
-            "learning_module": "📦",
-            "document": "📄",
-            "assignment": "📝",
-            "test": "🧪",
-            "quiz": "🧪",
-            "discussion": "💬",
-            "link": "🔗",
-            "file": "📎",
-            "lti_tool": "🛠️",
-            "item": "📌",
-        }
-
         for item in data:
             depth = item.get("depth", 0)
             indent = "  " * depth
-            icon = type_icons.get(item.get("content_type", "item"), "📌")
+            icon = OUTLINE_TYPE_ICONS.get(item.get("content_type", "item"), "📌")
             title = item.get("title", "Untitled")
             due = f" — _(Due: {item['due_date']})_" if item.get("due_date") else ""
             dl_str = f" `[ID: {item.get('content_id')}]`" if item.get("is_downloadable") else ""

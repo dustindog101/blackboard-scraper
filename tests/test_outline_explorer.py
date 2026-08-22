@@ -259,13 +259,19 @@ class TestOutlineExplorer(unittest.TestCase):
         self.assertNotIn("Course Syllabus", output)
 
     def test_depth_limiting_formatting(self):
-        # depth=1 on full outline should show root items and depth 1 items
-        output = format_outline_tree(self.sample_outline, "IS 410 Database", "_105737_1", depth=1)
-        self.assertIn("Homework Assignments", output)
-        self.assertIn("Homework 1 - SQL Queries", output)
-        self.assertIn("Midterm Exam Prep", output)
-        # depth 2 item should NOT appear when depth=1
-        self.assertNotIn("Midterm Study Guide", output)
+        # depth=1 on outline: level 1 only (root items and collapsed root folders)
+        output1 = format_outline_tree(self.sample_outline, "IS 410 Database", "_105737_1", depth=1)
+        self.assertIn("Homework Assignments", output1)
+        self.assertIn("3 items: 2 assignments, 1 file", output1)
+        self.assertNotIn("Homework 1 - SQL Queries", output1)
+
+        # depth=2 on outline: level 2 (root folders expanded, but nested subfolders collapsed)
+        output2 = format_outline_tree(self.sample_outline, "IS 410 Database", "_105737_1", depth=2)
+        self.assertIn("Homework Assignments", output2)
+        self.assertIn("Homework 1 - SQL Queries", output2)
+        self.assertIn("Midterm Exam Prep", output2)
+        self.assertIn("1 document", output2)  # nested subfolder collapsed count
+        self.assertNotIn("Midterm Study Guide", output2)  # depth 2 item inside nested subfolder omitted
 
 
 if __name__ == "__main__":

@@ -100,16 +100,25 @@ python3 main.py --logout
 
 By default, **no Markdown files are saved to disk**. Commands print directly to terminal `stdout`:
 
-### Outline Tree View (`python3 main.py --outline -c IS410`):
+### Outline Shallow View (`python3 main.py --outline -c IS410`):
 ```text
 📚 Course Outline: IS 410 Introduction to Database Design (_105737_1)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📜 [SYLLABUS] Course Syllabus & Policies [syllabus]
-   └ 🔗 Download PDF: https://blackboard.umbc.edu/.../Syllabus.pdf
-📁 Week 1: Relational Algebra & SQL [folder]
-   ├─ 📄 Lecture 1 Slides [document]
-   │  └ 🔗 Slides.pdf: https://blackboard.umbc.edu/.../slides.pdf
-   └─ 📝 Homework 1: ER Diagrams [assignment] — (Due: Sep 15, 2026)
+├── 📜 Course Syllabus & Policies [syllabus] [ID: _105738_1]
+├── 📁 Homework & Assignments [folder] [ID: _105740_1] (12 items: 8 assignments, 4 files)
+├── 📁 Lecture Slides & Notes [folder] [ID: _105741_1] (24 items: 24 files)
+└── 📁 Exam Review Materials [folder] [ID: _105742_1] (15 items: 10 files, 5 tests)
+
+💡 Tip: Use '--folder <name|ID>' to expand a folder, or '--expand-all' / '--deep' for full outline tree.
+```
+
+### Selective Folder View (`python3 main.py --outline -c IS410 -f "Homework"`):
+```text
+📚 Course Outline: IS 410 Introduction to Database Design (_105737_1) ➔ 📁 Homework & Assignments
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+├── 📝 Homework 1: ER Diagrams [assignment] [ID: _105745_1] (Due: Sep 15, 2026)
+├── 📝 Homework 2: SQL DDL [assignment] [ID: _105746_1] (Due: Sep 22, 2026)
+└── 📎 Database Schema Template.sql [file] [ID: _105747_1]
 ```
 
 ### Deadline Table View (`python3 main.py --due 7d`):

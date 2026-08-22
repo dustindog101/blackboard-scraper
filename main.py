@@ -657,7 +657,7 @@ async def main_async(args: argparse.Namespace) -> None:
         raw_all: dict[str, list[dict]] = {}
         async def _fetch_outline(cid: str) -> tuple[str, list[dict]]:
             data = await scrape_course_outline_async(cid)
-            if args.folder and (args.json or args.out or args.raw):
+            if args.folder and (args.json or args.out or args.raw or args.md):
                 data = filter_outline_by_folder(data, args.folder)
             if args.type:
                 data = [item for item in data if item.get("content_type", "").lower() == args.type.lower()]
