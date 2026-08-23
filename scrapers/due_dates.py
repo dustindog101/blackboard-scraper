@@ -1,15 +1,12 @@
-import asyncio
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from playwright.async_api import Page
 
-from core.config import load_courses
 from core.output import ensure_output_dir
 from scrapers.calendar import scrape_calendar_async
-from scrapers.grades import scrape_grades_async
 
 logger = logging.getLogger("blackboard.scrapers.due_dates")
 

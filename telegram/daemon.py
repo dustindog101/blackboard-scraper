@@ -4,7 +4,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from core.config import SESSION_DIR
 
@@ -14,6 +14,28 @@ LOG_FILE = SESSION_DIR / "bot.log"
 
 def get_process_memory_mb(pid: int) -> float:
     """Returns memory usage of process in MB."""
+    if sys.platform == "win32":
+        try:
+            import psutil
+            proc = psutil.Process(pid)
+            return round(proc.memory_info().rss / (1024 * 1024), 2)
+        except Exception:
+            pass
+        try:
+            out = subprocess.check_output(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                text=True,
+                timeout=2,
+            ).strip()
+            if out and not out.startswith("INFO:"):
+                parts = [p.strip(' "') for p in out.split(",")]
+                if len(parts) >= 5:
+                    mem_str = parts[4].replace("K", "").replace("k", "").replace(",", "").replace(" ", "")
+                    return round(int(mem_str) / 1024, 2)
+        except Exception:
+            pass
+        return 0.0
+
     try:
         import resource
         # If current process
@@ -137,7 +159,7 @@ def start_bot_daemon() -> bool:
     # Allow a second to confirm PID lock
     time.sleep(1.0)
     if is_pid_alive(proc.pid):
-        print(f"🚀 Telegram Bot Daemon started in background.")
+        print("🚀 Telegram Bot Daemon started in background.")
         print(f"   PID:  {proc.pid}")
         print(f"   Logs: {LOG_FILE}")
         return True

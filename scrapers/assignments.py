@@ -2,8 +2,8 @@ import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from playwright.async_api import Page, TimeoutError as PlaywrightTimeout
+from typing import Any, Dict, List
+from playwright.async_api import Page
 
 from core.config import BLACKBOARD_BASE, load_courses
 from core.output import ensure_output_dir

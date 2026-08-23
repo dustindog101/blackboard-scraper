@@ -1,7 +1,6 @@
 import asyncio
 import logging
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 from core.config import load_courses
@@ -59,7 +58,7 @@ def format_briefing_cli(bundle: Dict[str, Any]) -> str:
                 for a in unread_ann:
                     lines.append(f"    • {a['title']} ({a.get('meta','')})")
             if graded:
-                lines.append(f"  📊 Graded Items:")
+                lines.append("  📊 Graded Items:")
                 for g in graded:
                     lines.append(f"    • {g['name']}: {g['grade']} (Due: {g.get('dueDate','')})")
 
@@ -82,7 +81,7 @@ async def run_briefing_async(
     courses = load_courses()
     now = datetime.now()
     lines = [
-        f"# Blackboard Daily Briefing",
+        "# Blackboard Daily Briefing",
         f"_Generated: {now.strftime('%Y-%m-%d %H:%M')}_",
         "",
         "---",

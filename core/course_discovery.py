@@ -4,10 +4,9 @@ import re
 import urllib.error
 import urllib.request
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
-from core.config import BLACKBOARD_BASE, CONFIG_FILE, SESSION_DIR, load_config, save_courses
+from core.config import BLACKBOARD_BASE, SESSION_DIR, save_courses
 
 logger = logging.getLogger("blackboard.course_discovery")
 

@@ -86,7 +86,7 @@ def load_courses() -> dict[str, str]:
     elif data and not any(k in data for k in ["courses", "auto_login"]):
         # Legacy support where config.json was just the courses dictionary
         return data
-        
+
     return DEFAULT_COURSES
 
 
@@ -105,5 +105,3 @@ def save_courses(courses: dict[str, str], overwrite: bool = False):
         data["courses"] = existing
 
     CONFIG_FILE.write_text(json.dumps(data, indent=2))
-
-

@@ -1,6 +1,5 @@
 import asyncio
 import json
-import re
 from pathlib import Path
 from playwright.async_api import async_playwright
 
@@ -18,7 +17,7 @@ async def inspect_courses():
             args=["--disable-blink-features=AutomationControlled"],
             viewport={"width": 1440, "height": 900}
         )
-        
+
         cookie_file = SESSION_DIR / "cookies.json"
         if cookie_file.exists():
             try:
@@ -51,19 +50,19 @@ async def inspect_courses():
         # Let's extract all course cards / links / terms
         courses_data = await page.evaluate("""() => {
             const results = [];
-            
+
             // Try selector for course cards/rows
             const rows = document.querySelectorAll('bb-course-card, div[data-course-id], [class*="course-card"], div.course-element-card, a[href*="/ultra/courses/"]');
-            
+
             const seen = new Set();
             rows.forEach(el => {
                 let href = el.getAttribute('href') || el.querySelector('a[href*="/ultra/courses/"]')?.getAttribute('href') || '';
                 let title = el.querySelector('h3, h4, span.name, [class*="course-title"], [class*="title"]')?.innerText?.trim() || el.innerText?.trim();
                 let status = el.querySelector('[class*="status"], [class*="badge"], [class*="label"], [class*="term"]')?.innerText?.trim() || '';
-                
+
                 let courseIdMatch = href.match(/\/ultra\/courses\/([^/]+)/);
                 let courseId = courseIdMatch ? courseIdMatch[1] : (el.getAttribute('data-course-id') || '');
-                
+
                 if (courseId && !seen.has(courseId)) {
                     seen.add(courseId);
                     results.push({
@@ -75,7 +74,7 @@ async def inspect_courses():
                     });
                 }
             });
-            
+
             // Also look for term filters or dropdowns
             const termButtons = Array.from(document.querySelectorAll('button, select option, a')).map(b => ({
                 text: b.innerText?.trim(),
@@ -105,10 +104,10 @@ async def inspect_courses():
         # Let's test each course outline directly
         inspection_results = []
         for course_id, course_title in all_to_check.items():
-            print(f"\n==================================================")
+            print("\n==================================================")
             print(f"🔍 Inspecting Course: {course_title} ({course_id})")
             outline_url = f"{BLACKBOARD_BASE}/ultra/courses/{course_id}/outline"
-            
+
             try:
                 await page.goto(outline_url, wait_until="networkidle", timeout=25000)
             except Exception as e:
@@ -117,24 +116,22 @@ async def inspect_courses():
                     await page.goto(outline_url, wait_until="domcontentloaded", timeout=15000)
                 except Exception as e2:
                     print(f"   ⚠️ Second navigation attempt failed: {e2}")
-            
+
             await asyncio.sleep(2)
-            current_url = page.url
-            page_title = await page.title()
-            
+
             # Check availability / access denied
             content = await page.content()
             (OUTPUT_DIR / f"outline_{course_id}.html").write_text(content)
-            
+
             # DOM Evaluation on the course page
             dom_info = await page.evaluate("""() => {
                 const bodyText = document.body.innerText;
-                const isAccessDenied = bodyText.includes("You can't access this course right now") || 
+                const isAccessDenied = bodyText.includes("You can't access this course right now") ||
                                      bodyText.includes("Course is unavailable") ||
                                      bodyText.includes("Private");
-                
+
                 const hasCourseOutline = !!document.querySelector('.course-outline-tree, bb-course-outline, div[role="tree"], [data-analytics-id="course-outline"], .course-outline');
-                
+
                 // Inspect all elements that look like outline items
                 const outlineNodes = document.querySelectorAll(
                     'bb-content-item, ' +

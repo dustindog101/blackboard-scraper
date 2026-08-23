@@ -1,5 +1,4 @@
 from pathlib import Path
-from datetime import datetime
 from core.config import OUTPUT_BASE
 
 def ensure_output_dir(section: str) -> Path:

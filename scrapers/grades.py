@@ -1,8 +1,6 @@
 import asyncio
 import logging
-import re
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List
 
 from core.config import BLACKBOARD_BASE, load_courses
@@ -38,7 +36,7 @@ async def scrape_grades_async(course_id: str, page: Any) -> List[Dict[str, Any]]
     )
 
     if not matched_sel or "You can't access" in matched_sel:
-        print(f"   ℹ️  Course is currently unavailable or closed.")
+        print("   ℹ️  Course is currently unavailable or closed.")
         return []
 
     grades: List[Dict[str, Any]] = []

@@ -17,7 +17,7 @@ async def check_terms_and_orgs():
             args=["--disable-blink-features=AutomationControlled"],
             viewport={"width": 1440, "height": 900}
         )
-        
+
         cookie_file = SESSION_DIR / "cookies.json"
         if cookie_file.exists():
             try:
@@ -42,7 +42,7 @@ async def check_terms_and_orgs():
             if await term_dd.is_visible():
                 await term_dd.click()
                 await asyncio.sleep(1)
-                
+
                 # Get listbox items
                 term_options = await page.evaluate("""() => {
                     const options = document.querySelectorAll('li[role="option"], ul[role="listbox"] li, div.MuiMenuItem-root');
@@ -55,9 +55,9 @@ async def check_terms_and_orgs():
                 print(f" Found {len(term_options)} term options in dropdown:")
                 for opt in term_options:
                     print(f"   - {opt['text']} (selected={opt['selected']})")
-                
+
                 (OUTPUT_DIR / "term_options.json").write_text(json.dumps(term_options, indent=2))
-                
+
                 # Press Escape or click away to close dropdown
                 await page.keyboard.press("Escape")
                 await asyncio.sleep(0.5)
@@ -81,13 +81,13 @@ async def check_terms_and_orgs():
                 term_dd = page.locator(terms_selector).first
                 await term_dd.click()
                 await asyncio.sleep(0.8)
-                
+
                 # Click the option
                 opt_locator = page.locator(f"li[role='option']:has-text('{term_name}'), div.MuiMenuItem-root:has-text('{term_name}')").first
                 if await opt_locator.is_visible():
                     await opt_locator.click()
                     await asyncio.sleep(2)
-                    
+
                     # Extract courses visible under this term
                     term_courses = await page.evaluate("""(currentTerm) => {
                         const cards = document.querySelectorAll('bb-base-course-card, div.default-group');
@@ -101,7 +101,7 @@ async def check_terms_and_orgs():
                             const statusEl = card.querySelector('.course-status, [class*="status"]');
                             const status = statusEl ? statusEl.innerText.trim() : 'Open';
                             const isClosed = card.innerText.includes('Closed') || card.innerText.includes('Private');
-                            
+
                             if (title) {
                                 results.push({
                                     term: currentTerm,
@@ -114,7 +114,7 @@ async def check_terms_and_orgs():
                         });
                         return results;
                     }""", term_name)
-                    
+
                     print(f"   Found {len(term_courses)} courses under {term_name}:")
                     for tc in term_courses:
                         print(f"     * [{tc['status']}] {tc['title']} ({tc['courseId']})")
@@ -129,7 +129,7 @@ async def check_terms_and_orgs():
             await asyncio.sleep(3)
             org_content = await page.content()
             (OUTPUT_DIR / "organizations_page.html").write_text(org_content)
-            
+
             orgs = await page.evaluate("""() => {
                 const cards = document.querySelectorAll('bb-base-course-card, div.default-group, a[id^="course-link-"]');
                 const results = [];
@@ -163,14 +163,14 @@ async def check_terms_and_orgs():
 
         # 4. Now for ANY open / accessible course or org, let's navigate to outline and inspect DOM!
         open_courses = [c for c in all_discovered_courses if c.get('status') == 'Open' and c.get('courseId')]
-        print(f"\n==================================================")
+        print("\n==================================================")
         print(f" Found {len(open_courses)} OPEN/ACCESSIBLE courses to inspect in detail!")
 
         for oc in open_courses:
             cid = oc['courseId']
             ctitle = oc['title']
             print(f"\n🔍 Detailed DOM Inspection for OPEN COURSE: {ctitle} ({cid})")
-            
+
             outline_url = f"{BLACKBOARD_BASE}/ultra/courses/{cid}/outline"
             await page.goto(outline_url, wait_until="networkidle", timeout=30000)
             await asyncio.sleep(4)
@@ -182,7 +182,7 @@ async def check_terms_and_orgs():
             # Detailed DOM Analysis
             analysis = await page.evaluate("""() => {
                 const res = {};
-                
+
                 // 1. Check Course Navigation Bar
                 res.navTabs = Array.from(document.querySelectorAll('bb-course-navigation a, nav[aria-label="course"] a')).map(a => ({
                     title: a.innerText.trim(),
@@ -221,7 +221,7 @@ async def check_terms_and_orgs():
                     const title = titleEl ? titleEl.innerText.trim() : (el.getAttribute('aria-label') || '').trim();
                     const links = Array.from(el.querySelectorAll('a[href]')).map(a => ({ text: a.innerText.trim(), href: a.href }));
                     const isExpanded = el.querySelector('button[aria-expanded]')?.getAttribute('aria-expanded');
-                    
+
                     items.push({
                         idx,
                         tag: el.tagName.toLowerCase(),

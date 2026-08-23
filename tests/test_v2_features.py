@@ -13,17 +13,16 @@ Unit and Integration Tests for Blackboard Ultra Scraper v2 features:
 import json
 import re
 import unittest
-from unittest.mock import patch, MagicMock
-from datetime import datetime
+from unittest.mock import patch
 
 import sys
-from core.export_json import build_item, build_export_doc, build_composite_schema, _to_unix_timestamp
+from core.export_json import build_composite_schema
 from core.async_engine import RouteOptimizer, TaskProfile, get_optimal_concurrency
 from core.session import quick_check_session_http
-from telegram.formatter import escape_html, chunk_message, format_due_dates_list, format_grade_alert, format_announcement_alert
+from telegram.formatter import escape_html, chunk_message
 
 try:
-    import rumps
+    import rumps  # noqa: F401
     from ui.menubar import BlackboardMenuBarApp
     HAS_RUMPS = True
 except ImportError:
@@ -226,7 +225,7 @@ class TestConfigInitializationAndCredentials(unittest.TestCase):
             test_cfg_path = Path(tmpdir) / "config.json"
             with patch.object(config_mod, "CONFIG_FILE", test_cfg_path):
                 self.assertFalse(test_cfg_path.exists())
-                
+
                 # Should create blank config
                 created, cfg = config_mod.ensure_config_exists(notify=False)
                 self.assertTrue(created)
@@ -314,8 +313,68 @@ class TestTUIAuthPromptAndAutoRecovery(unittest.TestCase):
         mock_login_auto.assert_called_once_with(username=None, password=None, headless=True, cdp_url=None, auto_exp=True, force=False)
 
 
+class TestSSOErrorDetection(unittest.TestCase):
+    def test_detect_sso_error_patterns(self):
+        from unittest.mock import MagicMock
+        from core.session import detect_sso_error
+
+        # 1. Invalid credentials
+        mock_page = MagicMock()
+        mock_page.url = "https://webauth.umbc.edu/idp/profile/cas/login"
+        mock_loc = MagicMock()
+        mock_loc.count.return_value = 1
+        mock_item = MagicMock()
+        mock_item.is_visible.return_value = True
+        mock_item.inner_text.return_value = "The username or password you entered was incorrect."
+        mock_loc.nth.return_value = mock_item
+        mock_page.locator.return_value = mock_loc
+
+        has_err, err_type, err_txt = detect_sso_error(mock_page)
+        self.assertTrue(has_err)
+        self.assertEqual(err_type, "INVALID_CREDENTIALS")
+        self.assertIn("incorrect", err_txt)
+
+        # 2. Account locked
+        mock_item.inner_text.return_value = "Your account is locked due to too many failed attempts."
+        has_err2, err_type2, err_txt2 = detect_sso_error(mock_page)
+        self.assertTrue(has_err2)
+        self.assertEqual(err_type2, "ACCOUNT_LOCKED")
+
+        # 3. Password expired
+        mock_item.inner_text.return_value = "Your password has expired. Please reset your password."
+        has_err3, err_type3, err_txt3 = detect_sso_error(mock_page)
+        self.assertTrue(has_err3)
+        self.assertEqual(err_type3, "PASSWORD_EXPIRED")
+
+
+class TestWindowsCrossPlatformBehaviors(unittest.TestCase):
+    @patch("sys.platform", "win32")
+    def test_sms_listener_windows_safeguards(self):
+        from core import sms_listener
+        self.assertEqual(sms_listener.get_current_max_rowid(), 0)
+        self.assertIsNone(sms_listener.get_latest_duo_sms_sqlite())
+        self.assertIsNone(sms_listener.get_latest_duo_sms_imsg())
+        self.assertIsNone(sms_listener.wait_for_duo_sms_passcode(timeout_seconds=1))
+
+    @patch("sys.platform", "win32")
+    @patch("builtins.input", side_effect=["testuser@umbc.edu", "y", "1"])
+    @patch("core.session.getpass", return_value="mypassword123")
+    def test_prompt_credentials_tui_windows_mode(self, mock_getpass, mock_input):
+        from core.session import prompt_credentials_tui
+
+        usr, pwd, save_creds, mode = prompt_credentials_tui(default_auto_exp=True)
+        self.assertEqual(usr, "testuser@umbc.edu")
+        self.assertEqual(pwd, "mypassword123")
+        self.assertTrue(save_creds)
+        self.assertEqual(mode, "auto")
+
+    @patch("sys.platform", "win32")
+    def test_daemon_memory_windows_fallback(self):
+        from telegram.daemon import get_process_memory_mb
+        # PID 0 or non-existent PID should return 0.0 safely without crashing
+        mem = get_process_memory_mb(999999)
+        self.assertEqual(mem, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
-
-
-

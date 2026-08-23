@@ -1,10 +1,9 @@
 import asyncio
 import re
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List
 
-from core.config import BLACKBOARD_BASE, load_courses
+from core.config import BLACKBOARD_BASE
 from core.output import ensure_output_dir
 from core.async_engine import AdaptiveDOM
 
@@ -88,7 +87,6 @@ async def scrape_activity_async(page: Any) -> List[Dict[str, Any]]:
 
 def scrape_activity(page: Any) -> list[dict]:
     """Synchronous fallback wrapper."""
-    import asyncio
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():

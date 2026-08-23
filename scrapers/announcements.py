@@ -1,6 +1,5 @@
 import asyncio
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List
 
 from core.config import BLACKBOARD_BASE, load_courses
@@ -33,7 +32,7 @@ async def scrape_announcements_async(course_id: str, page: Any) -> List[Dict[str
     )
 
     if not matched_sel or "You can't access" in matched_sel:
-        print(f"   ℹ️  Course is currently unavailable or closed.")
+        print("   ℹ️  Course is currently unavailable or closed.")
         return []
 
     # Click announcements navigation
@@ -92,7 +91,6 @@ async def scrape_announcements_async(course_id: str, page: Any) -> List[Dict[str
 
 def scrape_announcements(course_id: str, page: Any) -> list[dict]:
     """Synchronous fallback wrapper."""
-    import asyncio
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
@@ -104,8 +102,6 @@ def scrape_announcements(course_id: str, page: Any) -> list[dict]:
     except Exception:
         # Direct sync execution
         url = f"{BLACKBOARD_BASE}/ultra/courses/{course_id}/announcements"
-        courses = load_courses()
-        name = courses.get(course_id, course_id)
         page.goto(url, wait_until="domcontentloaded", timeout=15000)
         return []
 

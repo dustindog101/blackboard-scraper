@@ -25,25 +25,23 @@ if sys.platform == "win32":
 from playwright.sync_api import sync_playwright
 
 from core.config import BLACKBOARD_BASE, load_courses, save_courses
-from core.export_json import build_composite_schema, build_export_doc, build_item, write_export
-from core.session import _launch_context, _require_session, _require_session_async, check_session, check_session_async, login, login_auto, quick_check_session_http
+from core.export_json import build_composite_schema, build_export_doc
+from core.session import _launch_context, _require_session, _require_session_async, check_session_async, login, login_auto, quick_check_session_http
 from core.async_engine import AsyncSessionManager, AsyncCourseWorkerPool, EngineConfig, TaskProfile, get_optimal_concurrency
 
 # Scrapers
-from scrapers.activity import save_activity, scrape_activity, scrape_activity_async
-from scrapers.announcements import save_announcements, scrape_announcements, scrape_announcements_async
-from scrapers.calendar import save_calendar, scrape_calendar, scrape_calendar_async
+from scrapers.activity import save_activity, scrape_activity_async
+from scrapers.announcements import save_announcements, scrape_announcements_async
+from scrapers.calendar import save_calendar, scrape_calendar_async
 from scrapers.discussions import save_discussions, scrape_discussions
-from scrapers.grades import save_grades, scrape_grades, scrape_grades_async
-from scrapers.profile import save_profile, scrape_profile, scrape_profile_async
-from scrapers.briefing import run_briefing_async, run_briefing, format_briefing_cli
+from scrapers.grades import save_grades, scrape_grades_async
+from scrapers.profile import save_profile, scrape_profile_async
+from scrapers.briefing import run_briefing_async, format_briefing_cli
 from scrapers.outline import (
     scrape_course_outline_async,
     save_outline,
     format_outline_tree,
-    download_course_file,
     clean_outline_json,
-    download_content_item_files,
     filter_outline_by_folder,
     interactive_folder_picker,
 )
@@ -482,7 +480,8 @@ async def main_async(args: argparse.Namespace) -> None:
     headless = not args.visible
     cdp = args.cdp
     courses = load_courses()
-    os.environ["TMPDIR"] = "/tmp"
+    if sys.platform != "win32" and os.path.exists("/tmp"):
+        os.environ["TMPDIR"] = "/tmp"
 
     # --- telegram bot daemon management ---
     if args.bot_status:

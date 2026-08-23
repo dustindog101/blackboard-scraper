@@ -1,14 +1,12 @@
 import asyncio
-import json
 import logging
 import os
 import subprocess
 import sys
 import threading
-import time
 import webbrowser
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 try:
     import rumps
@@ -17,12 +15,10 @@ except ImportError:
     rumps = None
     _BaseApp = object
 
-from core.config import CONFIG_FILE, SESSION_DIR, load_config, load_courses
-from core.session import check_session, login_auto, quick_check_session_http
-from telegram.config import get_telegram_config
+from core.config import CONFIG_FILE, SESSION_DIR, load_courses
+from core.session import quick_check_session_http
 from telegram.daemon import (
     get_bot_status,
-    get_process_memory_mb,
     restart_bot_daemon,
     start_bot_daemon,
     stop_bot_daemon,

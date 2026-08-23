@@ -1,6 +1,5 @@
 import asyncio
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.config import BLACKBOARD_BASE, load_courses
@@ -65,7 +64,6 @@ async def scrape_calendar_async(page: Any, course_id: Optional[str] = None) -> L
 
 def scrape_calendar(page: Any, course_id: Optional[str] = None) -> list[dict]:
     """Synchronous fallback wrapper."""
-    import asyncio
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():

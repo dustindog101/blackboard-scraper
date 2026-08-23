@@ -12,7 +12,6 @@ from telegram.formatter import (
     format_announcement_alert,
     format_daily_briefing,
     format_grade_alert,
-    format_urgent_due_alert,
 )
 
 logger = logging.getLogger("blackboard.telegram.notifier")

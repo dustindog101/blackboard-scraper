@@ -58,19 +58,19 @@ def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, 
             if (linkEl) {
                 const title = linkEl.innerText.trim();
                 const url = linkEl.href;
-                
+
                 let dueDate = "";
                 const dueEl = container.querySelector('[class*="gradeDetail"]');
                 if (dueEl) {
                     dueDate = dueEl.innerText.trim();
                 }
-                
+
                 let previewText = "";
                 const descEl = container.querySelector('.js-description, [class*="contentItemDescriptionContainer"]');
                 if (descEl) {
                     previewText = descEl.innerText.trim();
                 }
-                
+
                 links.push({
                     title: title,
                     url: url,
@@ -94,13 +94,13 @@ def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, 
     # 2. Iterate and scrape individual discussions
     for disc in discussion_links:
         print(f"   ↳ Thread: {disc['title'][:40]}...")
-        
+
         # Navigate back to outline and click engagement again, because direct nav fails
         page.goto(outline_url, wait_until="domcontentloaded")
         page.wait_for_selector(".js-course-discussion-tool", timeout=15_000)
         page.locator(".js-course-discussion-tool").first.click()
         page.wait_for_timeout(3000)
-        
+
         # Click the link instead of hard-navigating to the URL, which prevents redirects
         try:
             escaped_title = disc['title'].replace('"', '\\"')
@@ -170,7 +170,7 @@ def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, 
                         const authorRaw = userCard.innerText.split('\n')[0];
                         if (authorRaw) author = authorRaw.trim();
                     }
-                    
+
                     let text = "";
                     const contentEl = container.querySelector('.ql-editor, .vtbegenerated, .format-text > p');
                     if (contentEl) {
@@ -183,9 +183,9 @@ def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, 
                             text = container.innerText.trim();
                         }
                     }
-                    
+
                     if (!text) return;
-                    
+
                     let date = "Unknown Date";
                     const dateEl = container.querySelector('.date, .timestamp, [class*="time"], .moment');
                     if (dateEl) date = dateEl.innerText.trim();
@@ -202,12 +202,12 @@ def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, 
                 document.querySelectorAll('.participant-card-wrap').forEach(card => {
                     const nameEl = card.querySelector('bb-username bdi');
                     const name = nameEl ? nameEl.innerText.trim() : card.innerText.split('\n')[0];
-                    
+
                     const stats = [];
                     card.querySelectorAll('p').forEach(p => {
                         if(p.innerText.trim().length > 0) stats.push(p.innerText.trim());
                     });
-                    
+
                     if (name) {
                         data.participants.push({
                             name: name.trim(),
@@ -219,11 +219,11 @@ def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, 
 
             return data;
         }""", [not posts_only, not participants_only])
-        
+
         disc["posts"] = thread_data.get("posts", [])
         disc["participants"] = thread_data.get("participants", [])
         results.append(disc)
-        
+
     print(f"   ✅ Extracted {len(results)} fully scraped discussions")
     return results
 
@@ -274,7 +274,7 @@ def save_discussions(discussions: list[dict], course_id: str, titles_only: bool 
             elif not titles_only:
                 lines.append("_No text posts extracted._")
                 lines.append("")
-                
+
             lines.append("---")
             lines.append("")
 

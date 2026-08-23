@@ -1,16 +1,11 @@
 import asyncio
-import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from playwright.async_api import Page
 
-from core.config import BLACKBOARD_BASE, load_courses
-from core.output import ensure_output_dir
 from scrapers.outline import (
     download_content_item_files,
-    download_course_file,
-    fetch_item_attachments,
     scrape_course_outline_async,
 )
 
@@ -162,4 +157,3 @@ async def grab_item_async(
         "content_type": target_item.get("content_type", "item"),
         "downloaded_files": downloaded_files,
     }
-

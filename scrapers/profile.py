@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
 
-from core.config import BLACKBOARD_BASE, SESSION_DIR, load_courses
+from core.config import BLACKBOARD_BASE, SESSION_DIR
 from core.output import ensure_output_dir
 from scrapers.base import _navigate_and_check_page
 
@@ -157,4 +157,3 @@ def save_profile(data: dict):
 
     filepath.write_text("\n".join(lines))
     print(f"   💾 Saved to: {filepath.relative_to(Path.cwd()) if filepath.is_absolute() else filepath}")
-

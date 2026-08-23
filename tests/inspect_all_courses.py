@@ -47,7 +47,7 @@ async def inspect_all():
                 id: el.id,
                 classes: el.className
             }));
-            
+
             return {
                 title: document.title,
                 url: window.location.href,
@@ -70,7 +70,7 @@ async def inspect_all():
                 '/learn/api/public/v1/terms',
                 '/learn/api/public/v1/courses?limit=100'
             ];
-            
+
             const results = {};
             for (const ep of endpoints) {
                 try {

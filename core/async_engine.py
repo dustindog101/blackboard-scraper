@@ -15,8 +15,7 @@ import os
 import re
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncGenerator, Callable, Coroutine, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
@@ -30,7 +29,7 @@ from playwright.async_api import (
     async_playwright,
 )
 
-from core.config import BLACKBOARD_BASE, LOGIN_INDICATORS, SESSION_DIR, load_config
+from core.config import SESSION_DIR
 
 logger = logging.getLogger("blackboard.async_engine")
 

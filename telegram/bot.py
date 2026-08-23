@@ -4,17 +4,15 @@ import json
 import logging
 import os
 import signal
-import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from core.config import load_courses
-from core.session import check_session, quick_check_session_http
+from core.session import quick_check_session_http
 from scrapers.briefing import run_briefing_async
-from scrapers.calendar import scrape_calendar_async
 from scrapers.grades import scrape_grades_async
 from scrapers.announcements import scrape_announcements_async
 from scrapers.due_dates import aggregate_due_dates_async
@@ -23,7 +21,6 @@ from scrapers.search import find_items_async
 from telegram.config import get_telegram_config, save_admin_chat_id
 from telegram.daemon import acquire_bot_pid_lock, release_bot_pid_lock, get_process_memory_mb
 from telegram.formatter import (
-    chunk_message,
     escape_html,
     format_daily_briefing,
     format_due_dates_list,
@@ -748,4 +745,3 @@ def run_bot():
         asyncio.run(bot.start_polling())
     except KeyboardInterrupt:
         bot.stop()
-

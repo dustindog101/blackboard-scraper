@@ -6,9 +6,9 @@ import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 logger = logging.getLogger("blackboard.sms_listener")
 
@@ -70,7 +70,7 @@ def get_latest_duo_sms_sqlite(
 
         if start_rowid and start_rowid > 0:
             query = """
-            SELECT 
+            SELECT
                 m.ROWID,
                 m.text,
                 m.date,
@@ -85,7 +85,7 @@ def get_latest_duo_sms_sqlite(
             cursor.execute(query, (start_rowid,))
         else:
             query = """
-            SELECT 
+            SELECT
                 m.ROWID,
                 m.text,
                 m.date,
@@ -231,4 +231,3 @@ def wait_for_duo_sms_passcode(
 
     print(f"\n⚠️  Timed out waiting for Duo SMS passcode after {timeout_seconds}s.")
     return None
-

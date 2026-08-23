@@ -14,7 +14,6 @@ from scrapers.outline import (
     compute_folder_stats,
     filter_outline_by_folder,
     format_outline_tree,
-    clean_outline_json,
 )
 
 
@@ -176,7 +175,7 @@ class TestOutlineExplorer(unittest.TestCase):
 
     def test_compute_folder_stats(self):
         stats = compute_folder_stats(self.sample_outline)
-        
+
         # Homework folder stats
         hw_stat = stats["_folder_hw_1"]
         self.assertEqual(hw_stat["total_descendants"], 3)
@@ -220,26 +219,26 @@ class TestOutlineExplorer(unittest.TestCase):
 
     def test_default_shallow_outline_formatting(self):
         output = format_outline_tree(self.sample_outline, "IS 410 Database", "_105737_1")
-        
+
         # Root syllabus should be rendered
         self.assertIn("Course Syllabus", output)
-        
+
         # Root folders should be rendered with counts
         self.assertIn("Homework Assignments [folder]", output)
         self.assertIn("[ID: _folder_hw_1]", output)
         self.assertIn("3 items: 2 assignments, 1 file", output)
-        
+
         # Root folder children should NOT be expanded in default shallow view
         self.assertNotIn("Homework 1 - SQL Queries", output)
         self.assertNotIn("Midterm Study Guide", output)
-        
+
         # Tip footer should be present
         self.assertIn("--folder", output)
         self.assertIn("--expand-all", output)
 
     def test_expand_all_outline_formatting(self):
         output = format_outline_tree(self.sample_outline, "IS 410 Database", "_105737_1", expand_all=True)
-        
+
         # Everything should be visible
         self.assertIn("Course Syllabus", output)
         self.assertIn("Homework Assignments", output)
@@ -250,7 +249,7 @@ class TestOutlineExplorer(unittest.TestCase):
 
     def test_target_folder_expansion_formatting(self):
         output = format_outline_tree(self.sample_outline, "IS 410 Database", "_105737_1", target_folder="homework")
-        
+
         # Only homework folder and its contents should be rendered
         self.assertIn("Homework Assignments", output)
         self.assertIn("Homework 1 - SQL Queries", output)

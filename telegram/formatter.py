@@ -184,9 +184,9 @@ def format_outline_telegram(outline_data: Dict[str, Any]) -> List[str]:
             title = escape_html(item.get("title", "Untitled"))
             due = f" — <i>(Due: {escape_html(item['due_date'])})</i>" if item.get("due_date") else ""
             lines.append(f"{indent}{icon} {title}{due}")
-            for l in item.get("links", []):
-                if l.get("url") and not l["url"].endswith("#"):
-                    lines.append(f"{indent}   └ 🔗 <a href='{escape_html(l['url'])}'>{escape_html(l.get('text', 'Link'))}</a>")
+            for link in item.get("links", []):
+                if link.get("url") and not link["url"].endswith("#"):
+                    lines.append(f"{indent}   └ 🔗 <a href='{escape_html(link['url'])}'>{escape_html(link.get('text', 'Link'))}</a>")
 
     return chunk_message("\n".join(lines))
 

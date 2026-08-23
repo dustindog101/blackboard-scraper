@@ -1,13 +1,12 @@
 import asyncio
 import json
 import logging
-import re
 import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from playwright.async_api import Page, TimeoutError as PlaywrightTimeout
+from playwright.async_api import Page
 
 from core.config import BLACKBOARD_BASE, SESSION_DIR, load_courses
 from core.output import ensure_output_dir
@@ -1023,4 +1022,3 @@ def save_outline(data: List[Dict[str, Any]], course_id: str) -> Path:
 
     filepath.write_text("\n".join(lines))
     return filepath
-
