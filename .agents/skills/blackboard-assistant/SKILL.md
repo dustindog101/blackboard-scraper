@@ -68,17 +68,20 @@ Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** 
 1. Run `bb --search "Syllabus"`.
 2. Returns matching document links, descriptions, and parent folder paths.
 
-### 6. "Download [File / Note / Worksheet]"
-1. Run `bb --download "<file_name_or_id>"` (e.g. `bb --download "Math215_Worksheet_1.pdf"` or `bb --download "Chapter01.ipynb"`).
-2. The downloader will automatically locate the correct course and save the file into `downloads/<CourseName>/`.
+### 6. "Download [File / Note / Worksheet / Syllabus]"
+1. Find item in outline: `bb --outline -c <course> -f "<folder_name>"` (e.g. `bb --outline -c AGNG -f "Start Here"`).
+2. Download by ID or Title: `bb --download "<file_name_or_id>"` (e.g. `bb --download _8837015_1` or `bb --download "Fall 2026 Syllabus" -c AGNG`).
+3. The downloader will automatically locate the correct course and save the file into `downloads/<CourseName>/`.
 
 ### 7. "Which courses am I enrolled in?"
 1. Run `bb --courses`.
 2. If courses appear outdated or user changed semesters, run `bb --discover` to auto-detect the current semester.
 
-### 8. "Check / inspect this quiz or assignment"
-1. Run `bb --quiz "<url_or_content_id_or_title>"` (e.g. `bb --quiz "https://blackboard.umbc.edu/ultra/courses/_112155_1/assessment/_8836886_1/attempt/_35936988_1?courseId=_112155_1"` or `bb --quiz "Syllabus Quiz"`).
-2. Extracts points, time limit, due dates, attempts, full question prompts, multiple-choice options, and student answers in <200ms via REST with Playwright fallback.
+### 8. "Check / inspect / solve an assignment or quiz"
+1. **List all assignments & get Unique IDs**: `bb --assignments -c <course>` (e.g. `bb --assignments -c AGNG`).
+2. **Deep inspect item questions/prompts**: `bb --assignment <ID_or_Title>` (e.g. `bb --assignment _8836886_1` or `bb --assignment "Module 1 Assignment"`).
+3. **Download required readings/syllabus**: `bb --download "<file_or_id>"` (e.g. `bb --download "Fall 2026 Syllabus"`).
+4. **Answer questions**: Read the downloaded course file/syllabus and cross-reference with the questions from `bb --assignment`.
 
 ---
 
