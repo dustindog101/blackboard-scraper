@@ -25,3 +25,12 @@
 - **Key Discovery**: Probing with pure session cookies returns HTTP 403 (`bb-rest-course-is-private`) on student accounts. However, calling `POST /learn/api/v1/foundationsToken` with session cookies and the `BbRouter` XSRF token returns a signed OAuth 2.0 JWT `accessToken` in < 250ms. Passing `Authorization: Bearer <accessToken>` (without Cookie headers) unlocks the complete Blackboard REST API suite.
 - **Pattern Adopted**: Hybrid Architecture — Keep Playwright solely for initial SSO + Duo 2FA browser login and infrequent cookie renewal (once every 1-2 weeks). Replace 100% of data scraping operations (Briefing, Announcements, Gradebook, Course Contents, Outline, Discussions, Profile, Calendar, and Telegram Polling) with direct HTTP REST requests.
 - **Why**: Reduces briefing execution time from ~30-90s down to ~2.3s (~15x-40x speedup), slashes memory usage by >95% (from ~350MB Chromium process to ~10MB), eliminates DOM selector fragility, and provides 100% complete gradebook data without pagination clicks.
+
+## 6. Deep Gradable Item Inspection & Attempt Token Lifecycle
+- **Researched**: Internal Blackboard Learn REST endpoints for assessments (`resource/x-bb-asmt-test-link`), discussion boards (`resource/x-bb-forumlink`), and standard assignment dropboxes.
+- **Key Discoveries**:
+  1. Full assignment instructions, statements, prompts, and APA citation requirements are exposed in `< 100ms` via `/learn/api/v1/courses/{course_id}/contents/{content_id}?expand=gradebookCategory` under `contentDetail["resource/x-bb-asmt-test-link"].test.assessment.instructions` without initiating student attempts.
+  2. Gradable discussion topics with all prompt questions and grading rules are exposed via `/learn/api/public/v1/courses/{course_id}/discussions` with matching `gradebookColumnId`.
+  3. Interactive test questions, choice options, and student responses for active/submitted attempts are queryable via `/learn/api/v1/courses/{course_id}/gradebook/attempts/{attempt_id}?expand=toolAttemptDetail,alignedGoals` in `< 150ms`.
+- **Pattern Adopted**: Non-Destructive Inspection by Default — Read-only examination of test parameters, points, due dates, and assignment instructions never creates premature attempt tokens or triggers timed test countdowns. If an attempt is in progress, the engine continues and inspects existing question attempts non-destructively. When explicit attempt initiation is requested (`--start-attempt`), Playwright handles the attempt creation with explicit timed exam guards (`--force-start`).
+
