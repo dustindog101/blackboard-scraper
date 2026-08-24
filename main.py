@@ -364,6 +364,8 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     scrapers.add_argument("--outline", action="store_true", help="Scrape full course outline, modules, syllabi, and files")
     scrapers.add_argument("--assignments", action="store_true", help="Deep scrape assignments with prompts, rubrics, and files")
     scrapers.add_argument("--quiz", "--assessment", metavar="TARGET", help="Deep inspect quiz/assessment attempt questions, points, choices, and answers")
+    scrapers.add_argument("--start-attempt", "--begin-attempt", action="store_true", help="With --quiz: allow beginning a new attempt if none is currently active")
+    scrapers.add_argument("--force-start", action="store_true", help="With --quiz --start-attempt: confirm starting timed assessments/exams")
     scrapers.add_argument("--due", nargs="?", const="7d", default=None, metavar="WINDOW", help="Aggregate cross-course due dates (e.g. 7d, 14d, overdue)")
     scrapers.add_argument("--upcoming", type=int, metavar="DAYS", help="Alias for --due <N>d")
     scrapers.add_argument("--exclude-completed", action="store_true", help="With --due: exclude submitted/graded items")
@@ -786,11 +788,15 @@ async def main_async(args: argparse.Namespace) -> None:
     if args.quiz:
         target_cid = target_cids[0] if target_cids else None
         force_browser = getattr(args, "visible", False)
+        allow_start = getattr(args, "start_attempt", False)
+        force_start = getattr(args, "force_start", False)
         data = await scrape_assessment_attempt_async(
             target=args.quiz,
             course_id=target_cid,
             headless=headless,
             force_browser=force_browser,
+            allow_start=allow_start,
+            force_start=force_start,
         )
 
         if args.md:
