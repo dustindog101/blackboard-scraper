@@ -1,156 +1,185 @@
-# Blackboard Scraper — CLI Reference
+# Blackboard Scraper v2 — Complete CLI Reference
 
-This document provides a detailed breakdown of all available commands in the `main.py` script.
+This document provides a comprehensive breakdown of all commands, options, and workflows supported by the Blackboard Scraper CLI.
 
-## Core Commands
-
-### `--briefing`
-**Usage:** `python3 main.py --briefing`
-**Description:** The master command intended for Autonomous Agents. It sequentially runs the activity, calendar, announcements, and grades scrapers across all registered courses.
-**Default Output:** `output/exports/blackboard_export.json`
-**Markdown Option:** add `--output-format markdown` to keep the previous markdown behavior (`output/briefing.md` and per-scraper markdown files).
+Commands can be invoked globally via `bb`, `blackboard`, `bbscraper`, or directly via `python3 main.py <flags>`.
 
 ---
 
-## Authentication & Sessions
+## 📑 Command Categories
 
-### `--login`
-**Usage:** `python3 main.py --login`
-**Modifiers:**
-- `--force`: Forces a new login session even if the current one is still valid.
-**Description:** Opens a visible Chrome browser to allow the user to log into the UMBC Google Workspace via SSO and Duo 2FA. Once the Blackboard Dashboard is reached, the cookies are saved to `.session/` inside the project root for persistent headless use.
-
-### `--auto` [EXPERIMENTAL]
-**Usage:** `python3 main.py --login --auto`
-**Modifiers:**
-- `--username`, `-u <email>`: Google account email (or read from config.json; prompts if omitted)
-- `--password`, `-p <pass>`: Google account password (or read from config.json; prompts if omitted)
-- `--headless`: Run login attempt headlessly (risky, harder to debug if UI changes)
-**Description:** Completely automates SSO login using Playwright, selects Duo text passcode, and prompts you to type the passcode into the CLI.
-**⚠️  Warning:** This involves automated credential handling. Passwords in config.json are plaintext. UMBC's SSO or Duo configuration may change at any time.
-
-### `--check-session`
-**Usage:** `python3 main.py --check-session`
-**Description:** Performs a silent, headless check to verify if the saved `.session/` cookies are still valid and have not been expired by the UMBC identity provider.
-
-### `--session-info`
-**Usage:** `python3 main.py --session-info`
-**Description:** Reads the internal `session_metadata.json` telemetry to display when the session was originally created and when it was last utilized.
+- [🔐 Authentication & Sessions](#-authentication--sessions)
+- [🧭 Course Discovery & Term Management](#-course-discovery--term-management)
+- [📚 Academic Scrapers](#-academic-scrapers)
+- [🔀 Filtering & Course Selection](#-filtering--course-selection)
+- [📦 Output Formats & File Export](#-output-formats--file-export)
+- [⚡ Concurrency & Browser Controls](#-concurrency--browser-controls)
+- [🤖 Telegram Bot Daemon](#-telegram-bot-daemon)
+- [🖥️ Native macOS Menubar App](#️-native-macos-menubar-app)
+- [📖 Built-in Help Guides](#-built-in-help-guides)
 
 ---
 
-## Configuration
+## 🔐 Authentication & Sessions
 
-### `--discover-courses`
-**Usage:** `python3 main.py --discover-courses`
-**Description:** Headlessly navigates to the `/ultra/course` tab on Blackboard, scrapes all currently active courses (Current Term), formats them, and saves the mapping to `config.json`.
+### `bb --login`
+**Description:** Interactive login via UMBC SSO. Opens a browser if needed to solve Duo 2FA manually. Once logged in, session cookies are saved to `.session/cookies.json` for months of headless scraping.
+- `--force`: Force a re-login even if the active session is valid.
+- `--visible`, `-v`: Display visible browser window.
 
-### `--list-courses`
-**Usage:** `python3 main.py --list-courses`
-**Description:** Prints the current contents of `config.json` to the terminal so you can easily verify what course strings (e.g. `_100001_1`) map to which Human-Readable Course Names.
+### `bb --auto-exp` / `bb --login-auto-exp`
+**Description:** [Recommended on macOS] Fully automated headless SSO login with real-time SMS Duo 2FA interception from macOS Messages (`chat.db`) in <3ms.
+- `--force`: Force clean re-login.
 
----
+### `bb --login --auto`
+**Description:** Automated login where Playwright enters credentials and requests Duo SMS passcode, accepting passcode via CLI prompt or Telegram reply.
+- `--username`, `-u <id>`: UMBC username / email (reads from `config.json` if omitted).
+- `--password`, `-p <pass>`: UMBC password.
+- `--duo-passcode <code>`: Supply 6-digit passcode directly via CLI.
 
-## Targeted Scrapers
+### `bb --check-session`
+**Description:** High-speed HTTP REST API probe (<120ms) verifying session token validity without launching a browser.
 
-### `--profile`
-**Usage:** `python3 main.py --profile [-w]`
-**Modifiers:**
-- `-w` or `--write`: Also saves the output to a markdown file instead of just printing it to the terminal.
-**Description:** Scrapes the user's Blackboard profile page, extracting name, email, student username, pronouns, and privacy settings.
-**Output:** Terminal (and `output/profile.md` if `-w` used).
+### `bb --session-info`
+**Description:** Displays session creation timestamp and last-used timestamp.
 
-### `--activity`
-**Usage:** `python3 main.py --activity`
-**Description:** Scrapes the main Activity Stream (`/ultra/stream`), gathering recent important notifications, assignment updates, and global alerts.
-**Output:** `output/activity/stream.md`
+### `bb --session-stats` / `bb --session-telemetry`
+**Description:** Displays deep session telemetry, total lifespan analytics, rolling averages, and auto-refresh timing.
 
-### `--calendar`
-**Usage:** `python3 main.py --calendar`
-**Description:** Bypasses Angular lazy-loading using a custom infinite-scroll handler on the `/ultra/calendar` page to extract all upcoming "Due Dates" across all courses for the entire semester.
-**Output:** `output/calendar/due_dates.md`
-
-### `--announcements`
-**Usage:** `python3 main.py --announcements -c <COURSE_ID>`
-**Modifiers:**
-- `--all`: Scrape announcements for all courses in `config.json`.
-**Description:** Iterates through course announcement pages, parsing out titles, authors, posting dates, full HTML-converted-Markdown body content, and unread statuses.
-**Output:** `output/announcements/<COURSE_ID>.md`
-
-### `--grades`
-**Usage:** `python3 main.py --grades -c <COURSE_ID>`
-**Modifiers:**
-- `--all`: Scrape grades for all courses in `config.json`.
-**Description:** Iterates through course gradebooks, scraping MUI data tables to extract Assignment Title, Due Date, Status (Graded/Submitted/Upcoming), and the actual Score.
-**Output:** `output/grades/<COURSE_ID>.md`
-
-### `--outline`
-**Usage:** `python3 main.py --outline -c <COURSE_ID>`
-**Modifiers:**
-- `--folder`, `-f <query>`: Selectively expand and display only the specified folder/module by name or ID (e.g. `-f Homework` or `-f _105740_1`).
-- `--expand-all`, `--deep`: Recursively expand all course folders (full tree view).
-- `--depth <N>`: Limit outline display to `<N>` depth levels (e.g. `--depth 1` for top-level, `--depth 2` for 1 level inside).
-- `--interactive`, `-i`: Launch interactive terminal menu to browse and expand folders on demand.
-- `--all`: Scrape outlines across all configured courses.
-- `--type <type>`: Filter items by type (`syllabus`, `document`, `assignment`, `folder`, `link`, `file`).
-- `--filter <text>`: Filter items by keyword substring.
-**Description:** Extracts course hierarchy including folders, modules, assignments, documents, files, and syllabi. By default, renders a clean shallow outline showing root items and collapsing top-level folders with rich item count breakdowns (e.g. `12 items: 8 assignments, 4 files`).
-**Output:** Terminal (and `output/outlines/<COURSE_ID>.md` if `--md` used).
-
-### `--discussions`
-**Usage:** `python3 main.py --discussions -c <COURSE_ID>`
-**Modifiers:**
-- `--all`: Scrape discussions for all courses in `config.json`.
-- `--max-post-clicks <N>`: Limit number of times "Load more" is clicked (0 for instant).
-- `--max-participant-clicks <N>`: Limit participant expansion clicks.
-- `--posts-only`: Skip scraping the participant side-panel.
-- `--participants-only`: Skip scraping the post thread.
-- `--titles-only`: Instantly pull thread titles without navigating inside threads.
-**Description:** Iterates through course discussion threads, cleanly extracting Authors, Dates, and full Post Content, separate from participant data.
-**Output:** `output/discussions/<COURSE_ID>.md` (or `_titles.md` if using `--titles-only`)
+### `bb --logout`
+**Description:** Clears cached cookies and session files.
 
 ---
 
-## System / Debug Flags
+## 🧭 Course Discovery & Term Management
 
-### `--visible`
-**Usage:** Append `--visible` to any command. Example: `python3 main.py --briefing --visible`
-**Description:** Disables headless mode. This forces the Playwright chromium instance to render on-screen so the user can watch the automation unfold. Crucial for debugging when Blackboard changes their UI or if Duo 2FA is randomly triggered.
+### `bb --discover` / `bb --discover-courses`
+**Description:** Auto-discovers all enrolled courses from the Blackboard Ultra REST API, filters for the current active semester (e.g. Fall 2026), and updates `config.json`.
+- `--term <TERM>`: Target a specific term (e.g. `--term FA2026`, `--term SP2026`, or `--term all`).
+
+### `bb --list-terms`
+**Description:** Lists all lifetime enrolled terms and courses without modifying `config.json`.
+
+### `bb --courses` / `bb --list-courses`
+**Description:** Prints the current active courses configured in `config.json`.
+- `--json`: Emits configured courses as JSON array.
 
 ---
 
-## Output Controls
+## 📚 Academic Scrapers
 
-### `--output-format`
-**Usage:** `--output-format json|markdown|both`
-**Default:** `json`
-**Description:** Controls whether the scraper writes machine-readable JSON, markdown files, or both.
+### `bb --briefing`
+**Description:** Master aggregation command. Concurrently queries global activity stream, calendar due dates, course announcements, and gradebooks across all courses in parallel (<6s).
+- `--json`: Emits complete standardized v2 JSON schema.
+- `--out <file>`: Exports JSON to specified filepath.
+- `--telegram`: Dispatches formatted summary card to Telegram.
+- `--md`, `--save`: Saves Markdown report to `output/briefing.md`.
 
-### `--json-output`
-**Usage:** `--json-output <path>`
-**Description:** Custom path for JSON export output. Defaults to `output/exports/blackboard_export.json`.
+### `bb --due [WINDOW]` / `bb --upcoming <DAYS>`
+**Description:** Cross-source deadline aggregator combining Blackboard's global calendar items and per-course gradebooks in <200ms. Deduplicates items and applies relative window filters.
+- `WINDOW`: `7d` (default), `14d`, `30d`, `150d`, `overdue`, `all`.
+- `--upcoming <N>`: Alias for `--due <N>d`.
+- `--exclude-completed`: Excludes assignments already submitted or graded.
+- `--json`: Emits structured deadline JSON.
 
-### `--json-source`
-**Usage:** `--json-source <label>`
-**Description:** Sets the top-level `source` field in exported JSON.
+### `bb --calendar`
+**Description:** High-speed HTTP REST API scraper (<150ms) for global calendar events with automatic localized date formatting. Automatically falls back to Playwright browser if REST is blocked.
+- `-c <COURSE>`: Filter calendar by course.
+- `--json`: Raw JSON event items.
 
-### `--json-compact`
-**Usage:** `--json-compact`
-**Description:** Emits compact JSON instead of pretty-printed JSON.
+### `bb --announcements`
+**Description:** Fast REST API announcements extractor (<120ms per course) with HTML-to-Markdown formatting and unread status.
+- `-c <COURSE>`: Target specific course.
+- `--all`: Scrape all configured courses in parallel.
+- `--json`: Emits structured JSON.
 
-### `--group-name`
-**Usage:** `--group-name <name>`
-**Description:** Default group label attached to exported task-like records (default: `School`).
+### `bb --grades`
+**Description:** Fast REST API gradebook extractor (<150ms per course) retrieving assessment titles, points possible, earned scores, due dates, and running grades.
+- `-c <COURSE>`: Target specific course.
+- `--all`: Scrape all courses in parallel.
+- `--json`: Emits structured JSON.
 
-## Output Examples
+### `bb --outline`
+**Description:** Traverses course outline hierarchy, learning modules, syllabi, documents, and attachments.
+- `-c <COURSE>`: Target course.
+- `--folder`, `-f <query>`: Selectively expand and display specific folder/module by name or ID.
+- `--expand-all`, `--deep`: Recursively expand all folders into a complete tree view.
+- `--depth <N>`: Limit tree expansion to `<N>` depth levels.
+- `--interactive`, `-i`: Interactive terminal menu to browse folders on demand.
+- `--type <type>`: Filter items (`syllabus`, `assignment`, `document`, `folder`, `link`, `file`).
+- `--filter <text>`: Keyword search filter.
+- `--json`: Emits clean, streamlined JSON outline.
 
-```bash
-# JSON only (default)
-python3 main.py --announcements --all
+### `bb --assignments`
+**Description:** Deep assignment and rubric inspector. Safely inspects assessment drawers, point breakdowns, and instructions without starting timed tests.
+- `-c <COURSE>`: Target course.
+- `--all`: Scrape all courses.
+- `--json`: Structured JSON.
 
-# Keep previous markdown-only behavior
-python3 main.py --announcements --all --output-format markdown
+### `bb --find <QUERY>` / `bb --search <QUERY>`
+**Description:** Omnisearch across all courses for files, assignments, and documents matching keyword query.
 
-# Emit both markdown and JSON
-python3 main.py --briefing --output-format both
-```
+### `bb --download <ITEM_ID_OR_NAME>` / `bb --grab <ITEM_ID_OR_NAME>`
+**Description:** Downloads specific Blackboard content item or attachment directly to `downloads/<CourseName>/`.
+- `--out-dir <dir>`: Custom destination directory (default: `./downloads`).
+
+### `bb --profile`
+**Description:** Retrieves student profile information (<150ms).
+
+### `bb --discussions`
+**Description:** Scrapes course discussion threads and author posts.
+
+---
+
+## 🔀 Filtering & Course Selection
+
+| Syntax | Example | Description |
+| :--- | :--- | :--- |
+| **By Code** | `-c IS410` | Matches course code `IS 410` |
+| **By Multiple Codes** | `-c IS410,ENGL100,MATH215` | Targets multiple specific courses |
+| **By Keyword** | `-c Database` | Matches any enrolled course containing "Database" |
+| **By Exact ID** | `-c _105737_1` | Targets exact Blackboard internal ID |
+| **All Courses** | `--all` | Targets all configured courses in parallel |
+
+---
+
+## 📦 Output Formats & File Export
+
+- `--json`: Emits standardized JSON to terminal stdout (zero disk writes).
+- `--out <file>`: Exports JSON directly to specified file.
+- `--compact`: Emits minified JSON.
+- `--md`, `--save`: Saves Markdown report into `output/` directory.
+
+---
+
+## ⚡ Concurrency & Browser Controls
+
+- `--concurrency <N>`: Override adaptive dynamic worker pool size (Default: 6–8 for light queries, 2–3 for deep outlines).
+- `--visible`, `-v`: Run Playwright with visible browser window for debugging.
+- `--cdp <URL>`: Connect to an existing browser via Chrome DevTools Protocol.
+
+---
+
+## 🤖 Telegram Bot Daemon
+
+- `bb --bot`: Runs interactive Telegram bot in foreground.
+- `bb --bot -d`: Starts bot daemon detached in background.
+- `bb --bot-status`: Checks bot daemon PID, RSS memory, and session status.
+- `bb --bot-restart`: Restarts background bot daemon.
+- `bb --bot-stop`: Gracefully stops background bot daemon.
+
+---
+
+## 🖥️ Native macOS Menubar App
+
+- `bb --menubar`: Launches native macOS status bar menu app (`🎓 BB 🟢`).
+
+---
+
+## 📖 Built-in Help Guides
+
+- `bb --guide auth`: Authentication & headless execution guide.
+- `bb --guide courses`: Course selection & syntax guide.
+- `bb --guide schema`: Standardized v2 JSON schemas.
+- `bb --guide telegram`: Telegram bot & alert setup.
+- `bb --guide concurrency`: Concurrency engine & worker pool tuning.

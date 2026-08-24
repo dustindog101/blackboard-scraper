@@ -22,8 +22,6 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from playwright.sync_api import sync_playwright
-
 from core.config import BLACKBOARD_BASE, load_courses, save_courses
 from core.export_json import build_composite_schema, build_export_doc
 from core.session import _launch_context, _require_session, _require_session_async, check_session_async, login, login_auto, quick_check_session_http
@@ -348,10 +346,10 @@ clean terminal UI by default, and standardized v2 JSON schemas.
 
     # --- discovery ---
     disc = parser.add_argument_group("course discovery")
-    disc.add_argument("--discover", action="store_true", help="Auto-discover and intelligently save current active semester courses")
+    disc.add_argument("--discover", "--discover-courses", action="store_true", help="Auto-discover and intelligently save current active semester courses")
     disc.add_argument("--term", metavar="TERM", help="With --discover: filter academic term (e.g. 'current', 'FA2026', 'SP2026', 'all')")
     disc.add_argument("--list-terms", action="store_true", help="List all enrolled academic terms and courses without modifying config.json")
-    disc.add_argument("--courses", action="store_true", help="List configured courses and IDs")
+    disc.add_argument("--courses", "--list-courses", action="store_true", help="List configured courses and IDs")
 
 
     # --- scrapers ---
@@ -427,6 +425,7 @@ def _handle_discover_courses(term_filter: str | None = None, list_only: bool = F
         if not _require_session(cdp):
             return
         print("🔍 Attempting fallback browser course discovery...", file=sys.stderr)
+        from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
             ctx, page = _launch_context(p, headless, cdp)
             from scrapers.base import _navigate_and_check_page
@@ -565,9 +564,10 @@ async def main_async(args: argparse.Namespace) -> None:
 
 
     if args.check_session:
-        ok = await check_session_async(debug=args.debug, headless=headless)
-        if not ok and not args.visible:
-            visible_ok = await check_session_async(debug=args.debug, headless=False)
+        fast_only = not args.visible
+        ok = await check_session_async(debug=args.debug, headless=headless, fast_only=fast_only)
+        if not ok and args.visible:
+            visible_ok = await check_session_async(debug=args.debug, headless=False, fast_only=False)
             if visible_ok:
                 print(
                     "⚠️  Headless check failed but visible check passed.\n"
@@ -949,13 +949,16 @@ async def main_async(args: argparse.Namespace) -> None:
             _emit_json(args, activity)
         else:
             print("\n🌊 Activity Stream:")
-            print("━" * 50)
+            print("━" * 60)
             if not activity:
                 print("  (No recent activity found)")
             for item in activity:
-                print(f"• {item['title']} ({item.get('course','')}) — {item.get('date','')}")
-                if item.get("message"):
-                    print(f"  > {item['message'][:140]}")
+                date_label = f" — {item['date']}" if item.get('date') else ""
+                due_label = f" [Due: {item['due_date']}]" if item.get('due_date') else ""
+                cname = item.get('course') or 'General'
+                print(f"• [{cname}] {item['title']}{due_label}{date_label}")
+                if item.get("message") and item.get("message") != item.get("title"):
+                    print(f"  > {item['message'][:160]}")
         return
 
     # --- profile ---
@@ -983,6 +986,7 @@ async def main_async(args: argparse.Namespace) -> None:
             "titles_only": getattr(args, "titles_only", False),
         }
         raw_all_disc: list[dict] = []
+        from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
             ctx, _ = _launch_context(p, headless, cdp)
             for course_id in target_cids:

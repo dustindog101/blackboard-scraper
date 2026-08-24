@@ -1,15 +1,23 @@
 import asyncio
 import json
+import os
 import re
 import sys
 import time
-from getpass import getpass
-from urllib.parse import parse_qs, unquote, urljoin, urlparse
 from datetime import datetime
+from getpass import getpass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout, Error as PlaywrightError
+try:
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout, Error as PlaywrightError
+except ImportError:
+    sync_playwright = None
+    class PlaywrightTimeout(Exception):
+        pass
+    class PlaywrightError(Exception):
+        pass
 
 from core.config import (
     BLACKBOARD_BASE,
@@ -25,34 +33,115 @@ from core.config import (
 # Browser helpers
 # ============================================================
 
+def get_browser_launch_candidates() -> list[dict]:
+    """
+    Returns a prioritized list of browser launch specifications.
+    Automatically detects system-installed desktop browsers (0 MB extra download):
+      1. Google Chrome (channel='chrome')
+      2. Brave Browser (macOS, Windows, Linux common binary locations)
+      3. Microsoft Edge (channel='msedge' - standard on Windows 10/11/Server, macOS, Linux)
+      4. Chromium / Chrome Beta channels
+      5. System executable paths (Linux/macOS)
+      6. Bundled Playwright Chromium (fallback if no system browser exists)
+    """
+    candidates = []
+
+    # 1. System Google Chrome executable paths (macOS, Linux, Windows)
+    chrome_paths = [
+        # macOS
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        # Linux
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/chromium",
+        # Windows
+        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+    ]
+    for p in chrome_paths:
+        if p and not p.startswith("%") and Path(p).exists():
+            candidates.append({"name": f"Google Chrome ({p})", "executable_path": p})
+            break
+
+    # 2. Google Chrome channel (supported natively by Playwright on macOS, Windows, Linux)
+    candidates.append({"name": "Google Chrome (channel)", "channel": "chrome"})
+
+    # 3. Brave Browser (check standard paths across macOS, Windows, Linux)
+    brave_paths = [
+        # macOS
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        os.path.expanduser("~/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
+        # Linux
+        "/usr/bin/brave-browser",
+        "/usr/bin/brave",
+        "/snap/bin/brave",
+        "/var/lib/flatpak/exports/bin/com.brave.Browser",
+        # Windows
+        os.path.expandvars(r"%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+    ]
+    for p in brave_paths:
+        if p and not p.startswith("%") and Path(p).exists():
+            candidates.append({"name": f"Brave Browser ({p})", "executable_path": p})
+            break
+
+    # 4. Microsoft Edge channel (pre-installed on Windows, optional on macOS/Linux)
+    candidates.append({"name": "Microsoft Edge (channel)", "channel": "msedge"})
+
+    # 5. Chrome Beta & Chromium channels
+    candidates.append({"name": "Google Chrome Beta (channel)", "channel": "chrome-beta"})
+    candidates.append({"name": "Chromium (channel)", "channel": "chromium"})
+
+    # Additional Linux system binary locations
+    system_paths = [
+        "/usr/bin/microsoft-edge-stable",
+    ]
+    for p in system_paths:
+        if Path(p).exists():
+            candidates.append({"name": f"System Browser ({p})", "executable_path": p})
+
+    # 6. Fallback to default Playwright bundled Chromium
+    candidates.append({"name": "Playwright Bundled Chromium", "channel": None})
+
+    return candidates
+
+
 def _launch_context(pw, headless: bool = True, cdp_url: str = None):
     """Launch a persistent browser context with saved session, or connect via CDP."""
     if cdp_url:
         print(f"🔌 Connecting to existing browser at {cdp_url}...")
         browser = pw.chromium.connect_over_cdp(cdp_url)
-        # Default context is available via browser.contexts[0]
         context = browser.contexts[0] if browser.contexts else browser.new_context()
         page = context.pages[0] if context.pages else context.new_page()
         return context, page
-    else:
-        # Launch persistent context
-        # Check if another process is using it by looking for the SingletonLock
-        lock_file = Path(SESSION_DIR) / "SingletonLock"
-        if lock_file.exists():
-            # If the user kills the script ungracefully, the lock might be leftover.
-            # Playwright usually cleans it up, but just in case we let Playwright try and fail with a clear message.
-            pass
+
+    lock_file = Path(SESSION_DIR) / "SingletonLock"
+    if lock_file.exists():
+        pass
+
+    candidates = get_browser_launch_candidates()
+    last_error = None
+
+    for spec in candidates:
+        kwargs = {
+            "user_data_dir": str(SESSION_DIR),
+            "headless": headless,
+            "args": ["--disable-blink-features=AutomationControlled"],
+            "viewport": {"width": 1280, "height": 800},
+        }
+        if spec.get("channel"):
+            kwargs["channel"] = spec["channel"]
+        if spec.get("executable_path"):
+            kwargs["executable_path"] = spec["executable_path"]
 
         try:
-            context = pw.chromium.launch_persistent_context(
-                user_data_dir=SESSION_DIR,
-                headless=headless,
-                args=["--disable-blink-features=AutomationControlled"],
-                viewport={"width": 1280, "height": 800}
-            )
+            context = pw.chromium.launch_persistent_context(**kwargs)
 
-            # Explicitly load session cookies to prevent them dropping between runs
-            import json
+            # Explicitly load session cookies
             cookie_file = Path(SESSION_DIR) / "cookies.json"
             if cookie_file.exists():
                 try:
@@ -62,19 +151,31 @@ def _launch_context(pw, headless: bool = True, cdp_url: str = None):
                 except Exception:
                     pass
 
-            # persistent context starts with 1 page
-            page = context.pages[0]
+            page = context.pages[0] if context.pages else context.new_page()
             # Speed up loads by blocking heavy media
-            page.route("**/*.{png,jpg,jpeg,gif,avif,webp,mp4,webm,woff,woff2,ttf,svg,ico}", lambda route: route.abort())
+            try:
+                page.route("**/*.{png,jpg,jpeg,gif,avif,webp,mp4,webm,woff,woff2,ttf,svg,ico}", lambda route: route.abort())
+            except Exception:
+                pass
             return context, page
-        except PlaywrightError as e:
-            if "Target directory" in str(e) and "is in use" in str(e):
-                print("\n❌ [ERROR] The Playwright Browser Session is locked.")
+        except Exception as e:
+            err_str = str(e)
+            last_error = e
+            if "Target directory" in err_str and "is in use" in err_str:
+                print("\n❌ [ERROR] The Browser Session is locked.")
                 print("   This means another scraper process or visible Chromium instance is currently using it.")
-                print(f"   Please close any running Chrome windows (or kill runaway python scripts) tied to {SESSION_DIR.name}/ and try again.")
+                print(f"   Please close any running Chrome windows tied to {SESSION_DIR.name}/ and try again.")
                 raise SystemExit(1)
-            else:
-                raise
+            # Binary not found or unsupported channel: try next candidate
+            continue
+
+    # If all candidate launches failed
+    print("\n❌ [ERROR] Could not launch any system browser (Chrome, Brave, Edge) or bundled Chromium.")
+    print("   To install the default Playwright Chromium browser binary, run:")
+    print("       playwright install chromium\n")
+    if last_error:
+        raise last_error
+    raise RuntimeError("No compatible Chromium browser found.")
 
 
 def _is_login_page(url: str) -> bool:
@@ -438,22 +539,17 @@ def logout(keep_config_creds: bool = True):
 
     # Clear browser profile cookies too
     try:
+        from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
-            # Launch with existing profile but clear cookies
-            ctx = p.chromium.launch_persistent_context(
-                user_data_dir=SESSION_DIR,
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled"],
-                viewport={"width": 1280, "height": 800}
-            )
-            # Get all cookies and clear them
+            ctx, _ = _launch_context(p, headless=True)
             cookies = ctx.cookies()
             if cookies:
                 ctx.clear_cookies()
                 print(f"   ✅ Cleared {len(cookies)} browser cookies from profile")
             ctx.close()
-    except Exception as e:
-        print(f"   ⚠️ Could not clear browser cookies: {e}")
+    except Exception:
+        # If browser cannot be launched, saved cookies are already cleared above
+        pass
 
     # Optionally clear config credentials
     if not keep_config_creds:
@@ -540,10 +636,11 @@ def quick_check_session_http(timeout: float = 3.5) -> tuple[bool, dict | None]:
     return False, None
 
 
-async def check_session_async(quiet: bool = False, debug: bool = False, headless: bool = True, fast_only: bool = False) -> bool:
+async def check_session_async(quiet: bool = False, debug: bool = False, headless: bool = True, fast_only: bool = True) -> bool:
     """
     High-speed session tester.
-    Uses ultra-lightweight sub-150ms HTTP API probe first, with fallback to headless browser.
+    Uses ultra-lightweight sub-150ms HTTP API probe without spawning a browser.
+    If fast_only is False, falls back to headless browser verification if HTTP probe fails.
     """
     # 1. Ultra-fast HTTP API probe (<150ms, 0 browser overhead)
     http_valid, user_data = quick_check_session_http()
@@ -569,7 +666,7 @@ async def check_session_async(quiet: bool = False, debug: bool = False, headless
             print("   Run `python3 main.py --login` to authenticate.")
         return False
 
-    # 2. Browser-level fallback verification (if HTTP probe inconclusive)
+    # 2. Browser-level fallback verification (if explicitly requested via fast_only=False)
     try:
         from core.async_engine import AsyncSessionManager, EngineConfig, AdaptiveDOM
         config = EngineConfig(headless=headless)
@@ -615,7 +712,7 @@ async def check_session_async(quiet: bool = False, debug: bool = False, headless
         return False
 
 
-def check_session(quiet: bool = False, debug: bool = False, headless: bool = True) -> bool:
+def check_session(quiet: bool = False, debug: bool = False, headless: bool = True, fast_only: bool = True) -> bool:
     """Synchronous session tester using instant HTTP probe."""
     http_valid, user_data = quick_check_session_http()
     if http_valid:
@@ -624,17 +721,23 @@ def check_session(quiet: bool = False, debug: bool = False, headless: bool = Tru
             print(f"✅ Session is ACTIVE (Student: {uid})")
         return True
 
-    # Fallback to async loop runner
+    if fast_only:
+        if not quiet:
+            print("❌ Session EXPIRED or missing cookies.")
+            print("   Run `python3 main.py --login` to authenticate.")
+        return False
+
+    # Fallback to async loop runner if fast_only=False
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
             return asyncio.run_coroutine_threadsafe(
-                check_session_async(quiet=quiet, debug=debug, headless=headless),
+                check_session_async(quiet=quiet, debug=debug, headless=headless, fast_only=False),
                 loop
             ).result()
     except Exception:
         pass
-    return asyncio.run(check_session_async(quiet=quiet, debug=debug, headless=headless))
+    return asyncio.run(check_session_async(quiet=quiet, debug=debug, headless=headless, fast_only=False))
 
 
 
@@ -1022,67 +1125,106 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                         return False
 
             # --- 4. REACHED DUO ---
-            print("   ↳ Reached Duo 2FA page.")
-            page.wait_for_timeout(2000)
+            print("   ↳ Checking Duo 2FA state...")
+            page.wait_for_timeout(1500)
+
+            if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
+                print("   ✅ Already authenticated (active session detected). Skipping Duo.")
+                _save_session(context)
+                track_session_usage("login")
+                print("✨ Auto-Login Successful!")
+                return True
 
             # --- 5. CLICK "OTHER OPTIONS" ---
             login_stage = "clicking Duo Other options"
-            print("   ↳ Clicking 'Other options'...")
-            try:
-                if _click_exact_text_in_any_frame(page, "Other options", timeout=8000):
-                    page.wait_for_timeout(1500)
-                    print("   ↳ Clicked 'Other options'.")
-                else:
-                    print("   ↳ Duo may already display available methods.")
-            except Exception as e:
-                print(f"   ⚠️ Notice on 'Other options': {e}")
-            finally:
-                page.wait_for_timeout(1500)
+            if "duosecurity.com" in page.url.lower():
+                print("   ↳ Clicking 'Other options'...")
+                try:
+                    if _click_exact_text_in_any_frame(page, "Other options", timeout=6000):
+                        page.wait_for_timeout(1500)
+                        print("   ↳ Clicked 'Other options'.")
+                    else:
+                        print("   ↳ Duo may already display available methods.")
+                except Exception as e:
+                    print(f"   ⚠️ Notice on 'Other options': {e}")
+                finally:
+                    page.wait_for_timeout(1000)
+
+            if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
+                print("   ✅ Already authenticated (active session detected). Skipping Duo.")
+                _save_session(context)
+                track_session_usage("login")
+                print("✨ Auto-Login Successful!")
+                return True
 
             # --- 6. SELECT "TEXT MESSAGE PASSCODE" SPECIFICALLY ---
             login_stage = "selecting Duo text message passcode"
-            print("   ↳ Selecting 'Text message passcode'...")
             from core.sms_listener import get_current_max_rowid
             start_rowid = get_current_max_rowid() if is_mac else 0
-            try:
-                passcode_input_check = page.locator("input[name='passcode'], input[id='passcode'], input[type='text'][autocomplete], input[id*='passcode']").first
-                if not passcode_input_check.is_visible(timeout=1000):
-                    if not _click_exact_text_in_any_frame(page, "Text message passcode", timeout=8000):
-                        raise PlaywrightTimeout("Text message passcode control not found")
-                    page.wait_for_timeout(2000)
-                    print("   ↳ Clicked 'Text message passcode'. Passcode is being sent...")
-                else:
-                    print("   ↳ Passcode input already active.")
-            except PlaywrightTimeout:
-                duo_body = page.locator("body").inner_text()
-                if "limit" in duo_body.lower() or "attempts" in duo_body.lower() or "denied" in duo_body.lower():
-                    print(f"   ❌ Duo 2FA Notice: {duo_body[:140].strip()}")
-                else:
-                    print("   ❌ Could not find 'Text message passcode' button.")
-                page.screenshot(path="duo_timeout_state.png")
-                print("   📸 Screenshot saved to: duo_timeout_state.png")
-                context.close()
-                return False
-            except Exception as e:
-                print(f"   ❌ Could not select 'Text message passcode': {e}")
-                page.screenshot(path="duo_timeout_state.png")
-                print("   📸 Screenshot saved to: duo_timeout_state.png")
-                context.close()
-                return False
+
+            if "duosecurity.com" in page.url.lower():
+                print("   ↳ Selecting 'Text message passcode'...")
+                try:
+                    passcode_input_check = page.locator("input[name='passcode'], input[id='passcode'], input[type='text'][autocomplete], input[id*='passcode']").first
+                    if not passcode_input_check.is_visible(timeout=1000):
+                        if not _click_exact_text_in_any_frame(page, "Text message passcode", timeout=6000):
+                            if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
+                                print("   ✅ Already authenticated (active session detected). Skipping Duo.")
+                                _save_session(context)
+                                track_session_usage("login")
+                                print("✨ Auto-Login Successful!")
+                                return True
+                            raise PlaywrightTimeout("Text message passcode control not found")
+                        page.wait_for_timeout(2000)
+                        print("   ↳ Clicked 'Text message passcode'. Passcode is being sent...")
+                    else:
+                        print("   ↳ Passcode input already active.")
+                except PlaywrightTimeout:
+                    if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
+                        print("   ✅ Already authenticated (active session detected). Skipping Duo.")
+                        _save_session(context)
+                        track_session_usage("login")
+                        print("✨ Auto-Login Successful!")
+                        return True
+                    duo_body = page.locator("body").inner_text()
+                    if "limit" in duo_body.lower() or "attempts" in duo_body.lower() or "denied" in duo_body.lower():
+                        print(f"   ❌ Duo 2FA Notice: {duo_body[:140].strip()}")
+                    else:
+                        print("   ❌ Could not find 'Text message passcode' button.")
+                    page.screenshot(path="duo_timeout_state.png")
+                    print("   📸 Screenshot saved to: duo_timeout_state.png")
+                    return False
+                except Exception as e:
+                    if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
+                        print("   ✅ Already authenticated (active session detected). Skipping Duo.")
+                        _save_session(context)
+                        track_session_usage("login")
+                        print("✨ Auto-Login Successful!")
+                        return True
+                    print(f"   ❌ Could not select 'Text message passcode': {e}")
+                    page.screenshot(path="duo_timeout_state.png")
+                    print("   📸 Screenshot saved to: duo_timeout_state.png")
+                    return False
 
             # --- 7. WAIT FOR PASSCODE INPUT ---
             login_stage = "waiting for Duo passcode input"
-            passcode_input = page.locator(
-                "input[name='passcode'], input[id='passcode'], input[type='text'][autocomplete], input[id*='passcode']"
-            ).first
-            try:
-                passcode_input.wait_for(state="visible", timeout=12000)
-            except PlaywrightTimeout:
-                print("   ❌ Timeout waiting for passcode input. Duo layout may have changed.")
-                page.screenshot(path="duo_timeout_state.png")
-                print("   📸 Screenshot saved to: duo_timeout_state.png")
-                context.close()
-                return False
+            if "duosecurity.com" in page.url.lower():
+                passcode_input = page.locator(
+                    "input[name='passcode'], input[id='passcode'], input[type='text'][autocomplete], input[id*='passcode']"
+                ).first
+                try:
+                    passcode_input.wait_for(state="visible", timeout=12000)
+                except PlaywrightTimeout:
+                    if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
+                        print("   ✅ Already authenticated (active session detected). Skipping Duo.")
+                        _save_session(context)
+                        track_session_usage("login")
+                        print("✨ Auto-Login Successful!")
+                        return True
+                    print("   ❌ Timeout waiting for passcode input. Duo layout may have changed.")
+                    page.screenshot(path="duo_timeout_state.png")
+                    print("   📸 Screenshot saved to: duo_timeout_state.png")
+                    return False
 
             sent_to_hint = ""
             try:

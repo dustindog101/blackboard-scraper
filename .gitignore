@@ -3,8 +3,9 @@
 .session_clone/
 .playwright-mcp/
 
-# Output (scraped data, exports, markdown)
+# Output (scraped data, exports, markdown, downloads)
 output/
+downloads/
 
 # Configuration with real course data
 config.json

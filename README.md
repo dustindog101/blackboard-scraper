@@ -23,19 +23,23 @@ An automated, high-performance headless scraper and academic intelligence engine
   - [4. Cross-Course Deadline Aggregator](#4-cross-course-deadline-aggregator---due)
   - [5. Course Announcements & Grades](#5-course-announcements--grades)
   - [6. Omnisearch Across Courses](#6-omnisearch-across-courses---find)
+  - [7. Direct Course File Downloader](#7-direct-course-file-downloader---download)
+  - [8. Course Discovery & Active Term Isolation](#8-course-discovery--active-term-isolation---discover)
 - [⚡ Smart Adaptive Concurrency Engine](#-smart-adaptive-concurrency-engine)
 - [🤖 Modular Telegram Bot & Alerts (Optional)](#-modular-telegram-bot--alerts-optional)
+- [🖥️ Optional macOS Menubar App](#️-optional-macos-menubar-app---menubar)
 - [📋 Complete CLI Flag Reference](#-complete-cli-flag-reference)
 
 ---
 
 ## ⚡ Core Architectural Principles
 
-1. **Clean CLI Output by Default**: All commands format structured, beautiful output directly to terminal `stdout`. No unwanted Markdown or temporary files are written to disk unless explicitly requested (`--md` or `--out <file>`).
-2. **Task-Aware Smart Concurrency**: The worker pool automatically adjusts concurrency ceilings based on operation complexity—shallow scraping runs fast at 6–8 parallel workers, while deep accordion drawers run safely at 2–3 workers.
-3. **Closed-Course Circuit Breakers**: Closed or unavailable courses are detected in `< 120ms` via `#notification-modal-api-error`, immediately releasing worker threads.
-4. **Context-Level Route Optimization**: Automatically aborts images, media, webfonts, and third-party trackers to minimize memory and accelerate DOM parsing.
-5. **Zero-Pip Telegram Bot**: Full Telegram alerting and interactive bot control built using Python standard library HTTP (`urllib`), keeping the codebase lean and decoupled.
+1. **HTTP REST Fast-Path (<150ms)**: Read-only scrapers (`--due`, `--calendar`, `--announcements`, `--grades`, `--outline`, `--search`, `--profile`) query Blackboard's public REST APIs directly using session cookies, returning sub-second responses with zero browser overhead.
+2. **Graceful Playwright Fallback**: If an API endpoint is restricted or blocked, scrapers notify the user and seamlessly delegate to Playwright browser DOM extraction.
+3. **Clean CLI Output by Default**: All commands format structured, beautiful output directly to terminal `stdout`. No unwanted Markdown or temporary files are written to disk unless explicitly requested (`--md` or `--out <file>`).
+4. **Task-Aware Smart Concurrency**: The worker pool automatically adjusts concurrency ceilings based on operation complexity—shallow scraping runs fast at 6–8 parallel workers, while deep accordion drawers run safely at 2–3 workers.
+5. **Closed-Course Circuit Breakers**: Closed or unavailable courses are detected in `< 120ms` via HTTP 403 or DOM error modals, immediately releasing worker threads.
+6. **Zero-Pip Telegram Bot**: Full Telegram alerting and interactive bot control built using Python standard library HTTP (`urllib`), keeping the codebase lean and decoupled.
 
 ---
 
@@ -44,6 +48,12 @@ An automated, high-performance headless scraper and academic intelligence engine
 The base scraper is 100% lightweight and cross-platform (Windows, macOS, Linux). It requires only `playwright` and `beautifulsoup4`.
 
 ### 1. Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/dustindog101/blackboard-scraper.git
+cd blackboard-scraper
+```
 
 #### On macOS / Linux:
 ```bash
@@ -60,7 +70,7 @@ python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
 playwright install chromium
-.\install-cli.ps1   # Or: pip install -e .
+.\install-cli.ps1   # Registers global 'bb', 'blackboard', and 'bbscraper' commands
 ```
 
 ---
@@ -68,11 +78,14 @@ playwright install chromium
 ### 2. Authenticate (One-Time)
 
 ```bash
-# Option A: Fast automated SSO login
-python3 main.py --login --auto
+# Option A [Recommended on macOS]: Fully automated SSO + real-time macOS SMS Duo 2FA interception
+bb --auto-exp
 
-# Option B: Open visible browser window to solve SSO & Duo manually
-python3 main.py --login
+# Option B: Automated SSO + terminal Duo SMS passcode entry
+bb --login --auto
+
+# Option C: Open visible browser window to solve SSO & Duo manually
+bb --login
 ```
 
 ---
@@ -80,6 +93,9 @@ python3 main.py --login
 ### 3. Run Commands (100% Headless)
 
 ```bash
+# Auto-discover your active semester courses
+bb --discover
+
 # Get your daily school briefing
 bb --briefing
 
@@ -87,7 +103,7 @@ bb --briefing
 bb --due 7d
 
 # View course outline and syllabi
-bb --outline --all
+bb --outline -c IS410
 ```
 
 ---
@@ -100,14 +116,14 @@ bb --outline --all
 - **100% Fully Headless**: All ongoing scrapers, cron jobs, background watchers, and Telegram bot interactions run headlessly with zero browser popups or prompts.
 
 ```bash
-# Check if current session is active
-python3 main.py --check-session
+# Check if current session is active (<120ms REST probe)
+bb --check-session
 
-# View session creation and last-used timestamps
-python3 main.py --session-info
+# View session creation, last-used, and telemetry lifespan stats
+bb --session-stats
 
 # Clear session cookies to logout
-python3 main.py --logout
+bb --logout
 ```
 
 ---
@@ -299,8 +315,24 @@ python3 main.py --grades --all --json
 ### 6. Omnisearch Across Courses (`--find`)
 Search across all course titles, modules, and assignment descriptions:
 ```bash
-python3 main.py --find "Project"
-python3 main.py --find "Syllabus"
+bb --find "Project"
+bb --find "Syllabus"
+```
+
+### 7. Direct Course File Downloader (`--download`)
+Automatically locates course and downloads attachments, PDFs, or Jupyter notebooks:
+```bash
+bb --download "Worksheet_1.pdf"
+bb --download _8825690_1             # Download by exact Blackboard item ID
+```
+
+### 8. Course Discovery & Active Term Isolation (`--discover`)
+Intelligently queries Blackboard REST API and auto-populates `config.json` with active courses:
+```bash
+bb --discover                       # Auto-detect current active term
+bb --discover --term FA2026         # Filter to specific semester
+bb --list-terms                     # List all lifetime enrolled terms & courses
+bb --courses                        # View configured courses
 ```
 
 ---
@@ -336,11 +368,13 @@ The Telegram integration requires **zero external pip packages** and is complete
 }
 ```
 
-### 2. Start Bot Daemon
+### 2. Manage Bot Daemon
 ```bash
-python3 main.py --bot
-# or
-python3 telegram_bot.py
+bb --bot -d           # Start Telegram bot daemon in background
+bb --bot-status       # Check daemon status, PID, and RSS memory
+bb --bot-restart      # Restart daemon and broadcast rich card
+bb --bot-stop         # Stop running daemon
+bb --bot              # Run bot directly in foreground
 ```
 
 ### 3. Interactive Telegram Commands:
@@ -367,8 +401,6 @@ pip install rumps
 
 # Launch Menubar app
 bb --menubar
-# or
-python3 menubar.py
 ```
 
 ---
@@ -379,11 +411,17 @@ python3 menubar.py
 | :--- | :--- | :--- |
 | **Help & Guides** | `--guide {auth,courses,schema,telegram,concurrency}` | Show detailed topic manuals |
 | **Authentication** | `--login` | Login via UMBC SSO (skips if active) |
-| | `--login --auto` | Fully automated SSO + Duo text passcode login |
+| | `--login --auto` | Automated SSO + Duo SMS passcode entry |
+| | `--auto-exp` | Fully automated SSO + real-time macOS SMS Duo 2FA interception |
 | | `--duo-passcode <code>` | Supply 6-digit Duo SMS code directly |
-| | `--check-session` | Validate session cookies headlessly |
+| | `--check-session` | Validate session cookies via fast HTTP probe (<120ms) |
 | | `--session-info` | Display session timestamps |
+| | `--session-stats` | Deep session telemetry & lifespan analytics |
 | | `--logout` | Clear session cookies |
+| **Course Discovery** | `--discover` | Auto-discover active semester courses & save to `config.json` |
+| | `--term <TERM>` | Filter discovery by academic term (`FA2026`, `current`, `all`) |
+| | `--list-terms` | List all lifetime enrolled terms & courses |
+| | `--courses` | List configured courses and IDs |
 | **Scrapers** | `--briefing` | High-speed concurrent school briefing |
 | | `--due [WINDOW]` | Upcoming deadlines (`7d`, `14d`, `overdue`) |
 | | `--outline` | Full course outline tree, syllabi, and files |
@@ -392,7 +430,8 @@ python3 menubar.py
 | | `--announcements` | Course announcements |
 | | `--activity` | Homepage activity stream |
 | | `--calendar` | Global calendar items |
-| | `--find <query>` | Omnisearch across all courses |
+| | `--find, --search <query>` | Omnisearch across all courses |
+| | `--download, --grab <item>` | Direct file/attachment downloader |
 | | `--profile` | Student profile information |
 | **Selection & Filter**| `--course, -c <ID/Code>` | Target course(s) (e.g. `IS410` or `IS410,ENGL100`) |
 | | `--all` | Target all configured courses |
@@ -410,7 +449,11 @@ python3 menubar.py
 | | `--visible, -v` | Launch visible browser window for debugging |
 | **GUI & Menubar** | `--menubar` | Launch optional native macOS Menubar app |
 | **Telegram** | `--telegram` | Send briefing/alerts to configured chat |
-| | `--bot` | Launch interactive Telegram bot daemon |
+| | `--bot` | Launch interactive Telegram bot |
+| | `--bot -d` | Launch Telegram bot daemon in background |
+| | `--bot-status` | Inspect running bot daemon PID and memory |
+| | `--bot-restart` | Gracefully restart bot daemon |
+| | `--bot-stop` | Stop background bot daemon |
 
 ---
 

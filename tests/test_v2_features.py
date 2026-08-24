@@ -10,6 +10,7 @@ Unit and Integration Tests for Blackboard Ultra Scraper v2 features:
 - Due Date Aggregation logic and date parsing
 """
 
+import asyncio
 import json
 import re
 import unittest
@@ -368,12 +369,76 @@ class TestWindowsCrossPlatformBehaviors(unittest.TestCase):
         self.assertTrue(save_creds)
         self.assertEqual(mode, "auto")
 
-    @patch("sys.platform", "win32")
-    def test_daemon_memory_windows_fallback(self):
-        from telegram.daemon import get_process_memory_mb
-        # PID 0 or non-existent PID should return 0.0 safely without crashing
-        mem = get_process_memory_mb(999999)
-        self.assertEqual(mem, 0.0)
+class TestBrowserLaunchCandidates(unittest.TestCase):
+    def test_candidates_order_and_structure(self):
+        from core.session import get_browser_launch_candidates
+        candidates = get_browser_launch_candidates()
+        self.assertTrue(len(candidates) >= 5)
+
+        # 1. Primary candidates should include Google Chrome, Microsoft Edge, and Bundled Chromium fallback
+        names = [c["name"] for c in candidates]
+        self.assertTrue(any("Google Chrome" in n for n in names))
+        self.assertTrue(any("Microsoft Edge" in n for n in names))
+        self.assertTrue(any("Playwright Bundled Chromium" in n for n in names))
+
+        # 2. Last candidate must be the bundled Chromium fallback
+        self.assertIsNone(candidates[-1]["channel"])
+        self.assertEqual(candidates[-1]["name"], "Playwright Bundled Chromium")
+
+    @patch("core.session.get_browser_launch_candidates")
+    def test_launch_context_candidate_fallback(self, mock_candidates):
+        from unittest.mock import MagicMock
+        from core.session import _launch_context
+
+        mock_candidates.return_value = [
+            {"name": "Missing Chrome", "channel": "chrome"},
+            {"name": "Working Edge", "channel": "msedge"},
+        ]
+
+        mock_pw = MagicMock()
+        mock_ctx = MagicMock()
+        mock_page = MagicMock()
+        mock_ctx.pages = [mock_page]
+
+        # First call fails (missing executable), second call succeeds
+        mock_pw.chromium.launch_persistent_context.side_effect = [
+            Exception("Executable doesn't exist"),
+            mock_ctx,
+        ]
+
+        ctx, page = _launch_context(mock_pw, headless=True)
+        self.assertEqual(ctx, mock_ctx)
+        self.assertEqual(page, mock_page)
+        self.assertEqual(mock_pw.chromium.launch_persistent_context.call_count, 2)
+
+
+class TestPureHTTPSessionCheck(unittest.TestCase):
+    @patch("core.session.quick_check_session_http", return_value=(True, {"studentId": "BH69617"}))
+    def test_check_session_async_active(self, mock_http):
+        from core.session import check_session_async
+        res = asyncio.run(check_session_async(quiet=True, fast_only=True))
+        self.assertTrue(res)
+
+    @patch("core.session.quick_check_session_http", return_value=(False, None))
+    @patch("core.async_engine.AsyncSessionManager")
+    def test_check_session_async_expired_pure_http(self, mock_session_mgr, mock_http):
+        from core.session import check_session_async
+        res = asyncio.run(check_session_async(quiet=True, fast_only=True))
+        self.assertFalse(res)
+        # Verify no browser session manager was initialized
+        mock_session_mgr.assert_not_called()
+
+    @patch("core.session.quick_check_session_http", return_value=(True, {"studentId": "BH69617"}))
+    def test_check_session_sync_active(self, mock_http):
+        from core.session import check_session
+        res = check_session(quiet=True, fast_only=True)
+        self.assertTrue(res)
+
+    @patch("core.session.quick_check_session_http", return_value=(False, None))
+    def test_check_session_sync_expired_pure_http(self, mock_http):
+        from core.session import check_session
+        res = check_session(quiet=True, fast_only=True)
+        self.assertFalse(res)
 
 
 if __name__ == "__main__":

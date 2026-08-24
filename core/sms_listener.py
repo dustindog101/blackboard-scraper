@@ -73,12 +73,13 @@ def get_latest_duo_sms_sqlite(
             SELECT
                 m.ROWID,
                 m.text,
+                m.attributedBody,
                 m.date,
                 COALESCE(h.id, 'SMS') as sender,
                 m.is_from_me
             FROM message m
             LEFT JOIN handle h ON m.handle_id = h.ROWID
-            WHERE m.ROWID > ? AND m.text IS NOT NULL AND m.is_from_me = 0
+            WHERE m.ROWID > ? AND m.is_from_me = 0
             ORDER BY m.ROWID DESC
             LIMIT 20
             """
@@ -88,12 +89,13 @@ def get_latest_duo_sms_sqlite(
             SELECT
                 m.ROWID,
                 m.text,
+                m.attributedBody,
                 m.date,
                 COALESCE(h.id, 'SMS') as sender,
                 m.is_from_me
             FROM message m
             LEFT JOIN handle h ON m.handle_id = h.ROWID
-            WHERE m.text IS NOT NULL AND m.is_from_me = 0
+            WHERE m.is_from_me = 0
             ORDER BY m.date DESC
             LIMIT 20
             """
@@ -102,8 +104,20 @@ def get_latest_duo_sms_sqlite(
         rows = cursor.fetchall()
         conn.close()
 
+        def _resolve_text(raw_text: Optional[str], attr_blob: Optional[bytes]) -> str:
+            if raw_text:
+                return raw_text
+            if not attr_blob:
+                return ""
+            try:
+                chunks = re.findall(b"[\x20-\x7E]{3,}", attr_blob)
+                return " ".join([c.decode("utf-8", errors="ignore") for c in chunks])
+            except Exception:
+                return ""
+
         # Check high priority patterns first
-        for rowid, text, apple_date, sender, is_from_me in rows:
+        for rowid, raw_text, attr_blob, apple_date, sender, is_from_me in rows:
+            text = _resolve_text(raw_text, attr_blob)
             if not text:
                 continue
 
@@ -118,7 +132,8 @@ def get_latest_duo_sms_sqlite(
                     return code, unix_ts, sender, text
 
         # Check medium priority patterns
-        for rowid, text, apple_date, sender, is_from_me in rows:
+        for rowid, raw_text, attr_blob, apple_date, sender, is_from_me in rows:
+            text = _resolve_text(raw_text, attr_blob)
             if not text:
                 continue
 

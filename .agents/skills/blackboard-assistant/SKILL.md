@@ -15,10 +15,12 @@ Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** 
 
 | Goal | CLI Command | Output / Behavior |
 | :--- | :--- | :--- |
-| **Daily Academic Briefing** | `bb --briefing` | Parallel scrape across all enrolled courses (Deadlines + Grades + Announcements) |
-| **Upcoming Deadlines** | `bb --due 7d` | Scrapes global calendar and course activity stream |
-| **Latest Grades** | `bb --grades` | Fetches grades, letter grades, and instructor feedback |
-| **Recent Announcements** | `bb --announcements` | Retrieves latest course-wide announcements |
+| **Daily Academic Briefing** | `bb --briefing` | Concurrent aggregation across all courses (<6s) |
+| **Upcoming Deadlines (7d)** | `bb --due 7d` | Fast HTTP REST calendar & gradebook deadline schedule (<200ms) |
+| **Extended Deadlines** | `bb --due 14d` / `bb --due 150d` | Relative date window filtering for all upcoming assignments |
+| **Global Calendar View** | `bb --calendar` | Direct HTTP REST query (`/calendars/items`) with localized dates |
+| **Course Announcements** | `bb --announcements --all` | Fast REST API extraction with HTML cleanup & unread status |
+| **Latest Grades** | `bb --grades --all` | Course gradebook columns, due dates, points, and running grades |
 | **Course Outline (Shallow)** | `bb --outline -c MATH215` | Default shallow view with folder item counts & IDs |
 | **Selective Folder Expansion** | `bb --outline -c MATH215 -f "Homework"` | Selectively expands target folder by name or ID |
 | **Full Outline Tree** | `bb --outline -c MATH215 --expand-all` | Full recursive tree with all subfolders expanded |
@@ -41,14 +43,18 @@ Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** 
 ### 1. "What do I have due this week?" / "Check my deadlines"
 1. Verify session: `bb --check-session`.
 2. If expired: run `bb --auto-exp` to refresh session with zero typing.
-3. Run: `bb --due 7d --json` (or `bb --briefing`).
-4. Format output nicely with Course Name, Assignment Title, Due Date, and Points.
+3. Run: `bb --due 7d` (or `bb --due 7d --json`).
+4. Format output nicely with Course Name, Assignment Title, Due Date, and Status.
 
 ### 2. "Check my grades" / "Did any new grades post?"
-1. Run `bb --grades`.
-2. Report each course's current running average, recently graded items, and feedback.
+1. Run `bb --grades --all`.
+2. Report each course's graded items, due dates, and point weights.
 
-### 3. "Log me in" / "Refresh my Blackboard session"
+### 3. "Check announcements" / "What did professors post?"
+1. Run `bb --announcements --all`.
+2. Displays formatted announcements with relative posting dates and unread status.
+
+### 4. "Log me in" / "Refresh my Blackboard session"
 1. Run `bb --auto-exp --force`.
 2. The engine will:
    - Load student credentials from `config.json` (`BH69617`).
@@ -57,21 +63,29 @@ Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** 
    - Intercept the incoming Duo text code directly from macOS Messages (`~/Library/Messages/chat.db`) via monotonic ROWID delta tracking in <3ms.
    - Submit the passcode and save fresh session cookies.
 
-### 4. "Search for [Topic] in my classes" (e.g. "Find the syllabus for database")
+### 5. "Search for [Topic] in my classes" (e.g. "Find the syllabus for database")
 1. Run `bb --search "Syllabus"`.
 2. Returns matching document links, descriptions, and parent folder paths.
 
-### 5. "Download [File / Note / Worksheet]"
+### 6. "Download [File / Note / Worksheet]"
 1. Run `bb --download "<file_name_or_id>"` (e.g. `bb --download "Math215_Worksheet_1.pdf"` or `bb --download "Chapter01.ipynb"`).
 2. The downloader will automatically locate the correct course and save the file into `downloads/<CourseName>/`.
 
-### 6. "Which courses am I enrolled in?"
+### 7. "Which courses am I enrolled in?"
 1. Run `bb --courses`.
 2. If courses appear outdated or user changed semesters, run `bb --discover` to auto-detect the current semester.
 
 ---
 
-## 🏗️ Architecture & Core Components
+## 🏗️ Dual-Engine Architecture (HTTP REST + Playwright)
+
+The toolsuite uses a high-performance **dual-engine architecture**:
+1. **⚡ HTTP REST Fast-Path (Primary)**:
+   - All read operations (`--due`, `--calendar`, `--announcements`, `--grades`, `--outline`, `--search`, `--profile`, `--check-session`) execute via direct HTTP JSON requests using cached session cookies in `<150ms`.
+2. **🌐 Playwright Browser Fallback (Secondary)**:
+   - If an HTTP endpoint fails or is blocked, the scraper automatically notifies the user (`⚠️ HTTP <Feature> API unavailable; falling back to Playwright browser scraper...`) and seamlessly delegates to Playwright DOM extraction.
+3. **🔑 Playwright Auth Engine**:
+   - Spawns persistent browser context for initial UMBC SSO WebAuth login, Duo SMS 2FA passcode submission, and cookie persistence.
 
 ```text
 tools/blackboard-scraper/
@@ -90,11 +104,12 @@ tools/blackboard-scraper/
 │   └── diff_tracker.py         # Content hashing for instant change detection
 ├── scrapers/
 │   ├── briefing.py             # Global aggregator (due dates + grades + news)
-│   ├── calendar.py             # Calendar due date scraper
-│   ├── grades.py               # Ultra gradebook scraper
-│   ├── announcements.py        # Course announcements extractor
-│   ├── outline.py              # Nested course tree explorer
-│   └── search.py               # Parallel course keyword search
+│   ├── calendar.py             # Calendar REST fast-path + Playwright fallback
+│   ├── due_dates.py            # Cross-source deadline aggregator & window filter
+│   ├── grades.py               # Gradebook REST fast-path + Playwright fallback
+│   ├── announcements.py        # Announcements REST fast-path + Playwright fallback
+│   ├── outline.py              # Course outline REST fast-path + tree builder
+│   └── search.py               # Parallel course keyword search & file downloader
 └── telegram/
     ├── bot.py                  # Long-polling Telegram bot daemon (@blackboardscrapbot)
     ├── notifier.py             # HTML message formatter & Telegram dispatcher
@@ -105,9 +120,9 @@ tools/blackboard-scraper/
 
 ## ⚠️ Critical Gotchas & Rules for Agents
 
-1. **Async Event Loops & Playwright**:
-   - `main_async` in `main.py` runs inside `asyncio.run()`.
-   - Never call synchronous Playwright (`sync_playwright()`) directly inside `main_async`. Always wrap synchronous functions in `await asyncio.to_thread(func, ...)`.
+1. **Dual-Engine Execution**:
+   - Scrapers automatically attempt the high-speed HTTP REST API first (<150ms).
+   - Never remove the Playwright fallbacks; they ensure uninterrupted operation if Blackboard applies dynamic restrictions.
 2. **Current Enrolled Courses**:
    - Current semester is **Fall 2026** (Student: `Amanuel • BH69617`).
    - Active courses: `IS 410`, `ECON 122`, `ENGL 100`, `MATH 215`, `AGNG 100`.
@@ -117,6 +132,7 @@ tools/blackboard-scraper/
 4. **macOS 2FA SMS Interception**:
    - macOS Messages SQLite DB is located at `~/Library/Messages/chat.db`.
    - Always track incoming SMS using `ROWID > start_rowid` to avoid carrier timestamp drift.
+
 
 ---
 
