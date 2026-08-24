@@ -26,6 +26,7 @@ Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** 
 | **Full Outline Tree** | `bb --outline -c MATH215 --expand-all` | Full recursive tree with all subfolders expanded |
 | **Interactive Folder Explorer** | `bb --outline -c MATH215 -i` | Interactive terminal menu to browse & expand folders |
 | **Clean Outline JSON** | `bb --outline -c MATH215 --json` | Compact, streamlined JSON without bloated empty fields |
+| **Quiz / Assessment Inspector** | `bb --quiz <URL_OR_ID>` | Deep questions, points, attempts, choices & answers (<200ms) |
 | **Download File / Note** | `bb --download "Worksheet_1.pdf"` | Auto-discovers course and downloads file directly to disk |
 | **Download by Item ID** | `bb --download _8825690_1` | Downloads specific Blackboard item/notebook by exact ID |
 | **Active Course Discovery** | `bb --discover` | Intelligently isolates current active term (Fall 2026) in <200ms |
@@ -74,6 +75,10 @@ Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** 
 ### 7. "Which courses am I enrolled in?"
 1. Run `bb --courses`.
 2. If courses appear outdated or user changed semesters, run `bb --discover` to auto-detect the current semester.
+
+### 8. "Check / inspect this quiz or assignment"
+1. Run `bb --quiz "<url_or_content_id_or_title>"` (e.g. `bb --quiz "https://blackboard.umbc.edu/ultra/courses/_112155_1/assessment/_8836886_1/attempt/_35936988_1?courseId=_112155_1"` or `bb --quiz "Syllabus Quiz"`).
+2. Extracts points, time limit, due dates, attempts, full question prompts, multiple-choice options, and student answers in <200ms via REST with Playwright fallback.
 
 ---
 

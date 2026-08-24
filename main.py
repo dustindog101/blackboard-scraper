@@ -44,6 +44,7 @@ from scrapers.outline import (
     interactive_folder_picker,
 )
 from scrapers.assignments import scrape_course_assignments_async, save_assignments, format_assignments_summary
+from scrapers.quiz import scrape_assessment_attempt_async, save_assessment_attempt, format_assessment_attempt_cli
 from scrapers.due_dates import aggregate_due_dates_async, save_due_dates, format_due_dates_table
 from scrapers.search import find_items_async, grab_item_async
 
@@ -362,6 +363,7 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     scrapers.add_argument("--discussions", action="store_true", help="Scrape course discussions")
     scrapers.add_argument("--outline", action="store_true", help="Scrape full course outline, modules, syllabi, and files")
     scrapers.add_argument("--assignments", action="store_true", help="Deep scrape assignments with prompts, rubrics, and files")
+    scrapers.add_argument("--quiz", "--assessment", metavar="TARGET", help="Deep inspect quiz/assessment attempt questions, points, choices, and answers")
     scrapers.add_argument("--due", nargs="?", const="7d", default=None, metavar="WINDOW", help="Aggregate cross-course due dates (e.g. 7d, 14d, overdue)")
     scrapers.add_argument("--upcoming", type=int, metavar="DAYS", help="Alias for --due <N>d")
     scrapers.add_argument("--exclude-completed", action="store_true", help="With --due: exclude submitted/graded items")
@@ -778,6 +780,27 @@ async def main_async(args: argparse.Namespace) -> None:
                 if isinstance(data, list):
                     print(format_assignments_summary(data, cname, cid))
                     print("")
+        return
+
+    # --- quiz / assessment attempt inspector ---
+    if args.quiz:
+        target_cid = target_cids[0] if target_cids else None
+        force_browser = getattr(args, "visible", False)
+        data = await scrape_assessment_attempt_async(
+            target=args.quiz,
+            course_id=target_cid,
+            headless=headless,
+            force_browser=force_browser,
+        )
+
+        if args.md:
+            saved_path = save_assessment_attempt(data)
+            print(f"💾 Saved assessment Markdown report to: {_safe_relpath(saved_path)}", file=sys.stderr)
+
+        if args.raw or args.json or args.out:
+            _emit_json(args, data)
+        else:
+            print(format_assessment_attempt_cli(data))
         return
 
     # --- omnisearch ---
