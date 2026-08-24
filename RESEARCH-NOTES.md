@@ -34,3 +34,10 @@
   3. Interactive test questions, choice options, and student responses for active/submitted attempts are queryable via `/learn/api/v1/courses/{course_id}/gradebook/attempts/{attempt_id}?expand=toolAttemptDetail,alignedGoals` in `< 150ms`.
 - **Pattern Adopted**: Non-Destructive Inspection by Default — Read-only examination of test parameters, points, due dates, and assignment instructions never creates premature attempt tokens or triggers timed test countdowns. If an attempt is in progress, the engine continues and inspects existing question attempts non-destructively. When explicit attempt initiation is requested (`--start-attempt`), Playwright handles the attempt creation with explicit timed exam guards (`--force-start`).
 
+## 7. Ultra Document Asset Extraction & Multi-Folder Subtree Expansion
+- **Researched**: Structure of Ultra Documents (`resource/x-bb-document`) vs classic course files. In Ultra, instructors frequently embed PDFs, syllabi, and reading notes as inline rich-text attachments (`data-bbfile` JSON objects referencing `/bbcswebdav/` repository URIs) rather than standard `/contents/{id}/attachments` endpoints.
+- **Pattern Adopted**:
+  1. **Dual-Path Downloader**: Enhanced `fetch_item_attachments` in `scrapers/outline.py` to first check standard attachments, then traverse Ultra document bodies and child elements to extract embedded `data-bbfile` resource URLs, enabling seamless downloading of rich-text documents and syllabi.
+  2. **Multi-Folder Selective Expansion**: `filter_outline_by_folder` accepts natural folder titles (e.g. `-f "Start Here"` or `-f "Syllabus & Course Information"`). If multiple containers match a query (e.g. `-f "Module"`), it simultaneously expands and displays subtrees for all matching modules.
+
+
