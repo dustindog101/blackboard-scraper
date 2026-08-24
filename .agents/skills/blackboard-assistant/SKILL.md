@@ -25,8 +25,8 @@ Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** 
 | **Selective Folder Expansion** | `bb --outline -c MATH215 -f "Homework"` | Selectively expands target folder by name or ID |
 | **Full Outline Tree** | `bb --outline -c MATH215 --expand-all` | Full recursive tree with all subfolders expanded |
 | **Interactive Folder Explorer** | `bb --outline -c MATH215 -i` | Interactive terminal menu to browse & expand folders |
-| **Clean Outline JSON** | `bb --outline -c MATH215 --json` | Compact, streamlined JSON without bloated empty fields |
-| **Quiz / Assessment Inspector** | `bb --quiz <URL_OR_ID>` | Deep questions, points, attempts, choices & answers (<200ms) |
+| **List Course Assignments** | `bb --assignments -c AGNG` | Lists all assignments, tests, and discussions with unique IDs (<150ms) |
+| **Inspect Assignment / Quiz** | `bb --assignment <ID_or_Title>` | Opens & inspects deep prompts, statements, choices & answers (<200ms) |
 | **Download File / Note** | `bb --download "Worksheet_1.pdf"` | Auto-discovers course and downloads file directly to disk |
 | **Download by Item ID** | `bb --download _8825690_1` | Downloads specific Blackboard item/notebook by exact ID |
 | **Active Course Discovery** | `bb --discover` | Intelligently isolates current active term (Fall 2026) in <200ms |
