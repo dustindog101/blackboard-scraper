@@ -1,7 +1,10 @@
 import asyncio
+import html
 import json
 import logging
+import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +40,8 @@ def get_cookie_header() -> Optional[str]:
 
 def _api_get(url: str, cookie_header: str, timeout: float = 10.0) -> Optional[Dict[str, Any]]:
     """Execute authenticated HTTP GET against Blackboard REST API."""
+    if url.startswith("/"):
+        url = f"{BLACKBOARD_BASE}{url}"
     headers = {
         "Cookie": cookie_header,
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -467,28 +472,81 @@ def fetch_item_attachments(
 ) -> List[Dict[str, Any]]:
     """
     Fetches real attachment IDs, filenames, and download URLs for a specific content item.
+    Supports standard attachments, Ultra embedded document files, and child document assets.
     """
     cookie_header = cookie_header or get_cookie_header()
     if not cookie_header:
         return []
 
+    attachments = []
+    seen_urls = set()
+
+    # 1. Standard public attachments endpoint
     url = f"{BLACKBOARD_BASE}/learn/api/public/v1/courses/{course_id}/contents/{content_id}/attachments"
     data = _api_get(url, cookie_header, timeout=8.0)
-    if not data or "results" not in data:
-        return []
+    if data and "results" in data:
+        for att in data.get("results", []):
+            att_id = att.get("id")
+            file_name = att.get("fileName", "attachment")
+            mime_type = att.get("mimeType", "application/octet-stream")
+            dl_url = f"{BLACKBOARD_BASE}/learn/api/public/v1/courses/{course_id}/contents/{content_id}/attachments/{att_id}/download"
+            if dl_url not in seen_urls:
+                seen_urls.add(dl_url)
+                attachments.append({
+                    "id": att_id,
+                    "file_name": file_name,
+                    "mime_type": mime_type,
+                    "download_url": dl_url,
+                })
 
-    attachments = []
-    for att in data.get("results", []):
-        att_id = att.get("id")
-        file_name = att.get("fileName", "attachment")
-        mime_type = att.get("mimeType", "application/octet-stream")
-        dl_url = f"{BLACKBOARD_BASE}/learn/api/public/v1/courses/{course_id}/contents/{content_id}/attachments/{att_id}/download"
-        attachments.append({
-            "id": att_id,
-            "file_name": file_name,
-            "mime_type": mime_type,
-            "download_url": dl_url,
-        })
+    # 2. Check content item body / description for Ultra embedded documents & bbcswebdav files
+    items_to_check = [content_id]
+    children = _api_get(f"/learn/api/v1/courses/{course_id}/contents/{content_id}/children", cookie_header, timeout=5.0)
+    if children and "results" in children:
+        for child in children["results"]:
+            cid = child.get("id")
+            if cid and cid not in items_to_check:
+                items_to_check.append(cid)
+
+    for cid in items_to_check:
+        c_doc = _api_get(f"/learn/api/v1/courses/{course_id}/contents/{cid}", cookie_header, timeout=5.0)
+        if not c_doc or "_http_status" in c_doc:
+            continue
+
+        raw_body = (c_doc.get("body", {}).get("rawText") or "") + " " + (c_doc.get("body", {}).get("displayText") or "")
+
+        # Look for data-bbfile JSON or resourceUrl
+        bbfile_matches = re.finditer(r'data-bbfile="([^"]+)"', raw_body)
+        for m in bbfile_matches:
+            try:
+                raw_json = html.unescape(m.group(1))
+                file_info = json.loads(raw_json)
+                res_url = file_info.get("resourceUrl") or file_info.get("viewerUrl")
+                fname = file_info.get("linkName") or file_info.get("displayName") or "document.pdf"
+                if res_url and res_url not in seen_urls:
+                    seen_urls.add(res_url)
+                    attachments.append({
+                        "id": cid,
+                        "file_name": fname,
+                        "mime_type": file_info.get("mimeType", "application/octet-stream"),
+                        "download_url": res_url,
+                    })
+            except Exception:
+                pass
+
+        # Look for direct href="https://.../bbcswebdav/..." links
+        dav_matches = re.finditer(r'href="(https?://[^"]+/bbcswebdav/[^"]+)"', raw_body)
+        for m in dav_matches:
+            dav_url = html.unescape(m.group(1))
+            if dav_url not in seen_urls:
+                seen_urls.add(dav_url)
+                attachments.append({
+                    "id": cid,
+                    "file_name": Path(urllib.parse.urlparse(dav_url).path).name or "document",
+                    "mime_type": "application/octet-stream",
+                    "download_url": dav_url,
+                })
+
     return attachments
 
 
