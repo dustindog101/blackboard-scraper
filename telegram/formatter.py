@@ -100,20 +100,6 @@ def format_daily_briefing(briefing_data: Dict[str, Any]) -> List[str]:
         "",
     ]
 
-    # 0. In-Progress Unfinished Attempts (Highest Priority)
-    open_attempts = briefing_data.get("in_progress_attempts", [])
-    if open_attempts:
-        lines.append(f"🚨 <b>UNSUBMITTED ATTEMPTS DETECTED ({len(open_attempts)}):</b>")
-        for att in open_attempts:
-            cname = att.get("course_name") or att.get("course_id")
-            title = att.get("title")
-            elapsed = att.get("elapsed_time_human", "Active")
-            url = att.get("launcher_url", "")
-            overdue = " ⚠️ <b>OVERDUE</b>" if att.get("is_overdue") else ""
-            lines.append(f"• ⚠️ <b>{escape_html(title)}</b> ({escape_html(cname)}){overdue}")
-            lines.append(f"  └ Started: {escape_html(elapsed)} | <a href=\"{url}\">Resume Test</a>")
-        lines.append("")
-
     # 1. Urgent Items
     urgent = briefing_data.get("urgent", [])
     if urgent:

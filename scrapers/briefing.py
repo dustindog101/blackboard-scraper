@@ -22,13 +22,6 @@ def format_briefing_cli(bundle: Dict[str, Any]) -> str:
         "━" * 60,
         "",
     ]
-    in_progress = bundle.get("in_progress_attempts", [])
-    if in_progress:
-        from scrapers.assessment import format_in_progress_alert_cli
-        alert = format_in_progress_alert_cli(in_progress)
-        if alert:
-            lines.insert(0, alert)
-
     activity = bundle.get("activity", [])
     calendar = bundle.get("calendar", [])
     courses = bundle.get("courses", {})
@@ -143,14 +136,6 @@ async def run_briefing_async(
         per_course_data = await worker_pool.execute_task_per_course(courses, _scrape_course)
 
         # Step 3: Build Consolidated Briefing Document
-        from scrapers.assessment import get_in_progress_attempts_api
-        open_attempts = await asyncio.to_thread(get_in_progress_attempts_api, courses=courses)
-        if open_attempts:
-            lines.append("## 🚨 In-Progress / Unfinished Attempts")
-            for att in open_attempts:
-                lines.append(f"- **{att['title']}** ({att['course_name']}) — _Started {att['elapsed_time_human']}_ — [Resume]({att['launcher_url']})")
-            lines.append("")
-
         urgent = [a for a in activity if "due" in a.get("title", "").lower() or a.get("due_date")]
         if urgent:
             lines.append("## 🚨 Urgent & Overdue")
@@ -209,7 +194,6 @@ async def run_briefing_async(
         "activity": activity,
         "calendar": calendar,
         "courses": per_course_data,
-        "in_progress_attempts": open_attempts,
     }
 
 
