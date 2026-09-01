@@ -224,8 +224,18 @@ class BlackboardMenuBarApp(_BaseApp):
             else:
                 self.item_bot_status.title = "🤖 Telegram Bot: 🔴 STOPPED"
 
-            # 4. Update Status Bar Title / Icon
-            if self.session_valid and self.bot_status["running"]:
+            # 4. Update Status Bar Title / Icon (flagging in-progress attempts)
+            open_attempts = []
+            if self.session_valid:
+                try:
+                    from scrapers.assessment import get_in_progress_attempts_api
+                    open_attempts = get_in_progress_attempts_api()
+                except Exception:
+                    pass
+
+            if open_attempts:
+                self.title = f"🎓 BB ⚠️ ({len(open_attempts)})"
+            elif self.session_valid and self.bot_status["running"]:
                 self.title = "🎓 BB 🟢"
             elif self.session_valid:
                 self.title = "🎓 BB 🟡"

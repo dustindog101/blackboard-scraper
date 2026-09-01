@@ -163,9 +163,7 @@ def _crawl_api_tree(
             })
 
         # Resolve external link URL
-        external_url: Optional[str] = None
-        if content_type == "link":
-            external_url = item.get("contentHandler", {}).get("url")
+        external_url: Optional[str] = item.get("contentHandler", {}).get("url")
 
         # Format links list for backward compatibility
         links: List[Dict[str, str]] = []

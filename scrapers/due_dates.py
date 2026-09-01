@@ -1,16 +1,23 @@
 import asyncio
+import json
 import logging
 import re
-from datetime import datetime
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from playwright.async_api import Page
 
+from core.config import BLACKBOARD_BASE, SESSION_DIR, load_courses
 from core.output import ensure_output_dir
 from scrapers.calendar import scrape_calendar_async
 from scrapers.grades import scrape_grades_async
 
 logger = logging.getLogger("blackboard.scrapers.due_dates")
+
+
+from scrapers.assessment import get_in_progress_attempts_api, format_in_progress_alert_cli
 
 
 def _normalize_title(title: str) -> str:
@@ -50,10 +57,12 @@ async def aggregate_due_dates_async(
     courses: Optional[Dict[str, str]] = None,
     window_filter: str = "7d",
     exclude_completed: bool = False,
+    include_in_progress: bool = True,
 ) -> List[Dict[str, Any]]:
     """
-    Aggregates deadlines across global calendar and course gradebooks.
+    Aggregates deadlines across global calendar, course gradebooks, and open attempts.
     Deduplicates records and applies window filters (e.g. 7d, 14d, 30d, overdue, all).
+    Pins in-progress attempts to the top with [IN-PROGRESS] indicator.
     """
     # 1. Scrape Global Calendar (HTTP fast-path with Playwright fallback)
     calendar_task = scrape_calendar_async(page)
@@ -113,7 +122,36 @@ async def aggregate_due_dates_async(
                     if g.get("grade") and g.get("grade") != "--":
                         combined[key]["grade"] = g.get("grade")
 
-    # 3. Filter items by window (e.g. 7d, 14d, overdue, all)
+    # 3. Check for in-progress attempts
+    open_attempts: List[Dict[str, Any]] = []
+    if include_in_progress:
+        open_attempts = await asyncio.to_thread(get_in_progress_attempts_api, courses=courses)
+        for att in open_attempts:
+            key = f"{_normalize_title(att['title'])}"
+            if key in combined:
+                combined[key]["status"] = "[IN-PROGRESS]"
+                combined[key]["is_in_progress"] = True
+                combined[key]["launcher_url"] = att.get("launcher_url")
+                combined[key]["elapsed_time_human"] = att.get("elapsed_time_human")
+                combined[key]["attempt_id"] = att.get("attempt_id")
+                combined[key]["course_name"] = att.get("course_name") or combined[key].get("course")
+            else:
+                combined[key] = {
+                    "title": att["title"],
+                    "course": att["course_name"],
+                    "course_name": att["course_name"],
+                    "due_date": att.get("due_date") or "Active Attempt",
+                    "raw_due": att.get("due_date") or "",
+                    "source": "in_progress_check",
+                    "status": "[IN-PROGRESS]",
+                    "grade": None,
+                    "is_in_progress": True,
+                    "launcher_url": att.get("launcher_url"),
+                    "elapsed_time_human": att.get("elapsed_time_human"),
+                    "attempt_id": att.get("attempt_id"),
+                }
+
+    # 4. Filter items by window (e.g. 7d, 14d, overdue, all)
     now = datetime.now().astimezone()
     window_lower = str(window_filter or "all").lower().strip()
 
@@ -127,6 +165,11 @@ async def aggregate_due_dates_async(
 
     results: List[Dict[str, Any]] = []
     for item in combined.values():
+        # In-progress attempts are ALWAYS preserved
+        if item.get("is_in_progress"):
+            results.insert(0, item)
+            continue
+
         if exclude_completed and item.get("status", "").lower() in ("graded", "submitted", "completed"):
             continue
 
@@ -149,11 +192,17 @@ async def aggregate_due_dates_async(
 
 
 def format_due_dates_table(items: List[Dict[str, Any]], window_filter: str = "7d") -> str:
-    """Formats aggregated due dates into a clean CLI table."""
-    lines = [
-        f"📅 Upcoming Deadlines & Due Dates ({window_filter.upper()})",
-        "━" * 60,
-    ]
+    """Formats aggregated due dates into a clean CLI table with in-progress highlights."""
+    in_progress = [it for it in items if it.get("is_in_progress") or it.get("status") == "[IN-PROGRESS]"]
+    banner = format_in_progress_alert_cli(in_progress) if in_progress else ""
+
+    lines = []
+    if banner:
+        lines.append(banner)
+
+    lines.append(f"📅 Upcoming Deadlines & Due Dates ({window_filter.upper()})")
+    lines.append("━" * 60)
+
     if not items:
         lines.append("  (No upcoming deadlines found in this window)")
         return "\n".join(lines)

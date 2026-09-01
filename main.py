@@ -46,6 +46,16 @@ from scrapers.outline import (
 from scrapers.assignments import scrape_course_assignments_async, save_assignments, format_assignments_summary
 from scrapers.due_dates import aggregate_due_dates_async, save_due_dates, format_due_dates_table
 from scrapers.search import find_items_async, grab_item_async
+from scrapers.assessment import (
+    inspect_assessment,
+    inspect_assessment_api,
+    format_assessment_cli,
+)
+from scrapers.syllabus import (
+    discover_syllabi_api,
+    format_syllabi_cli,
+    sync_syllabus_file,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +341,7 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     auth = parser.add_argument_group("authentication & session")
     auth.add_argument("--login", action="store_true", help="Login via UMBC SSO (skips if session is already active)")
     auth.add_argument("--logout", action="store_true", help="Logout (clear cached session cookies)")
-    auth.add_argument("--auto", "-a", action="store_true", help="With --login: automated SSO + Duo text passcode login")
+    auth.add_argument("--auto", action="store_true", help="With --login: automated SSO + Duo text passcode login")
     auth.add_argument("--auto-exp", "--login-auto-exp", action="store_true", help="[EXPERIMENTAL] Fully automated SSO login with real-time macOS SMS Duo 2FA capture")
     auth.add_argument("--force", action="store_true", help="With --login: force re-login even if session exists")
 
@@ -369,6 +379,9 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     scrapers.add_argument("--grab", "--download", metavar="ITEM_ID", help="Grab and download specific content item or file")
     scrapers.add_argument("--out-dir", default="downloads", help="Destination directory for downloaded course files (default: ./downloads)")
     scrapers.add_argument("--profile", action="store_true", help="Show student profile information")
+    scrapers.add_argument("--assessment", "-a", "--quiz", metavar="CONTENT_ID", help="Inspect assessment/quiz points, attempts, proctoring & status")
+    scrapers.add_argument("--syllabus", "-s", nargs="?", const="all", default=None, metavar="COURSE", help="Auto-discover course syllabus and extract policy text/links")
+    scrapers.add_argument("--sync", action="store_true", help="With --syllabus: download & mirror syllabus files locally to courses/<Course>/syllabus/")
 
     # --- item filtering & selection ---
     filt = parser.add_argument_group("filtering & course selection")
@@ -640,6 +653,45 @@ async def main_async(args: argparse.Namespace) -> None:
         else:
             # Default to clean CLI stdout digest
             print(format_briefing_cli(bundle))
+        return
+
+    # --- assessment inspector ---
+    if args.assessment:
+        target_course = args.course if args.course and not args.all else None
+        record = await inspect_assessment(
+            args.assessment,
+            course_id=target_course,
+            headless=headless,
+            cdp_url=cdp,
+            courses=courses,
+        )
+
+        if not record:
+            print(f"❌ Could not find or inspect assessment with ID '{args.assessment}'.", file=sys.stderr)
+            sys.exit(1)
+
+        if args.json or args.out:
+            _emit_json(args, record)
+        else:
+            print(format_assessment_cli(record))
+        return
+
+    # --- syllabus auto-discovery & sync ---
+    if args.syllabus is not None:
+        c_arg = None if args.syllabus == "all" else args.syllabus
+        is_all = args.all or args.syllabus == "all"
+        target_cids = resolve_target_courses(c_arg or args.course, is_all, courses)
+        syllabi = discover_syllabi_api(
+            course_id=target_cids[0] if len(target_cids) == 1 else None,
+            all_courses=len(target_cids) > 1,
+            sync=args.sync,
+            courses={cid: courses[cid] for cid in target_cids if cid in courses},
+        )
+
+        if args.json or args.out:
+            _emit_json(args, syllabi)
+        else:
+            print(format_syllabi_cli(syllabi))
         return
 
     # --- due dates aggregator ---
