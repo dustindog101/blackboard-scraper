@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from playwright.async_api import Page
 
-from core.config import BLACKBOARD_BASE, SESSION_DIR, load_courses
+from core.config import BLACKBOARD_BASE, load_courses
 from core.output import ensure_output_dir
 from core.async_engine import AdaptiveDOM
 from scrapers.quiz import _api_get, _get_cookie_header, _clean_html_text

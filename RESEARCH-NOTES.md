@@ -41,3 +41,9 @@
   2. **Multi-Folder Selective Expansion**: `filter_outline_by_folder` accepts natural folder titles (e.g. `-f "Start Here"` or `-f "Syllabus & Course Information"`). If multiple containers match a query (e.g. `-f "Module"`), it simultaneously expands and displays subtrees for all matching modules.
 
 
+
+## 8. REST Attempt Creation (researched 2026-09-09, NOT implemented)
+- **Researched**: Blackboard's public docs map "Create an Attempt" to `POST /learn/api/public/v2/courses/{courseId}/gradebook/columns/{columnId}/attempts` (SOAP `GradebookWS.saveAttempts` successor), with `PATCH .../attempts/{attemptId}` for updates. In principle `--start-attempt` could create attempts over pure REST with no browser.
+- **Why not wired**: (1) a public gradebook-row POST is not proven to initialize Ultra tool-question attempts the way the UI's internal `/learn/api/v1` flow does — risk of orphan gradebook rows; (2) any write path needs OAuth/XSRF handling the cookie-based client doesn't have; (3) the whole point of ADR 0003 is that REST is the provably-safe read-only lane. One accidental POST during a "just looking" run would violate the safety guarantee.
+- **Pattern Adopted**: `--start-attempt` with no existing attempt now falls through to the Playwright starter (fixed in `fix/quiz-fidelity-and-start`; previously it silently returned metadata-only). Timed exams still require `--force-start`. REST stays GET-only.
+- **Verified live**: `GET .../gradebook/attempts/_36086680_1?expand=toolAttemptDetail,alignedGoals` returns all 11 Module 3 questions, including `question.prompts[]` (Matching terms: Health/Wealth/Life span) and per-option boolean `givenAnswer` arrays on Multiple Answer items — so already-started attempts never need Playwright to be *read*.

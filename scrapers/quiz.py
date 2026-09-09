@@ -25,7 +25,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from playwright.async_api import Page
 
@@ -180,6 +180,10 @@ def _scrape_assessment_http(
     """
     Executes high-speed REST queries to retrieve full assessment metadata & question payload.
     Works for Quizzes/Tests, Assignments, and Discussions.
+    NOTE: allow_start is accepted for signature symmetry but intentionally
+    ignored here — this engine is GET-only and never creates attempts.
+    Attempt creation happens exclusively in the Playwright path, behind the
+    --start-attempt / --force-start guards (see scrape_assessment_attempt_async).
     """
     cookie_header = _get_cookie_header()
     if not cookie_header:
@@ -418,9 +422,15 @@ def _scrape_assessment_http(
     parsed_questions: List[Dict[str, Any]] = []
     total_calculated_points = 0.0
 
-    for qa in q_attempts:
-        q_num = qa.get("visibleQuestionNumber") or (len(parsed_questions) + 1)
+    # NOTE (for reviewers): numbering is positional, NOT visibleQuestionNumber.
+    # The API reuses visibleQuestionNumber across presentation blocks, so an
+    # instruction header and the first real question both reported number 1
+    # (seen live on AGNG Module 3, attempt _36086680_1). List position matches
+    # the order a student sees in Ultra.
+    for position, qa in enumerate(q_attempts, start=1):
+        q_num = position
         q_type_raw = qa.get("questionType", "")
+        q_type = _map_question_type(q_type_raw)
         q_info = qa.get("question", {})
 
         q_points = q_info.get("points")
@@ -435,7 +445,7 @@ def _scrape_assessment_http(
         raw_prompt = q_text_obj.get("rawText") or q_text_obj.get("displayText") or ""
         clean_prompt = _clean_html_text(raw_prompt)
 
-        # Options / Choices
+        # Options / Choices (right-hand definitions for Matching)
         choices: List[str] = []
         raw_answers = q_info.get("answers", [])
         if raw_answers:
@@ -445,16 +455,68 @@ def _scrape_assessment_http(
                     choices.append(_clean_html_text(ans_text))
                 elif isinstance(ans, str):
                     choices.append(_clean_html_text(ans))
-        elif _map_question_type(q_type_raw) == "True / False":
+        elif q_type == "True / False":
             choices = ["True", "False"]
 
-        # Given student answer
+        # Matching terms (left-hand side). The API splits a Matching question
+        # across two arrays: question.prompts[] holds the terms
+        # (promptText.rawText, e.g. "Health span") and question.answers[]
+        # holds the definitions. Previous code only read answers[], so the
+        # terms were silently dropped (verified against the live Module 3
+        # matching payload, question _23048955_1).
+        match_terms: List[str] = []
+        if q_type == "Matching":
+            for pr in q_info.get("prompts", []):
+                if isinstance(pr, dict):
+                    term_raw = pr.get("promptText", {}).get("rawText") or pr.get("promptText", {}).get("displayText") or ""
+                    term = _clean_html_text(term_raw)
+                    if term:
+                        match_terms.append(term)
+
+        # Given student answer. Newer payloads use the plural key
+        # givenAnswers (a list; empty = unanswered) instead of the legacy
+        # singular givenAnswer dict. Accept both so selected_answer is not
+        # spuriously null on in-progress attempts.
         given_raw = qa.get("givenAnswer")
+        if given_raw is None:
+            plural = qa.get("givenAnswers") or []
+            plural_texts = []
+            for g in plural:
+                if isinstance(g, dict):
+                    t = g.get("answerText", {}).get("rawText") or g.get("text") or ""
+                    if t:
+                        plural_texts.append(_clean_html_text(t))
+                elif isinstance(g, str) and g.strip():
+                    plural_texts.append(_clean_html_text(g))
+            given_raw = plural_texts if plural_texts else None
         given_text: Optional[str] = None
         if isinstance(given_raw, dict):
             given_text = _clean_html_text(given_raw.get("rawText") or given_raw.get("displayText"))
         elif isinstance(given_raw, str):
             given_text = _clean_html_text(given_raw)
+        elif isinstance(given_raw, list):
+            # REVIEW: Multiple Answer items store one boolean per option,
+            # parallel to question.answers[] (verified live on Module 3 Q9:
+            # 4 options ↔ [false,false,false,false] = nothing picked yet).
+            # Zip flags to choice text instead of joining raw booleans.
+            if given_raw and all(isinstance(x, bool) for x in given_raw) and len(given_raw) == len(choices):
+                picked = [c for c, flag in zip(choices, given_raw) if flag]
+                given_text = "; ".join(picked) if picked else None
+                str_parts = []
+            else:
+                str_parts = []
+                for x in given_raw:
+                    if isinstance(x, bool):
+                        str_parts.append(str(x))
+                    elif isinstance(x, str) and x.strip():
+                        str_parts.append(_clean_html_text(x))
+                    elif isinstance(x, dict):
+                        t = x.get("answerText", {}).get("rawText") or x.get("text") or ""
+                        if t:
+                            str_parts.append(_clean_html_text(t))
+                    elif x is not None:
+                        str_parts.append(str(x))
+                given_text = "; ".join(str_parts) if str_parts else None
 
         correct_ans = qa.get("correctAnswer") or qa.get("correctAnswers")
 
@@ -463,9 +525,10 @@ def _scrape_assessment_http(
             "label": f"Question {q_num}",
             "points": f"{q_points} Points" if q_points is not None else "",
             "points_value": q_points,
-            "type": _map_question_type(q_type_raw),
+            "type": q_type,
             "prompt": clean_prompt,
             "choices": choices,
+            "match_terms": match_terms,
             "selected_answer": given_text,
             "correct_answer": correct_ans,
             "id": qa.get("id", ""),
@@ -771,7 +834,21 @@ async def scrape_assessment_attempt_async(
                 allow_start=allow_start,
             )
             if http_result:
-                return http_result
+                # REVIEW (spec fix): an explicit --start-attempt must never
+                # silently degrade to metadata-only. REST is read-only by
+                # design (GETs only; creating attempts via POST /attempts is
+                # documented in the Blackboard API but deliberately NOT wired
+                # — see RESEARCH-NOTES §6), so when the user asked to start
+                # and no attempt exists, fall through to the Playwright
+                # starter below, which enforces the timed-exam --force-start
+                # guard before clicking anything.
+                if allow_start and not http_result.get("attempt_id"):
+                    logger.warning(
+                        "No attempt exists yet and --start-attempt was given: "
+                        "REST cannot create attempts, continuing in the browser..."
+                    )
+                else:
+                    return http_result
         except Exception as e:
             logger.debug(f"HTTP REST assessment fast-path failed: {e}")
 
@@ -906,6 +983,12 @@ def format_assessment_attempt_cli(data: Dict[str, Any]) -> str:
                     check = "🔘 [X]" if is_sel else "⚪ [ ]"
                     lines.append(f"    {check} {choice}")
 
+            match_terms = q.get("match_terms", [])
+            if match_terms:
+                lines.append("  Match terms:")
+                for term in match_terms:
+                    lines.append(f"    • {term}")
+
             if selected and not choices:
                 lines.append(f"  Your Response:\n    > {selected}")
 
@@ -966,7 +1049,7 @@ def save_assessment_attempt(data: Dict[str, Any], filepath: Optional[Path] = Non
             pts = f" ({q['points']})" if q.get("points") else ""
             lines.append(f"### Question {num}: {q_type}{pts}")
             lines.append("")
-            lines.append(f"**Prompt:**")
+            lines.append("**Prompt:**")
             lines.append(f"> {q.get('prompt', '').replace(chr(10), chr(10) + '> ')}")
             lines.append("")
 
@@ -984,6 +1067,13 @@ def save_assessment_attempt(data: Dict[str, Any], filepath: Optional[Path] = Non
 
                     box = "[x]" if is_sel else "[ ]"
                     lines.append(f"- {box} {choice}")
+                lines.append("")
+
+            match_terms = q.get("match_terms", [])
+            if match_terms:
+                lines.append("**Match terms:**")
+                for term in match_terms:
+                    lines.append(f"- {term}")
                 lines.append("")
 
             if selected and not choices:
