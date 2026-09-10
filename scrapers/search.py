@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from playwright.async_api import Page
@@ -22,7 +23,7 @@ async def find_items_async(
     Searches across courses for content items, assignments, documents, or files matching `query`.
     Searches item title, parent folder hierarchy, descriptions, and attachment filenames.
     """
-    print(f"🔍 Searching for '{query}' across {len(courses)} courses...")
+    print(f"🔍 Searching for '{query}' across {len(courses)} courses...", file=sys.stderr)
     query_lower = query.lower()
     matches: List[Dict[str, Any]] = []
 
@@ -50,7 +51,7 @@ async def find_items_async(
     for c_matches in results:
         matches.extend(c_matches)
 
-    print(f"   ✅ Found {len(matches)} matching items.")
+    print(f"   ✅ Found {len(matches)} matching items.", file=sys.stderr)
     return matches
 
 
@@ -69,9 +70,9 @@ async def grab_item_async(
 
     if len(search_courses) == 1:
         cid, cname = list(search_courses.items())[0]
-        print(f"📦 Grabbing item '{target_id_or_title}' in {cname} ({cid})...")
+        print(f"📦 Grabbing item '{target_id_or_title}' in {cname} ({cid})...", file=sys.stderr)
     else:
-        print(f"📦 Searching for '{target_id_or_title}' across {len(search_courses)} courses to download...")
+        print(f"📦 Searching for '{target_id_or_title}' across {len(search_courses)} courses to download...", file=sys.stderr)
 
     # Crawl target courses
     all_matches: List[Dict[str, Any]] = []
@@ -95,7 +96,7 @@ async def grab_item_async(
         all_matches.extend(c_found)
 
     if not all_matches:
-        print(f"   ❌ Item '{target_id_or_title}' not found in any searched course.")
+        print(f"   ❌ Item '{target_id_or_title}' not found in any searched course.", file=sys.stderr)
         return {"status": "not_found", "query": target_id_or_title}
 
     # If multiple matches found in different courses, ask user to disambiguate unless one is an exact ID match
@@ -110,10 +111,10 @@ async def grab_item_async(
         target_item = all_matches[0]
     else:
         # Multiple matches
-        print(f"   ⚠️ Found {len(all_matches)} matching items across courses for '{target_id_or_title}':")
+        print(f"   ⚠️ Found {len(all_matches)} matching items across courses for '{target_id_or_title}':", file=sys.stderr)
         for i, m in enumerate(all_matches, 1):
-            print(f"      {i}. [{m['course_name']}] {m['title']} (ID: {m['content_id']})")
-        print(f"   💡 Please specify course: bb download \"{target_id_or_title}\" -c <CourseID>")
+            print(f"      {i}. [{m['course_name']}] {m['title']} (ID: {m['content_id']})", file=sys.stderr)
+        print(f"   💡 Please specify course: bb download \"{target_id_or_title}\" -c <CourseID>", file=sys.stderr)
         return {
             "status": "multiple_matches",
             "query": target_id_or_title,
@@ -128,14 +129,14 @@ async def grab_item_async(
     content_id = target_item["content_id"]
     item_title = target_item["title"]
 
-    print(f"   ✅ Found: {item_title} [{target_item.get('content_type', 'item')}] in {cname}")
+    print(f"   ✅ Found: {item_title} [{target_item.get('content_type', 'item')}] in {cname}", file=sys.stderr)
 
     downloaded_files = []
     if download_dir:
         # Sanitize folder name
         safe_course_folder = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in cname).strip("_")
         target_dir = Path(download_dir) / safe_course_folder
-        print(f"   📥 Downloading files to {target_dir}...")
+        print(f"   📥 Downloading files to {target_dir}...", file=sys.stderr)
         downloaded_files = download_content_item_files(
             course_id=cid,
             content_id=content_id,
@@ -144,9 +145,9 @@ async def grab_item_async(
         )
         if downloaded_files:
             for df in downloaded_files:
-                print(f"   ✨ Saved: {df['saved_to']} ({df['size_bytes']:,} bytes)")
+                print(f"   ✨ Saved: {df['saved_to']} ({df['size_bytes']:,} bytes)", file=sys.stderr)
         else:
-            print(f"   ⚠️ No downloadable file attachments found for {item_title}.")
+            print(f"   ⚠️ No downloadable file attachments found for {item_title}.", file=sys.stderr)
 
     return {
         "status": "success" if downloaded_files else "found_no_attachments",

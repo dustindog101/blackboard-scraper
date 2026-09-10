@@ -1,5 +1,6 @@
 import asyncio
 import re
+import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -21,12 +22,12 @@ async def scrape_activity_async(page: Optional[Any] = None) -> List[Dict[str, An
             await session_manager.close()
 
     url = f"{BLACKBOARD_BASE}/ultra/stream"
-    print("🌊 Scraping Activity Stream...")
+    print("🌊 Scraping Activity Stream...", file=sys.stderr)
 
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
     except Exception as e:
-        print(f"   ⚠️ Navigation error for activity stream: {e}")
+        print(f"   ⚠️ Navigation error for activity stream: {e}", file=sys.stderr)
         return []
 
     matched_sel, _ = await AdaptiveDOM.wait_for_any_selector(
@@ -36,7 +37,7 @@ async def scrape_activity_async(page: Optional[Any] = None) -> List[Dict[str, An
     )
 
     if not matched_sel or "empty-state" in matched_sel or "No recent activity" in matched_sel:
-        print("   ℹ️  No stream activity items found.")
+        print("   ℹ️  No stream activity items found.", file=sys.stderr)
         return []
 
     # Adaptive infinite scroll to load all stream items as semester fills up
@@ -161,7 +162,7 @@ async def scrape_activity_async(page: Optional[Any] = None) -> List[Dict[str, An
 
         normalized.append(item_dict)
 
-    print(f"   ✅ Extracted {len(normalized)} activity items.")
+    print(f"   ✅ Extracted {len(normalized)} activity items.", file=sys.stderr)
     return normalized
 
 
@@ -203,4 +204,4 @@ def save_activity(activity: list[dict]):
             lines.append("")
 
     filepath.write_text("\n".join(lines))
-    print(f"   💾 Saved to: {filepath.name}")
+    print(f"   💾 Saved to: {filepath.name}", file=sys.stderr)

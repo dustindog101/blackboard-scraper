@@ -693,7 +693,7 @@ clean terminal UI by default, and standardized v2 JSON schemas.
 
     # --- bot ---
     bot_p = subparsers.add_parser("bot", help="Manage background Telegram bot daemon")
-    bot_p.add_argument("action", nargs="?", choices=["run", "start", "stop", "restart", "status"], default="run", help="Bot action ('start', 'stop', 'restart', 'status', 'run')")
+    bot_p.add_argument("action", nargs="?", choices=["run", "start", "stop", "restart", "status"], default="status", help="Bot action ('start', 'stop', 'restart', 'status', 'run')")
     bot_p.add_argument("--daemon", "-d", action="store_true", help="Run daemon detached in background")
 
     subparsers.add_parser("menubar", aliases=["app"], help="Launch native macOS Menubar app")
@@ -875,6 +875,24 @@ async def main_async(args: argparse.Namespace) -> None:
             await asyncio.to_thread(_handle_discover_courses, term_filter=getattr(args, "term", None), list_only=False, headless=headless, cdp=cdp)
             return
         if c_action == "terms":
+            if getattr(args, "json", False) or getattr(args, "out", None):
+                from core.course_discovery import discover_courses_via_api, get_current_term_name
+                courses_by_term = await asyncio.to_thread(discover_courses_via_api)
+                active_term = get_current_term_name(courses_by_term)
+                terms_payload = {
+                    "active_term": active_term,
+                    "terms": [
+                        {
+                            "term_name": tname,
+                            "is_active": (tname == active_term),
+                            "course_count": len(clist),
+                            "courses": [{"course_id": cid, "course_name": cname} for cid, cname in clist.items()],
+                        }
+                        for tname, clist in courses_by_term.items()
+                    ],
+                }
+                _emit_json(args, terms_payload)
+                return
             await asyncio.to_thread(_handle_discover_courses, term_filter=None, list_only=True, headless=headless, cdp=cdp)
             return
         # list courses
@@ -1241,6 +1259,8 @@ async def main_async(args: argparse.Namespace) -> None:
         )
         if getattr(args, "json", False) or getattr(args, "out", None):
             _emit_json(args, item)
+        if not item or item.get("status") in ("not_found", "multiple_matches", "error"):
+            sys.exit(1)
         return
 
     # --- announcements ---

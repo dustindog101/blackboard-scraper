@@ -102,12 +102,12 @@ async def scrape_grades_playwright_async(course_id: str, page: Any) -> List[Dict
     url = f"{BLACKBOARD_BASE}/ultra/courses/{course_id}/grades"
     courses = load_courses()
     name = courses.get(course_id, course_id)
-    print(f"🎓 Scraping grades for {name} (Playwright fallback)...")
+    print(f"🎓 Scraping grades for {name} (Playwright fallback)...", file=sys.stderr)
 
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
     except Exception as e:
-        print(f"   ⚠️ Navigation error for {name}: {e}")
+        print(f"   ⚠️ Navigation error for {name}: {e}", file=sys.stderr)
         return []
 
     # Wait for React/MUI table or empty state
@@ -123,7 +123,7 @@ async def scrape_grades_playwright_async(course_id: str, page: Any) -> List[Dict
     )
 
     if not matched_sel or "You can't access" in matched_sel:
-        print("   ℹ️  Course is currently unavailable or closed.")
+        print("   ℹ️  Course is currently unavailable or closed.", file=sys.stderr)
         return []
 
     grades: List[Dict[str, Any]] = []
@@ -174,7 +174,7 @@ async def scrape_grades_playwright_async(course_id: str, page: Any) -> List[Dict
         else:
             break
 
-    print(f"   ✅ Extracted {len(grades)} graded items from {name}.")
+    print(f"   ✅ Extracted {len(grades)} graded items from {name}.", file=sys.stderr)
     return grades
 
 
@@ -249,4 +249,4 @@ def save_grades(grades: list[dict], course_id: str):
             lines.append(f"| {safe_name} | {safe_due} | {safe_status} | {safe_grade} |")
 
     filepath.write_text("\n".join(lines))
-    print(f"   💾 Saved to: {filepath.name}")
+    print(f"   💾 Saved to: {filepath.name}", file=sys.stderr)

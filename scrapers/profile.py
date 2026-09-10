@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -74,7 +75,7 @@ def scrape_profile_api() -> Dict[str, Any]:
 def scrape_profile(page: Page) -> dict:
     """Scrape the user profile page via Playwright."""
     url = f"{BLACKBOARD_BASE}/ultra/profile"
-    print("👤 Scraping profile...")
+    print("👤 Scraping profile...", file=sys.stderr)
 
     if not _navigate_and_check_page(page, url):
         return {}
@@ -82,7 +83,7 @@ def scrape_profile(page: Page) -> dict:
     try:
         page.wait_for_selector("#main-heading, .data-row", state="attached", timeout=15_000)
     except PlaywrightTimeout:
-        print("   ⚠️  Timed out waiting for profile to load.")
+        print("   ⚠️  Timed out waiting for profile to load.", file=sys.stderr)
         return {}
 
     data = page.evaluate("""() => {
@@ -118,9 +119,9 @@ def scrape_profile(page: Page) -> dict:
     }""")
 
     if data:
-        print(f"   ✅ Found profile for: {data.get('name')}")
+        print(f"   ✅ Found profile for: {data.get('name')}", file=sys.stderr)
     else:
-        print("   ❌ Failed to extract profile data.")
+        print("   ❌ Failed to extract profile data.", file=sys.stderr)
 
     return data or {}
 
@@ -129,7 +130,7 @@ async def scrape_profile_async(page: Optional[Any] = None) -> Dict[str, Any]:
     """Unified profile fetcher with REST API fast path."""
     api_data = await asyncio.to_thread(scrape_profile_api)
     if api_data:
-        print(f"   ✅ Retrieved profile for: {api_data.get('name')} ({api_data.get('username')})")
+        print(f"   ✅ Retrieved profile for: {api_data.get('name')} ({api_data.get('username')})", file=sys.stderr)
         return api_data
 
     if page:
