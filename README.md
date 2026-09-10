@@ -78,14 +78,14 @@ playwright install chromium
 ### 2. Authenticate (One-Time)
 
 ```bash
-# Option A [Recommended on macOS]: Fully automated SSO + real-time macOS SMS Duo 2FA interception
-bb --auto-exp
+# Option A [Recommended on macOS]: Smart automated SSO + real-time macOS SMS Duo 2FA interception
+bb login
 
-# Option B: Automated SSO + terminal Duo SMS passcode entry
-bb --login --auto
+# Option B: Manual browser login to solve SSO & Duo manually / with Touch ID
+bb login --manual
 
-# Option C: Open visible browser window to solve SSO & Duo manually
-bb --login
+# Option C: Automated SSO + terminal Duo SMS passcode entry
+bb login auto
 ```
 
 ---
@@ -94,16 +94,16 @@ bb --login
 
 ```bash
 # Auto-discover your active semester courses
-bb --discover
+bb discover
 
 # Get your daily school briefing
-bb --briefing
+bb briefing
 
 # Check upcoming deadlines for the next 7 days
-bb --due 7d
+bb due 7d
 
-# View course outline and syllabi
-bb --outline -c IS410
+# View course outline and syllabi (positional course argument)
+bb outline IS410
 ```
 
 ---
@@ -117,13 +117,13 @@ bb --outline -c IS410
 
 ```bash
 # Check if current session is active (<120ms REST probe)
-bb --check-session
+bb check
 
 # View session creation, last-used, and telemetry lifespan stats
-bb --session-stats
+bb session stats
 
 # Clear session cookies to logout
-bb --logout
+bb logout
 ```
 
 ---
@@ -132,7 +132,7 @@ bb --logout
 
 By default, **no Markdown files are saved to disk**. Commands print directly to terminal `stdout`:
 
-### Outline Shallow View (`python3 main.py --outline -c IS410`):
+### Outline Shallow View (`bb outline IS410`):
 ```text
 📚 Course Outline: IS 410 Introduction to Database Design (_105737_1)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -141,10 +141,10 @@ By default, **no Markdown files are saved to disk**. Commands print directly to 
 ├── 📁 Lecture Slides & Notes [folder] [ID: _105741_1] (24 items: 24 files)
 └── 📁 Exam Review Materials [folder] [ID: _105742_1] (15 items: 10 files, 5 tests)
 
-💡 Tip: Use '--folder <name|ID>' to expand a folder, or '--expand-all' / '--deep' for full outline tree.
+💡 Tip: Use '-f <name|ID>' to expand a folder, or '--expand-all' / '--deep' for full outline tree.
 ```
 
-### Selective Folder View (`python3 main.py --outline -c IS410 -f "Homework"`):
+### Selective Folder View (`bb outline IS410 -f "Homework"`):
 ```text
 📚 Course Outline: IS 410 Introduction to Database Design (_105737_1) ➔ 📁 Homework & Assignments
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -153,7 +153,7 @@ By default, **no Markdown files are saved to disk**. Commands print directly to 
 └── 📎 Database Schema Template.sql [file] [ID: _105747_1]
 ```
 
-### Deadline Table View (`python3 main.py --due 7d`):
+### Deadline Table View (`bb due 7d`):
 ```text
 📅 Upcoming Deadlines & Due Dates (7D)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -240,99 +240,101 @@ When you need machine-readable structured data for LLM agents, dashboards, or ex
 
 ## 🔀 Smart Course Selection Syntax
 
-Target specific courses using codes, keywords, IDs, or comma-separated lists:
+Target specific courses using positional codes, keywords, IDs, or comma-separated lists:
 
 ```bash
-# 1. Target by Course Code
-python3 main.py --outline -c IS410
-python3 main.py --assignments -c ENGL100
-python3 main.py --grades -c "ECON 122"
+# 1. Target by Course Code (Positional or -c)
+bb outline IS410
+bb assignments ENGL100
+bb grades "ECON 122"
 
-# 2. Target Multiple Courses (Comma-separated)
-python3 main.py --outline -c IS410,ENGL100,MATH215
+# 2. Target Multiple Courses (Comma-separated via -c)
+bb outline -c IS410,ENGL100,MATH215
 
 # 3. Target by Fuzzy Title Keyword
-python3 main.py --outline -c Database
-python3 main.py --grades -c Accounting
+bb outline -c Database
+bb grades -c Accounting
 
 # 4. Target All Courses
-python3 main.py --outline --all
-python3 main.py --assignments --all
+bb outline --all
+bb assignments --all
 ```
 
 ---
 
 ## 📚 Scraper Feature Reference
 
-### 1. Composite Daily Briefing (`--briefing`)
+### 1. Composite Daily Briefing (`bb briefing`)
 Runs global activity, calendar, course announcements, and grades concurrently:
 ```bash
-python3 main.py --briefing                          # Terminal UI
-python3 main.py --briefing --json                   # JSON to stdout
-python3 main.py --briefing --out briefing.json      # JSON to file
-python3 main.py --briefing --telegram               # Push to Telegram
+bb briefing                          # Terminal UI
+bb briefing --json                   # JSON to stdout
+bb briefing --out briefing.json      # JSON to file
+bb briefing --telegram               # Push to Telegram
 ```
 
-### 2. Course Outline & Selective Folder Explorer (`--outline`)
+### 2. Course Outline & Selective Folder Explorer (`bb outline`)
 Traverses course outlines with smart shallow summary views, folder item counting, selective folder expansion, and interactive browsing:
 ```bash
-python3 main.py --outline -c IS410                  # Shallow summary with folder item counts (Default)
-python3 main.py --outline -c IS410 -f "Homework"     # Selectively expand specific folder by name
-python3 main.py --outline -c IS410 -f _105740_1      # Selectively expand specific folder by ID
-python3 main.py --outline -c IS410 --expand-all     # Deep recursive tree (all folders expanded)
-python3 main.py --outline -c IS410 --depth 2        # Limit expansion to 2 depth levels
-python3 main.py --outline -c IS410 -i               # Interactive terminal folder explorer menu
-python3 main.py --outline --all                     # All courses
-python3 main.py --outline --all --type syllabus     # Syllabi only
-python3 main.py --outline --all --type assignment   # Assignments only
-python3 main.py --outline --all --type document     # Lecture docs only
-python3 main.py --outline --all --filter "Homework" # Search keyword
+bb outline IS410                     # Shallow summary with folder item counts (Default)
+bb outline IS410 -f "Homework"       # Selectively expand specific folder by name
+bb outline IS410 -f _105740_1        # Selectively expand specific folder by ID
+bb outline IS410 --expand-all        # Deep recursive tree (all folders expanded)
+bb outline IS410 --depth 2           # Limit expansion to 2 depth levels
+bb outline IS410 -i                  # Interactive terminal folder explorer menu
+bb outline --all                     # All courses
+bb outline --all --type syllabus     # Syllabi only
+bb outline --all --type assignment   # Assignments only
+bb outline --all --type document     # Lecture docs only
+bb outline --all --filter "Homework" # Search keyword
 ```
 
-### 3. Deep Assignment & Rubric Inspector (`--assignments`)
+### 3. Deep Assignment & Rubric Inspector (`bb assignments`)
 Safely inspects assessment slideover drawers without triggering timed tests:
 ```bash
-python3 main.py --assignments --all
-python3 main.py --assignments -c IS410 --json
+bb assignments --all
+bb assignments IS410 --json
 ```
 
-### 4. Cross-Course Deadline Aggregator (`--due`)
+### 4. Cross-Course Deadline Aggregator (`bb due`)
 Aggregates deadlines across global calendar, course gradebooks, and outlines:
 ```bash
-python3 main.py --due 7d                            # Deadlines in next 7 days
-python3 main.py --due 14d                           # Deadlines in next 14 days
-python3 main.py --due overdue                       # Overdue items
-python3 main.py --due 7d --exclude-completed        # Exclude graded/submitted
+bb due 7d                            # Deadlines in next 7 days
+bb due 14d                           # Deadlines in next 14 days
+bb due overdue                       # Overdue items
+bb due 7d --exclude-completed        # Exclude graded/submitted
 ```
 
 ### 5. Course Announcements & Grades
 ```bash
-python3 main.py --announcements --all
-python3 main.py --grades -c IS410
-python3 main.py --grades --all --json
+bb announcements                     # Announcements across all courses
+bb announcements ECON122             # Announcements for single course
+bb grades                            # Grades across all courses
+bb grades IS410                      # Grades for single course
+bb grades --json                     # Structured JSON output
 ```
 
-### 6. Omnisearch Across Courses (`--find`)
+### 6. Omnisearch Across Courses (`bb search`)
 Search across all course titles, modules, and assignment descriptions:
 ```bash
-bb --find "Project"
-bb --find "Syllabus"
+bb search "Project"
+bb search "Syllabus"
 ```
 
-### 7. Direct Course File Downloader (`--download`)
+### 7. Direct Course File Downloader (`bb download`)
 Automatically locates course and downloads attachments, PDFs, or Jupyter notebooks:
 ```bash
-bb --download "Worksheet_1.pdf"
-bb --download _8825690_1             # Download by exact Blackboard item ID
+bb download "Worksheet_1.pdf"
+bb download _8825690_1               # Download by exact Blackboard item ID
 ```
 
-### 8. Course Discovery & Active Term Isolation (`--discover`)
+### 8. Course Discovery & Active Term Isolation (`bb discover`)
 Intelligently queries Blackboard REST API and auto-populates `config.json` with active courses:
 ```bash
-bb --discover                       # Auto-detect current active term
-bb --discover --term FA2026         # Filter to specific semester
-bb --list-terms                     # List all lifetime enrolled terms & courses
-bb --courses                        # View configured courses
+bb discover                          # Auto-detect current active term
+bb discover --term FA2026            # Filter to specific semester
+bb terms                             # List all lifetime enrolled terms & courses
+bb courses                           # View configured courses
 ```
 
 ---
@@ -370,11 +372,11 @@ The Telegram integration requires **zero external pip packages** and is complete
 
 ### 2. Manage Bot Daemon
 ```bash
-bb --bot -d           # Start Telegram bot daemon in background
-bb --bot-status       # Check daemon status, PID, and RSS memory
-bb --bot-restart      # Restart daemon and broadcast rich card
-bb --bot-stop         # Stop running daemon
-bb --bot              # Run bot directly in foreground
+bb bot start          # Start Telegram bot daemon in background
+bb bot status         # Check daemon status, PID, and RSS memory
+bb bot restart        # Restart daemon and broadcast rich card
+bb bot stop           # Stop running daemon
+bb bot                # Run bot directly in foreground
 ```
 
 ### 3. Interactive Telegram Commands:
@@ -389,7 +391,7 @@ bb --bot              # Run bot directly in foreground
 
 ---
 
-## 🖥️ Optional macOS Menubar App (`--menubar`)
+## 🖥️ Optional macOS Menubar App (`bb menubar`)
 
 For macOS users who want background status monitoring and click-to-scrape controls in their macOS menu bar (`🎓 BB 🟢`):
 
@@ -400,60 +402,60 @@ pip install -e .[menubar]
 pip install rumps
 
 # Launch Menubar app
-bb --menubar
+bb menubar
 ```
 
 ---
 
-## 📋 Complete CLI Flag Reference
+## 📋 Complete CLI Command Reference
 
-| Category | Flag | Description |
-| :--- | :--- | :--- |
-| **Help & Guides** | `--guide {auth,courses,schema,telegram,concurrency}` | Show detailed topic manuals |
-| **Authentication** | `--login` | Login via UMBC SSO (skips if active) |
-| | `--login --auto` | Automated SSO + Duo SMS passcode entry |
-| | `--auto-exp` | Fully automated SSO + real-time macOS SMS Duo 2FA interception |
-| | `--duo-passcode <code>` | Supply 6-digit Duo SMS code directly |
-| | `--check-session` | Validate session cookies via fast HTTP probe (<120ms) |
-| | `--session-info` | Display session timestamps |
-| | `--session-stats` | Deep session telemetry & lifespan analytics |
-| | `--logout` | Clear session cookies |
-| **Course Discovery** | `--discover` | Auto-discover active semester courses & save to `config.json` |
-| | `--term <TERM>` | Filter discovery by academic term (`FA2026`, `current`, `all`) |
-| | `--list-terms` | List all lifetime enrolled terms & courses |
-| | `--courses` | List configured courses and IDs |
-| **Scrapers** | `--briefing` | High-speed concurrent school briefing |
-| | `--due [WINDOW]` | Upcoming deadlines (`7d`, `14d`, `overdue`) |
-| | `--outline` | Full course outline tree, syllabi, and files |
-| | `--assignments` | Assignment details, rubrics, points, starter files |
-| | `--grades` | Gradebook items and scores |
-| | `--announcements` | Course announcements |
-| | `--activity` | Homepage activity stream |
-| | `--calendar` | Global calendar items |
-| | `--find, --search <query>` | Omnisearch across all courses |
-| | `--download, --grab <item>` | Direct file/attachment downloader |
-| | `--profile` | Student profile information |
-| **Selection & Filter**| `--course, -c <ID/Code>` | Target course(s) (e.g. `IS410` or `IS410,ENGL100`) |
-| | `--all` | Target all configured courses |
-| | `--folder, -f <query>` | Expand specific folder/module by name or ID |
-| | `--expand-all, --deep` | Recursively expand all folders (full tree view) |
-| | `--depth <N>` | Limit display expansion to `<N>` depth levels |
-| | `--interactive, -i` | Interactive terminal folder browser menu |
-| | `--type <type>` | Filter outline by type (`syllabus`, `document`, `assignment`, `folder`) |
-| | `--filter <text>` | Filter items by keyword substring |
-| **Output Formats** | `--json` | Output structured JSON to CLI stdout |
-| | `--out <file>` | Export structured JSON directly to file |
-| | `--md`, `--save` | Save Markdown reports to `output/` directory |
-| | `--compact` | Minified JSON output |
-| **Performance** | `--concurrency <N>` | Override dynamic worker pool size |
-| | `--visible, -v` | Launch visible browser window for debugging |
-| **GUI & Menubar** | `--menubar` | Launch optional native macOS Menubar app |
-| **Telegram** | `--telegram` | Send briefing/alerts to configured chat |
-| | `--bot` | Launch interactive Telegram bot |
-| | `--bot -d` | Launch Telegram bot daemon in background |
-| | `--bot-status` | Inspect running bot daemon PID and memory |
-| | `--bot-restart` | Gracefully restart bot daemon |
-| | `--bot-stop` | Stop background bot daemon |
+All commands support natural subcommands. Legacy `--flags` (e.g. `bb --briefing`, `bb --auto-exp`) remain 100% backward compatible.
+
+| Category | Canonical Command | Legacy Flag | Description |
+| :--- | :--- | :--- | :--- |
+| **Authentication** | `bb login` | `--auto-exp` | Smart automated SSO + macOS SMS 2FA interception |
+| | `bb login --manual` | `--login` | Open browser window for SSO / Duo manual push |
+| | `bb login auto` | `--login --auto` | Automated SSO + terminal Duo passcode prompt |
+| | `bb check` | `--check-session` | Validate session cookies via fast HTTP probe (<120ms) |
+| | `bb session info` | `--session-info` | Display session timestamps |
+| | `bb session stats` | `--session-stats` | Deep session telemetry & lifespan analytics |
+| | `bb logout` | `--logout` | Clear cached session cookies |
+| **Course Discovery** | `bb discover` | `--discover` | Auto-discover active semester courses & save to `config.json` |
+| | `bb discover --term <T>` | `--term <TERM>` | Filter discovery by academic term (`FA2026`, `all`) |
+| | `bb terms` | `--list-terms` | List all lifetime enrolled terms & courses |
+| | `bb courses` | `--courses` | List configured courses and IDs |
+| **Scrapers** | `bb briefing` | `--briefing` | High-speed concurrent school briefing |
+| | `bb due [WINDOW]` | `--due [WINDOW]` | Upcoming deadlines (`7d`, `14d`, `overdue`) |
+| | `bb outline [COURSE]` | `--outline -c <C>` | Full course outline tree, syllabi, and files |
+| | `bb assignments [COURSE]` | `--assignments -c <C>` | Assignment details, rubrics, points, starter files |
+| | `bb grades [COURSE]` | `--grades -c <C>` | Gradebook items and scores |
+| | `bb announcements [COURSE]` | `--announcements` | Course announcements |
+| | `bb activity` | `--activity` | Homepage activity stream |
+| | `bb calendar [COURSE]` | `--calendar` | Global calendar items |
+| | `bb search <QUERY>` | `--search <query>` | Omnisearch across all courses |
+| | `bb download <ITEM>` | `--download <item>` | Direct file/attachment downloader |
+| | `bb profile` | `--profile` | Student profile information |
+| **Course Selection** | `<COURSE>` / `-c <CODE>` | `-c <ID/Code>` | Target course(s) (e.g. `IS410` or `-c IS410,ENGL100`) |
+| | `--all` | `--all` | Target all configured courses |
+| **Outline Controls** | `-f, --folder <query>` | `--folder, -f` | Expand specific folder/module by name or ID |
+| | `--expand-all, --deep` | `--expand-all` | Recursively expand all folders (full tree view) |
+| | `--depth <N>` | `--depth <N>` | Limit display expansion to `<N>` depth levels |
+| | `-i, --interactive` | `-i` | Interactive terminal folder browser menu |
+| | `--type <type>` | `--type <type>` | Filter outline by type (`syllabus`, `document`, `assignment`, `folder`) |
+| | `--filter <text>` | `--filter <text>` | Filter items by keyword substring |
+| **Output Formats** | `--json` | `--json` | Output structured JSON to CLI stdout |
+| | `--out <file>` | `--out <file>` | Export structured JSON directly to file |
+| | `--md`, `--save` | `--md`, `--save` | Save Markdown reports to `output/` directory |
+| | `--compact` | `--compact` | Minified JSON output |
+| **Performance** | `--concurrency <N>` | `--concurrency` | Override dynamic worker pool size |
+| | `-v, --visible` | `-v, --visible` | Launch visible browser window for debugging |
+| **Daemon & Menubar** | `bb bot start` | `--bot-start` | Launch Telegram bot daemon in background |
+| | `bb bot status` | `--bot-status` | Inspect running bot daemon PID and memory |
+| | `bb bot restart` | `--bot-restart` | Gracefully restart bot daemon |
+| | `bb bot stop` | `--bot-stop` | Stop background bot daemon |
+| | `bb bot` | `--bot` | Launch interactive Telegram bot in foreground |
+| | `bb menubar` | `--menubar` | Launch optional native macOS Menubar app |
+| **Help & Guides** | `bb guide <TOPIC>` | `--guide <TOPIC>` | Show detailed topic manuals (`auth`, `courses`, `schema`, etc.) |
 
 ---
 

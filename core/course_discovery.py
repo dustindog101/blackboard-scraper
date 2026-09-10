@@ -35,7 +35,7 @@ def discover_courses_via_api() -> Dict[str, Dict[str, str]]:
     """
     cookie_header = get_cookie_header()
     if not cookie_header:
-        raise RuntimeError("No session cookies found. Please run `python3 main.py --login` first.")
+        raise RuntimeError("No session cookies found. Please run `bb login` first.")
 
     headers = {
         "Cookie": cookie_header,

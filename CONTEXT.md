@@ -44,3 +44,19 @@ _Avoid_: Date cutoff, range parameter
 A unified deadline aggregation engine combining global calendar events (`/calendars/items`) with per-course gradebook columns into a single deduplicated schedule.
 _Avoid_: Multi-scraper, calendar merger
 
+**Subcommand**:
+A first-class positional noun or verb identifying the primary operation to execute (e.g. `login`, `due`, `grades`, `outline`, `bot`).
+_Avoid_: Root flag command, option trigger
+
+**Legacy Flag Interceptor**:
+A transparent pre-parsing compatibility layer that maps deprecated root double-dash flags to canonical subcommands without breaking existing caller scripts.
+_Avoid_: Flag converter, shim script
+
+**Smart Login**:
+Automated headless SSO authentication leveraging monotonic macOS Messages SQLite delta tracking to intercept Duo 2FA SMS passcodes in <3ms.
+_Avoid_: Auto-exp, experimental login
+
+**Daemon Command Group**:
+The hierarchical subcommands (`start`, `stop`, `restart`, `status`, `run`) controlling background daemon lifecycles.
+_Avoid_: Bot flag flags, daemon options
+

@@ -167,51 +167,53 @@ HELP_GUIDES: Dict[str, str] = {
    - All CLI commands, background cron jobs, and Telegram bot commands run
      completely in the background with zero browser popups and zero user intervention.
 
-2. One-Time Setup & Automated SSO Logins:
-   $ python3 main.py --auto-exp
-   - If no config or login is detected, a template config.json is automatically created.
-   - Launches an interactive TUI setup wizard to enter UMBC email/username and password.
+2. One-Time Setup & Smart Automated SSO Login:
+   $ bb login
+   - If no config or login is detected, an interactive TUI setup wizard prompts for UMBC credentials.
    - Automatically intercepts incoming macOS Duo 2FA SMS passcodes in <3ms.
    - Saves cookies for seamless headless operation.
+   - Accepts mode variants: `bb login auto`, `bb login --auto`, `bb login --force`.
 
-3. Standard Automated Login:
-   $ python3 main.py --login --auto
-   - Automatically fills your UMBC username and password on WebAuth.
-   - Dispatches Duo 2FA SMS passcode to your phone.
-   - Accepts 6-digit passcode via macOS SMS capture, Telegram reply, or terminal prompt.
-
-4. Visible Manual Login Fallback:
-   $ python3 main.py --login
+3. Visible Manual Login Fallback:
+   $ bb login --manual   (or `bb login manual`)
    - Opens a visible browser if you prefer Duo Push, TouchID, or Security Keys.
+
+4. Session Health & Telemetry:
+   $ bb check            (or `bb session check`)
+   $ bb session stats    (displays rolling lifespan metrics)
 """,
     "courses": """
 🔀 Smart Course Selection Syntax:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 You can target courses in multiple flexible ways:
 
-• Target by Course Code:
-  $ python3 main.py --outline -c IS410
-  $ python3 main.py --assignments -c ENGL100
-  $ python3 main.py --grades -c "ECON 122"
+• Target by Positional Course Code (Zero Flags!):
+  $ bb outline IS410
+  $ bb assignments ENGL100
+  $ bb grades "ECON 122"
+
+• Target by -c / --course Option:
+  $ bb outline -c IS410
+  $ bb grades -c MATH215
 
 • Target Multiple Courses (Comma-Separated):
-  $ python3 main.py --outline -c IS410,ENGL100,MATH215
-  $ python3 main.py --assignments -c IS410,STAT351
+  $ bb outline IS410,ENGL100,MATH215
+  $ bb assignments IS410,STAT351
 
 • Target by Fuzzy Title Keyword:
-  $ python3 main.py --outline -c Database
-  $ python3 main.py --grades -c Accounting
+  $ bb outline Database
+  $ bb grades Accounting
 
 • Target All Configured Courses:
-  $ python3 main.py --outline --all
-  $ python3 main.py --briefing
+  $ bb outline --all
+  $ bb briefing
 """,
     "schema": """
 📦 Standardized v2 JSON Schemas:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Output clean JSON to stdout (--json) or export to file (--out <path>):
 
-• Full Composite Document (--briefing --json):
+• Full Composite Document (bb briefing --json):
   {
     "version": "2.0",
     "generated_at": 1786938000,
@@ -222,10 +224,10 @@ Output clean JSON to stdout (--json) or export to file (--out <path>):
     "global": { "activity_stream": [...], "calendar_due_dates": [...] }
   }
 
-• Targeted Deadline Items (--due 7d --json):
+• Targeted Deadline Items (bb due 7d --json):
   { "version": "2.0", "total_items": 3, "items": [ { "title": "...", "course": "...", "due_date": "..." } ] }
 
-• Targeted Outline Trees (--outline -c IS410 --json):
+• Targeted Outline Trees (bb outline IS410 --json):
   [ { "course_id": "_105737_1", "course_name": "IS 410", "items": [ { "title": "...", "content_type": "folder", "depth": 0 } ] } ]
 """,
     "telegram": """
@@ -241,9 +243,11 @@ Output clean JSON to stdout (--json) or export to file (--out <path>):
    }
 
 2. Launch Bot Daemon:
-   $ python3 main.py --bot
-   # or
-   $ python3 telegram_bot.py
+   $ bb bot start        (runs detached in background)
+   $ bb bot status       (checks running PID and memory)
+   $ bb bot stop         (gracefully stops background bot)
+   $ bb bot restart      (reloads daemon)
+   $ bb bot run          (runs interactively in foreground)
 
 3. Supported Bot Commands:
    /briefing           - Trigger concurrent school briefing
@@ -276,10 +280,217 @@ The engine selects optimal worker profiles and auto-tunes dynamically:
 
 
 # ---------------------------------------------------------------------------
-# CLI Argument Parser
+# Transparent Legacy Flag Interceptor & Subcommands Parser
 # ---------------------------------------------------------------------------
 
-def _parse_args() -> argparse.Namespace:
+def _intercept_legacy_args(argv: List[str]) -> Tuple[List[str], Optional[str]]:
+    """
+    Transparent pre-parsing compatibility layer. Maps deprecated root double-dash
+    flags (e.g. --briefing, --due 7d, --auto-exp, --bot-status) to canonical subcommands.
+    Returns (translated_argv, hint_command_string_if_legacy_detected).
+    """
+    if not argv:
+        return argv, None
+
+    subcommands = {
+        "login", "logout", "session", "check", "briefing", "brief", "due", "grades",
+        "announcements", "announce", "news", "outline", "assignments", "assign",
+        "search", "find", "download", "grab", "get", "calendar", "cal", "activity",
+        "profile", "whoami", "courses", "discover", "terms", "bot", "menubar", "app",
+        "guide", "help", "discussions", "discuss"
+    }
+    if argv[0] in subcommands:
+        return argv, None
+    if argv[0] in ("-h", "--help", "-v", "--version"):
+        return argv, None
+
+    new_argv = list(argv)
+    legacy_found = None
+
+    if "--auto-exp" in new_argv or "--login-auto-exp" in new_argv:
+        flag = "--auto-exp" if "--auto-exp" in new_argv else "--login-auto-exp"
+        new_argv.remove(flag)
+        new_argv.insert(0, "login")
+        legacy_found = "login"
+        if "--force" in new_argv or "-f" in new_argv:
+            legacy_found = "login --force"
+    elif "--login" in new_argv:
+        new_argv.remove("--login")
+        if "--auto" in new_argv:
+            new_argv.remove("--auto")
+            new_argv.insert(0, "auto")
+            legacy_found = "login auto"
+        elif "-a" in new_argv:
+            new_argv.remove("-a")
+            new_argv.insert(0, "auto")
+            legacy_found = "login auto"
+        elif "--visible" in new_argv:
+            new_argv.remove("--visible")
+            new_argv.insert(0, "--manual")
+            legacy_found = "login --manual"
+        else:
+            legacy_found = "login"
+        new_argv.insert(0, "login")
+    elif "--logout" in new_argv:
+        new_argv.remove("--logout")
+        new_argv.insert(0, "logout")
+        legacy_found = "logout"
+    elif "--check-session" in new_argv:
+        new_argv.remove("--check-session")
+        new_argv.insert(0, "check")
+        new_argv.insert(0, "session")
+        legacy_found = "session check"
+    elif "--session-stats" in new_argv or "--session-telemetry" in new_argv:
+        flag = "--session-stats" if "--session-stats" in new_argv else "--session-telemetry"
+        new_argv.remove(flag)
+        new_argv.insert(0, "stats")
+        new_argv.insert(0, "session")
+        legacy_found = "session stats"
+    elif "--session-info" in new_argv:
+        new_argv.remove("--session-info")
+        new_argv.insert(0, "info")
+        new_argv.insert(0, "session")
+        legacy_found = "session info"
+    elif "--briefing" in new_argv:
+        new_argv.remove("--briefing")
+        new_argv.insert(0, "briefing")
+        legacy_found = "briefing"
+    elif "--due" in new_argv:
+        idx = new_argv.index("--due")
+        new_argv.pop(idx)
+        window = "7d"
+        if idx < len(new_argv) and not new_argv[idx].startswith("-"):
+            window = new_argv.pop(idx)
+        new_argv.insert(0, window)
+        new_argv.insert(0, "due")
+        legacy_found = f"due {window}"
+    elif "--upcoming" in new_argv:
+        idx = new_argv.index("--upcoming")
+        new_argv.pop(idx)
+        days = "7d"
+        if idx < len(new_argv) and not new_argv[idx].startswith("-"):
+            days = f"{new_argv.pop(idx)}d"
+        new_argv.insert(0, days)
+        new_argv.insert(0, "due")
+        legacy_found = f"due {days}"
+    elif "--grades" in new_argv:
+        new_argv.remove("--grades")
+        new_argv.insert(0, "grades")
+        legacy_found = "grades"
+    elif "--announcements" in new_argv:
+        new_argv.remove("--announcements")
+        new_argv.insert(0, "announcements")
+        legacy_found = "announcements"
+    elif "--outline" in new_argv:
+        new_argv.remove("--outline")
+        new_argv.insert(0, "outline")
+        legacy_found = "outline"
+    elif "--assignments" in new_argv:
+        new_argv.remove("--assignments")
+        new_argv.insert(0, "assignments")
+        legacy_found = "assignments"
+    elif "--discussions" in new_argv:
+        new_argv.remove("--discussions")
+        new_argv.insert(0, "discussions")
+        legacy_found = "discussions"
+    elif "--calendar" in new_argv:
+        new_argv.remove("--calendar")
+        new_argv.insert(0, "calendar")
+        legacy_found = "calendar"
+    elif "--activity" in new_argv:
+        new_argv.remove("--activity")
+        new_argv.insert(0, "activity")
+        legacy_found = "activity"
+    elif "--profile" in new_argv:
+        new_argv.remove("--profile")
+        new_argv.insert(0, "profile")
+        legacy_found = "profile"
+    elif "--courses" in new_argv or "--list-courses" in new_argv:
+        flag = "--courses" if "--courses" in new_argv else "--list-courses"
+        new_argv.remove(flag)
+        new_argv.insert(0, "courses")
+        legacy_found = "courses"
+    elif "--discover" in new_argv or "--discover-courses" in new_argv:
+        flag = "--discover" if "--discover" in new_argv else "--discover-courses"
+        new_argv.remove(flag)
+        new_argv.insert(0, "discover")
+        legacy_found = "discover"
+    elif "--list-terms" in new_argv:
+        new_argv.remove("--list-terms")
+        new_argv.insert(0, "terms")
+        legacy_found = "terms"
+    elif "--find" in new_argv or "--search" in new_argv:
+        flag = "--find" if "--find" in new_argv else "--search"
+        idx = new_argv.index(flag)
+        new_argv.pop(idx)
+        query = ""
+        if idx < len(new_argv) and not new_argv[idx].startswith("-"):
+            query = new_argv.pop(idx)
+        new_argv.insert(0, query)
+        new_argv.insert(0, "search")
+        legacy_found = f"search {query}".strip()
+    elif "--grab" in new_argv or "--download" in new_argv:
+        flag = "--grab" if "--grab" in new_argv else "--download"
+        idx = new_argv.index(flag)
+        new_argv.pop(idx)
+        item = ""
+        if idx < len(new_argv) and not new_argv[idx].startswith("-"):
+            item = new_argv.pop(idx)
+        new_argv.insert(0, item)
+        new_argv.insert(0, "download")
+        legacy_found = f"download {item}".strip()
+    elif "--bot-start" in new_argv:
+        new_argv.remove("--bot-start")
+        new_argv.insert(0, "start")
+        new_argv.insert(0, "bot")
+        legacy_found = "bot start"
+    elif "--bot-status" in new_argv:
+        new_argv.remove("--bot-status")
+        new_argv.insert(0, "status")
+        new_argv.insert(0, "bot")
+        legacy_found = "bot status"
+    elif "--bot-stop" in new_argv:
+        new_argv.remove("--bot-stop")
+        new_argv.insert(0, "stop")
+        new_argv.insert(0, "bot")
+        legacy_found = "bot stop"
+    elif "--bot-restart" in new_argv:
+        new_argv.remove("--bot-restart")
+        new_argv.insert(0, "restart")
+        new_argv.insert(0, "bot")
+        legacy_found = "bot restart"
+    elif "--bot" in new_argv:
+        new_argv.remove("--bot")
+        if "-d" in new_argv:
+            new_argv.remove("-d")
+            new_argv.insert(0, "start")
+            legacy_found = "bot start"
+        elif "--daemon" in new_argv:
+            new_argv.remove("--daemon")
+            new_argv.insert(0, "start")
+            legacy_found = "bot start"
+        else:
+            new_argv.insert(0, "run")
+            legacy_found = "bot"
+        new_argv.insert(0, "bot")
+    elif "--menubar" in new_argv:
+        new_argv.remove("--menubar")
+        new_argv.insert(0, "menubar")
+        legacy_found = "menubar"
+    elif "--guide" in new_argv:
+        idx = new_argv.index("--guide")
+        new_argv.pop(idx)
+        topic = ""
+        if idx < len(new_argv) and not new_argv[idx].startswith("-"):
+            topic = new_argv.pop(idx)
+        new_argv.insert(0, topic)
+        new_argv.insert(0, "guide")
+        legacy_found = f"guide {topic}".strip()
+
+    return new_argv, legacy_found
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bb",
         description="""
@@ -293,125 +504,147 @@ clean terminal UI by default, and standardized v2 JSON schemas.
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 ═══════════════════════════════════════════════════════════════════════
-💡 QUICK START EXAMPLES (Global CLI: bb / blackboard / bbscraper)
+💡 CANONICAL SUBCOMMANDS (Global CLI: bb / blackboard / bbscraper)
 ═══════════════════════════════════════════════════════════════════════
-  bb --briefing                                       # Print high-speed briefing to CLI stdout
-  bb --due 7d                                         # Print upcoming deadlines table to CLI stdout
-  bb --outline -c MATH215                             # View shallow outline summary with folder counts
-  bb --outline -c MATH215 -f "Homework"               # Selectively expand a specific folder
-  bb --outline -c MATH215 --expand-all                # View full recursive outline tree
-  bb --outline -c MATH215 -i                          # Interactive terminal folder explorer
-  bb --outline -c MATH215 --json                      # Clean, compact outline JSON export
-  bb --search "Python"                                # Search content across all courses
-  bb --download "Chapter01.ipynb"                     # Auto-detects course and downloads file
-  bb --download _8825690_1                            # Download by exact Blackboard item ID
-  bb --grades -c MATH215                              # View gradebook and feedback
-  bb --profile                                        # View student profile (<150ms)
-  bb --auto-exp                                       # Fully automated SSO login + Duo 2FA SMS capture
-  bb --bot -d                                         # Launch Telegram bot daemon in background
+  bb briefing                                         # Print high-speed briefing to CLI stdout
+  bb due 7d                                           # Print upcoming deadlines table (defaults to 7d)
+  bb outline MATH215                                  # View shallow outline summary with folder counts
+  bb outline MATH215 -f "Homework"                    # Selectively expand a specific folder
+  bb outline MATH215 --expand-all                     # View full recursive outline tree
+  bb outline MATH215 -i                               # Interactive terminal folder explorer
+  bb search "Python"                                  # Search content across all courses
+  bb download "Chapter01.ipynb"                       # Auto-detects course and downloads file
+  bb grades MATH215                                   # View gradebook and feedback
+  bb announcements MATH215                            # View course announcements
+  bb profile                                          # View student profile (<150ms)
+  bb login                                            # Smart automated SSO login + Duo 2FA SMS capture
+  bb login --manual                                   # Manual visible browser login
+  bb bot start                                        # Launch Telegram bot daemon in background
+  bb session check                                    # Rapid session token validity probe
 
 📖 DETAILED TOPIC GUIDES:
-  bb --guide auth                                     # Authentication & Headless execution
-  bb --guide courses                                  # Course selection & multi-course syntax
-  bb --guide schema                                   # Standardized v2 JSON schemas
-  bb --guide telegram                                 # Telegram bot & notifications
-  bb --guide concurrency                              # Adaptive async worker engine
+  bb guide auth                                       # Authentication & Headless execution
+  bb guide courses                                    # Course selection & multi-course syntax
+  bb guide schema                                     # Standardized v2 JSON schemas
+  bb guide telegram                                   # Telegram bot & notifications
+  bb guide concurrency                                # Adaptive async worker engine
         """,
     )
 
-    raw_args = sys.argv[1:]
-    if "-auto" in raw_args:
-        parser.error("Use --auto (or -a). The token '-auto' is ambiguous.")
+    # Common parent parsers
+    output_parent = argparse.ArgumentParser(add_help=False)
+    output_parent.add_argument("--json", action="store_true", help="Output standardized JSON to CLI stdout")
+    output_parent.add_argument("--out", metavar="FILE", help="Save JSON output directly to FILE")
+    output_parent.add_argument("--md", "--save", dest="md", action="store_true", help="Save formatted markdown file(s) to output/ directory")
+    output_parent.add_argument("--raw", action="store_true", help="Output raw unformatted scraper data")
+    output_parent.add_argument("--compact", action="store_true", help="Emit minified JSON")
+    output_parent.add_argument("--source", default="blackboard-scraper", metavar="NAME", help="Value for the JSON source field")
 
-    # --- help guides ---
-    guides = parser.add_argument_group("help & documentation")
-    guides.add_argument("--guide", choices=["auth", "courses", "schema", "telegram", "concurrency"], help="Show comprehensive topic manual")
+    engine_parent = argparse.ArgumentParser(add_help=False)
+    engine_parent.add_argument("--concurrency", type=int, metavar="N", help="Override dynamic concurrency worker pool size")
+    engine_parent.add_argument("--visible", "-v", action="store_true", help="Show browser window (useful for debugging)")
+    engine_parent.add_argument("--cdp", help="Connect to existing browser via CDP URL")
 
-    # --- authentication ---
-    auth = parser.add_argument_group("authentication & session")
-    auth.add_argument("--login", action="store_true", help="Login via UMBC SSO (skips if session is already active)")
-    auth.add_argument("--logout", action="store_true", help="Logout (clear cached session cookies)")
-    auth.add_argument("--auto", "-a", action="store_true", help="With --login: automated SSO + Duo text passcode login")
-    auth.add_argument("--auto-exp", "--login-auto-exp", action="store_true", help="[EXPERIMENTAL] Fully automated SSO login with real-time macOS SMS Duo 2FA capture")
-    auth.add_argument("--force", action="store_true", help="With --login: force re-login even if session exists")
+    course_parent = argparse.ArgumentParser(add_help=False)
+    course_parent.add_argument("course_pos", nargs="?", metavar="COURSE", help="Course code or ID (e.g. IS410, MATH215)")
+    course_parent.add_argument("--course", "-c", help="Target course ID(s) or code(s)")
+    course_parent.add_argument("--all", action="store_true", help="Target all configured courses")
 
-    auth.add_argument("--username", "-u", help="Username for automated login (prompts if omitted)")
-    auth.add_argument("--password", "-p", help="Password for automated login (prompts if omitted)")
-    auth.add_argument("--duo-passcode", help="Provide 6-digit Duo SMS passcode directly via CLI")
-    auth.add_argument("--check-session", action="store_true", help="Test if current session cookies are valid")
-    auth.add_argument("--session-info", action="store_true", help="Show session creation & last used timestamps")
-    auth.add_argument("--session-stats", "--session-telemetry", action="store_true", help="Show session longevity statistics and average lifespan telemetry")
-    auth.add_argument("--debug", action="store_true", help="Print debug output (use with --check-session)")
+    subparsers = parser.add_subparsers(dest="subcommand", metavar="<command>")
 
+    # --- auth ---
+    login_p = subparsers.add_parser("login", parents=[engine_parent], help="Login via UMBC SSO (smart automated headless default)")
+    login_p.add_argument("mode", nargs="?", choices=["auto", "manual", "browser", "sms"], default="auto", help="Login mode ('auto' or 'manual')")
+    login_p.add_argument("--manual", action="store_true", help="Open visible browser window for manual 2FA")
+    login_p.add_argument("--auto", "-a", action="store_true", help="Automated SSO login (default)")
+    login_p.add_argument("--force", "-f", action="store_true", help="Force re-login even if active session exists")
+    login_p.add_argument("--username", "-u", help="Username for login (prompts if omitted)")
+    login_p.add_argument("--password", "-p", help="Password for login (prompts if omitted)")
+    login_p.add_argument("--duo-passcode", help="Provide 6-digit Duo SMS passcode directly via CLI")
 
-    # --- discovery ---
-    disc = parser.add_argument_group("course discovery")
-    disc.add_argument("--discover", "--discover-courses", action="store_true", help="Auto-discover and intelligently save current active semester courses")
-    disc.add_argument("--term", metavar="TERM", help="With --discover: filter academic term (e.g. 'current', 'FA2026', 'SP2026', 'all')")
-    disc.add_argument("--list-terms", action="store_true", help="List all enrolled academic terms and courses without modifying config.json")
-    disc.add_argument("--courses", "--list-courses", action="store_true", help="List configured courses and IDs")
+    subparsers.add_parser("logout", help="Logout (clear cached session cookies)")
 
+    # --- session ---
+    session_p = subparsers.add_parser("session", parents=[engine_parent], help="Session health probes, metadata, and telemetry")
+    session_p.add_argument("action", nargs="?", choices=["check", "stats", "info", "telemetry"], default="check", help="Session action ('check', 'stats', 'info')")
+    session_p.add_argument("--debug", action="store_true", help="Print debug output with check")
+
+    check_p = subparsers.add_parser("check", parents=[engine_parent], help="Quick session health check probe")
+    check_p.add_argument("--debug", action="store_true", help="Print debug output")
 
     # --- scrapers ---
-    scrapers = parser.add_argument_group("scrapers & features")
-    scrapers.add_argument("--briefing", action="store_true", help="Run high-speed concurrent daily briefing across all courses")
-    scrapers.add_argument("--activity", action="store_true", help="Scrape homepage activity stream")
-    scrapers.add_argument("--calendar", action="store_true", help="Scrape calendar due-dates")
-    scrapers.add_argument("--announcements", action="store_true", help="Scrape course announcements")
-    scrapers.add_argument("--grades", action="store_true", help="Scrape gradebook")
-    scrapers.add_argument("--discussions", action="store_true", help="Scrape course discussions")
-    scrapers.add_argument("--outline", action="store_true", help="Scrape full course outline, modules, syllabi, and files")
-    scrapers.add_argument("--assignments", action="store_true", help="Deep scrape assignments with prompts, rubrics, and files")
-    scrapers.add_argument("--due", nargs="?", const="7d", default=None, metavar="WINDOW", help="Aggregate cross-course due dates (e.g. 7d, 14d, overdue)")
-    scrapers.add_argument("--upcoming", type=int, metavar="DAYS", help="Alias for --due <N>d")
-    scrapers.add_argument("--exclude-completed", action="store_true", help="With --due: exclude submitted/graded items")
-    scrapers.add_argument("--find", "--search", metavar="QUERY", help="Search for content/assignments matching query across courses")
-    scrapers.add_argument("--grab", "--download", metavar="ITEM_ID", help="Grab and download specific content item or file")
-    scrapers.add_argument("--out-dir", default="downloads", help="Destination directory for downloaded course files (default: ./downloads)")
-    scrapers.add_argument("--profile", action="store_true", help="Show student profile information")
+    brief_p = subparsers.add_parser("briefing", aliases=["brief"], parents=[output_parent, engine_parent], help="Run concurrent daily briefing across all courses")
+    brief_p.add_argument("--telegram", action="store_true", help="Send briefing to Telegram")
 
-    # --- item filtering & selection ---
-    filt = parser.add_argument_group("filtering & course selection")
-    filt.add_argument("--course", "-c", help="Target course ID(s) or code(s), e.g. 'IS410' or 'IS410,ENGL100'")
-    filt.add_argument("--all", action="store_true", help="Run against all configured courses")
-    filt.add_argument("--folder", "-f", metavar="FOLDER", help="Expand specific folder or module by name or ID (e.g. -f 'Homework' or -f _105740_1)")
-    filt.add_argument("--expand-all", "--deep", "--all-folders", dest="expand_all", action="store_true", help="Expand all folders and display full recursive outline tree")
-    filt.add_argument("--depth", type=int, metavar="N", help="Limit outline display depth (e.g. --depth 1 for top-level, --depth 2 for 1 level inside)")
-    filt.add_argument("--interactive", "-i", action="store_true", help="Interactive terminal menu to select and explore course folders")
-    filt.add_argument("--type", help="Filter outline items by type (e.g. syllabus, document, assignment, folder, link)")
-    filt.add_argument("--filter", dest="keyword_filter", help="Filter items by text keyword")
+    due_p = subparsers.add_parser("due", parents=[output_parent, engine_parent], help="Aggregate cross-course due dates")
+    due_p.add_argument("window", nargs="?", default="7d", metavar="WINDOW", help="Relative date window (e.g. 7d, 14d, overdue, all; default: 7d)")
+    due_p.add_argument("--exclude-completed", action="store_true", help="Exclude submitted/graded items")
 
-    # --- performance & execution ---
-    perf = parser.add_argument_group("performance & execution")
-    perf.add_argument("--concurrency", type=int, metavar="N", help="Override dynamic concurrency worker pool size")
-    perf.add_argument("--visible", "-v", action="store_true", help="Show browser window (useful for debugging)")
-    perf.add_argument("--cdp", help="Connect to existing browser via CDP URL (e.g. http://localhost:9222)")
+    subparsers.add_parser("grades", parents=[course_parent, output_parent, engine_parent], help="Scrape course gradebook")
+    subparsers.add_parser("announcements", aliases=["announce", "news"], parents=[course_parent, output_parent, engine_parent], help="Scrape course announcements")
 
-    # --- telegram integration ---
-    tg = parser.add_argument_group("telegram integration")
-    tg.add_argument("--telegram", action="store_true", help="Send briefing/results to configured Telegram chat")
-    tg.add_argument("--bot", action="store_true", help="Start the interactive Telegram bot daemon")
-    tg.add_argument("--daemon", "-d", action="store_true", help="With --bot: run daemon detached in background")
-    tg.add_argument("--bot-status", action="store_true", help="Check running status, PID, and memory of Telegram bot daemon")
-    tg.add_argument("--bot-stop", action="store_true", help="Gracefully stop background Telegram bot daemon")
-    tg.add_argument("--bot-restart", action="store_true", help="Restart background Telegram bot daemon")
+    outline_p = subparsers.add_parser("outline", parents=[course_parent, output_parent, engine_parent], help="Scrape course outline, modules, syllabi, and files")
+    outline_p.add_argument("--folder", "-f", metavar="FOLDER", help="Expand specific folder or module by name or ID")
+    outline_p.add_argument("--expand-all", "--deep", "--all-folders", dest="expand_all", action="store_true", help="Expand all folders into full tree")
+    outline_p.add_argument("--depth", type=int, metavar="N", help="Limit outline display depth")
+    outline_p.add_argument("--interactive", "-i", action="store_true", help="Interactive terminal menu to select and explore folders")
+    outline_p.add_argument("--type", help="Filter items by type (e.g. syllabus, document, assignment, folder, link)")
+    outline_p.add_argument("--filter", dest="keyword_filter", help="Filter items by text keyword")
+
+    assign_p = subparsers.add_parser("assignments", aliases=["assign"], parents=[course_parent, output_parent, engine_parent], help="Deep scrape assignments with prompts, rubrics, and files")
+    assign_p.add_argument("--filter", dest="keyword_filter", help="Filter assignments by keyword")
+
+    search_p = subparsers.add_parser("search", aliases=["find"], parents=[output_parent, engine_parent], help="Search for content/assignments matching query across courses")
+    search_p.add_argument("query", metavar="QUERY", help="Search query string")
+    search_p.add_argument("--type", help="Filter results by content type")
+
+    dl_p = subparsers.add_parser("download", aliases=["grab", "get"], parents=[output_parent, engine_parent], help="Grab and download specific content item or file")
+    dl_p.add_argument("item", metavar="ITEM_ID_OR_NAME", help="Content item ID or file title")
+    dl_p.add_argument("--out-dir", default="downloads", help="Destination directory (default: downloads)")
+
+    subparsers.add_parser("calendar", aliases=["cal"], parents=[course_parent, output_parent, engine_parent], help="Scrape calendar due-dates")
+    subparsers.add_parser("activity", parents=[output_parent, engine_parent], help="Scrape homepage activity stream")
+    subparsers.add_parser("profile", aliases=["whoami"], parents=[output_parent], help="Show student profile information")
+
+    disc_p = subparsers.add_parser("discussions", aliases=["discuss"], parents=[course_parent, output_parent, engine_parent], help="Scrape course discussions")
+    disc_p.add_argument("--max-posts", type=int, help="Maximum posts to click")
+    disc_p.add_argument("--max-parts", type=int, help="Maximum participants to click")
+    disc_p.add_argument("--posts-only", action="store_true", help="Scrape posts only")
+    disc_p.add_argument("--participants-only", action="store_true", help="Scrape participants only")
+    disc_p.add_argument("--titles-only", action="store_true", help="Scrape thread titles only")
+
+    # --- discovery ---
+    courses_p = subparsers.add_parser("courses", parents=[output_parent, engine_parent], help="Course configuration and discovery")
+    courses_p.add_argument("action", nargs="?", choices=["list", "discover", "terms"], default="list", help="Course action ('list', 'discover', 'terms')")
+    courses_p.add_argument("--term", metavar="TERM", help="Filter academic term (e.g. current, FA2026, all)")
+
+    disc_p = subparsers.add_parser("discover", parents=[engine_parent], help="Auto-discover and intelligently save current active semester courses")
+    disc_p.add_argument("--term", metavar="TERM", help="Filter academic term (e.g. current, FA2026, all)")
+
+    subparsers.add_parser("terms", parents=[engine_parent], help="List all lifetime enrolled academic terms and courses")
+
+    # --- bot ---
+    bot_p = subparsers.add_parser("bot", help="Manage background Telegram bot daemon")
+    bot_p.add_argument("action", nargs="?", choices=["run", "start", "stop", "restart", "status"], default="run", help="Bot action ('start', 'stop', 'restart', 'status', 'run')")
+    bot_p.add_argument("--daemon", "-d", action="store_true", help="Run daemon detached in background")
+
+    subparsers.add_parser("menubar", aliases=["app"], help="Launch native macOS Menubar app")
+
+    guide_p = subparsers.add_parser("guide", aliases=["help"], help="Show comprehensive topic manual")
+    guide_p.add_argument("topic", nargs="?", choices=["auth", "courses", "schema", "telegram", "concurrency"], help="Topic manual")
+
+    return parser
 
 
-    # --- menubar & gui ---
-    gui = parser.add_argument_group("gui & menubar")
-    gui.add_argument("--menubar", action="store_true", help="Launch native macOS Menubar app for Blackboard & Telegram bot")
+def _parse_args(args_list: Optional[List[str]] = None) -> argparse.Namespace:
+    raw_args = list(sys.argv[1:] if args_list is None else args_list)
+    translated_args, legacy_hint = _intercept_legacy_args(raw_args)
+    if legacy_hint and sys.stderr.isatty():
+        print(f"💡 Tip: You can run 'bb {legacy_hint}' directly without '--'.", file=sys.stderr)
 
-    # --- output formats & file saving ---
+    parser = _build_parser()
+    return parser.parse_args(translated_args)
 
-    output = parser.add_argument_group("output formats & file saving")
-    output.add_argument("--json", action="store_true", help="Output standardized JSON to CLI stdout (No files saved)")
-    output.add_argument("--out", metavar="FILE", help="Save JSON output directly to FILE")
-    output.add_argument("--md", "--save", dest="md", action="store_true", help="Save formatted markdown file(s) to output/ directory")
-    output.add_argument("--raw", action="store_true", help="Output raw unformatted scraper data")
-    output.add_argument("--compact", action="store_true", help="Emit minified JSON")
-    output.add_argument("--source", default="blackboard-scraper", metavar="NAME", help="Value for the JSON source field")
-
-    return parser.parse_args()
 
 
 # ---------------------------------------------------------------------------
@@ -469,67 +702,84 @@ def _handle_discover_courses(term_filter: str | None = None, list_only: bool = F
 # ---------------------------------------------------------------------------
 
 async def main_async(args: argparse.Namespace) -> None:
+    subcmd = getattr(args, "subcommand", None)
+
     # --- topic guides ---
-    if args.guide:
-        guide_text = HELP_GUIDES.get(args.guide)
+    topic = getattr(args, "topic", None) or getattr(args, "guide", None)
+    if subcmd in ("guide", "help") or topic:
+        guide_text = HELP_GUIDES.get(topic or "auth")
         if guide_text:
             print(guide_text.strip())
+        else:
+            print(f"Unknown guide topic '{topic}'. Available: auth, courses, schema, telegram, concurrency", file=sys.stderr)
         return
 
-    headless = not args.visible
-    cdp = args.cdp
+    headless = not getattr(args, "visible", False)
+    cdp = getattr(args, "cdp", None)
     courses = load_courses()
     if sys.platform != "win32" and os.path.exists("/tmp"):
         os.environ["TMPDIR"] = "/tmp"
 
     # --- telegram bot daemon management ---
-    if args.bot_status:
-        from telegram.daemon import get_bot_status
-        status = get_bot_status()
-        if status["running"]:
-            is_valid, _ = quick_check_session_http()
-            sess_str = "✅ ACTIVE" if is_valid else "❌ EXPIRED"
-            print("\n🤖 Telegram Bot Daemon Status:")
-            print(f"  • State:       🟢 RUNNING (PID: {status['pid']})")
-            print(f"  • Memory:      {status['memory_mb']} MB (RSS)")
-            print(f"  • Session:     {sess_str}")
-            print(f"  • Courses:     {len(courses)} configured")
-            print(f"  • Log File:    {status['log_file']}\n")
-        else:
-            print("\n🤖 Telegram Bot Daemon: 🔴 STOPPED\n   Run `python3 main.py --bot -d` to launch in background.\n")
-        return
+    if subcmd == "bot" or getattr(args, "bot", False) or getattr(args, "bot_status", False) or getattr(args, "bot_stop", False) or getattr(args, "bot_restart", False):
+        bot_action = getattr(args, "action", "run") if subcmd == "bot" else ("status" if getattr(args, "bot_status", False) else ("stop" if getattr(args, "bot_stop", False) else ("restart" if getattr(args, "bot_restart", False) else ("start" if getattr(args, "daemon", False) else "run"))))
+        if getattr(args, "daemon", False) and bot_action == "run":
+            bot_action = "start"
 
-    if args.bot_stop:
-        from telegram.daemon import stop_bot_daemon
-        stop_bot_daemon()
-        return
+        if bot_action == "status":
+            from telegram.daemon import get_bot_status
+            status = get_bot_status()
+            if status["running"]:
+                is_valid, _ = quick_check_session_http()
+                sess_str = "✅ ACTIVE" if is_valid else "❌ EXPIRED"
+                print("\n🤖 Telegram Bot Daemon Status:")
+                print(f"  • State:       🟢 RUNNING (PID: {status['pid']})")
+                print(f"  • Memory:      {status['memory_mb']} MB (RSS)")
+                print(f"  • Session:     {sess_str}")
+                print(f"  • Courses:     {len(courses)} configured")
+                print(f"  • Log File:    {status['log_file']}\n")
+            else:
+                print("\n🤖 Telegram Bot Daemon: 🔴 STOPPED\n   Run `bb bot start` to launch in background.\n")
+            return
 
-    if args.bot_restart:
-        from telegram.daemon import restart_bot_daemon
-        restart_bot_daemon()
-        return
+        if bot_action == "stop":
+            from telegram.daemon import stop_bot_daemon
+            stop_bot_daemon()
+            return
 
-    if args.bot:
-        if args.daemon:
+        if bot_action == "restart":
+            from telegram.daemon import restart_bot_daemon
+            restart_bot_daemon()
+            return
+
+        if bot_action == "start":
             from telegram.daemon import start_bot_daemon
             start_bot_daemon()
-        else:
-            from telegram.bot import SimpleTelegramBot
-            bot = SimpleTelegramBot()
-            await bot.start_polling()
+            return
+
+        # Foreground run
+        from telegram.bot import SimpleTelegramBot
+        bot = SimpleTelegramBot()
+        await bot.start_polling()
         return
 
     # --- menubar app ---
-    if args.menubar:
+    if subcmd in ("menubar", "app") or getattr(args, "menubar", False):
         from ui.menubar import run_menubar
         run_menubar()
         return
 
-
-
-    # --- course listing & auth ---
-    if args.courses:
-        if args.json or args.out:
+    # --- course listing & discovery ---
+    if subcmd in ("courses", "discover", "terms") or getattr(args, "courses", False) or getattr(args, "discover", False) or getattr(args, "list_terms", False):
+        c_action = getattr(args, "action", "list") if subcmd == "courses" else ("discover" if subcmd == "discover" or getattr(args, "discover", False) else ("terms" if subcmd == "terms" or getattr(args, "list_terms", False) else "list"))
+        if c_action == "discover":
+            await asyncio.to_thread(_handle_discover_courses, term_filter=getattr(args, "term", None), list_only=False, headless=headless, cdp=cdp)
+            return
+        if c_action == "terms":
+            await asyncio.to_thread(_handle_discover_courses, term_filter=None, list_only=True, headless=headless, cdp=cdp)
+            return
+        # list courses
+        if getattr(args, "json", False) or getattr(args, "out", None):
             course_list = [{"course_id": cid, "course_name": name} for cid, name in courses.items()]
             _emit_json(args, {"courses": course_list})
         else:
@@ -539,86 +789,86 @@ async def main_async(args: argparse.Namespace) -> None:
             print("")
         return
 
-    if args.login or args.auto_exp:
-        auto_exp_mode = args.auto_exp
-        if args.visible and not args.auto and not auto_exp_mode:
-            await asyncio.to_thread(login, args.force, args.username, args.password, cdp)
+    # --- login & logout ---
+    if subcmd == "login" or getattr(args, "login", False) or getattr(args, "auto_exp", False):
+        is_manual = getattr(args, "manual", False) or getattr(args, "mode", "auto") in ("manual", "browser") or (getattr(args, "visible", False) and not getattr(args, "auto", False))
+        force_flag = getattr(args, "force", False)
+        username = getattr(args, "username", None)
+        password = getattr(args, "password", None)
+
+        if is_manual:
+            await asyncio.to_thread(login, force_flag, username, password, cdp)
         else:
             await asyncio.to_thread(
                 login_auto,
-                username=args.username,
-                password=args.password,
+                username=username,
+                password=password,
                 headless=headless,
                 cdp_url=cdp,
-                auto_exp=auto_exp_mode,
-                force=args.force,
+                auto_exp=True,
+                force=force_flag,
             )
         return
 
-
-
-    if args.logout:
+    if subcmd == "logout" or getattr(args, "logout", False):
         from core.session import logout as do_logout
         await asyncio.to_thread(do_logout, keep_config_creds=True)
         return
 
+    # --- session probes & stats ---
+    if subcmd in ("session", "check") or getattr(args, "check_session", False) or getattr(args, "session_stats", False) or getattr(args, "session_info", False):
+        sess_action = "check" if subcmd == "check" or getattr(args, "check_session", False) else (getattr(args, "action", "check") if subcmd == "session" else ("stats" if getattr(args, "session_stats", False) else "info"))
+        if sess_action in ("check",):
+            fast_only = not getattr(args, "visible", False)
+            ok = await check_session_async(debug=getattr(args, "debug", False), headless=headless, fast_only=fast_only)
+            if not ok and getattr(args, "visible", False):
+                visible_ok = await check_session_async(debug=getattr(args, "debug", False), headless=False, fast_only=False)
+                if visible_ok:
+                    print(
+                        "⚠️  Headless check failed but visible check passed.\n"
+                        "   Likely a headless-detection/timing issue; session is probably valid.",
+                        file=sys.stderr,
+                    )
+            return
+        if sess_action in ("stats", "telemetry"):
+            from core.session_tracker import tracker
+            is_valid, user_data = quick_check_session_http()
+            tracker.record_probe(is_valid, user_data)
+            print(tracker.format_cli_summary())
+            return
+        if sess_action in ("info",):
+            from core.config import SESSION_DIR
+            meta = SESSION_DIR / "session_metadata.json"
+            print("\n🕒 Session Info:", file=sys.stderr)
+            if meta.exists():
+                data = json.loads(meta.read_text())
+                print(f"  Created:   {data.get('login_time_human', 'Unknown')}", file=sys.stderr)
+                print(f"  Last Used: {data.get('last_used_time_human', 'Unknown')}", file=sys.stderr)
+            else:
+                print("  No session metadata found. Run `bb login` first.", file=sys.stderr)
+            print("", file=sys.stderr)
+            return
 
-    if args.check_session:
-        fast_only = not args.visible
-        ok = await check_session_async(debug=args.debug, headless=headless, fast_only=fast_only)
-        if not ok and args.visible:
-            visible_ok = await check_session_async(debug=args.debug, headless=False, fast_only=False)
-            if visible_ok:
-                print(
-                    "⚠️  Headless check failed but visible check passed.\n"
-                    "   Likely a headless-detection/timing issue; session is probably valid.",
-                    file=sys.stderr,
-                )
-        return
-
-    if args.session_info:
-        from core.config import SESSION_DIR
-        meta = SESSION_DIR / "session_metadata.json"
-        print("\n🕒 Session Info:", file=sys.stderr)
-        if meta.exists():
-            data = json.loads(meta.read_text())
-            print(f"  Created:   {data.get('login_time_human', 'Unknown')}", file=sys.stderr)
-            print(f"  Last Used: {data.get('last_used_time_human', 'Unknown')}", file=sys.stderr)
-        else:
-            print("  No session metadata found. Run --login first.", file=sys.stderr)
-        print("", file=sys.stderr)
-        return
-
-    if args.session_stats:
-        from core.session_tracker import tracker
-        is_valid, user_data = quick_check_session_http()
-        tracker.record_probe(is_valid, user_data)
-        print(tracker.format_cli_summary())
-        return
-
-    if args.discover or args.list_terms:
-        await asyncio.to_thread(_handle_discover_courses, term_filter=args.term, list_only=args.list_terms, headless=headless, cdp=cdp)
-        return
-
-
+    # From here down, academic commands require an active session
     if not await _require_session_async(cdp):
         return
 
+    # Resolve target courses
+    target_course_arg = getattr(args, "course", None) or getattr(args, "course_pos", None)
+    all_courses_flag = getattr(args, "all", False)
+    target_cids = resolve_target_courses(target_course_arg, all_courses_flag, courses)
 
-    # --- resolve target courses ---
-    target_cids = resolve_target_courses(args.course, args.all, courses)
-
-    # --- high-speed concurrent briefing ---
-    if args.briefing:
-        concurrency = get_optimal_concurrency(TaskProfile.MEDIUM, args.concurrency)
+    # --- briefing ---
+    if subcmd in ("briefing", "brief") or getattr(args, "briefing", False):
+        concurrency = get_optimal_concurrency(TaskProfile.MEDIUM, getattr(args, "concurrency", None))
         bundle = await run_briefing_async(
             headless=headless,
             cdp_url=cdp,
-            write_markdown=args.md,
+            write_markdown=getattr(args, "md", False),
             concurrency=concurrency,
         )
 
-        if args.telegram:
+        if getattr(args, "telegram", False):
             try:
                 from telegram.notifier import TelegramNotifier
                 notifier = TelegramNotifier()
@@ -631,21 +881,22 @@ async def main_async(args: argparse.Namespace) -> None:
             except Exception as e:
                 print(f"⚠️ Telegram notification error: {e}", file=sys.stderr)
 
-        if args.raw:
+        if getattr(args, "raw", False):
             _emit_json(args, bundle)
             return
 
-        if args.json or args.out:
+        if getattr(args, "json", False) or getattr(args, "out", None):
             _emit_json(args, bundle)
         else:
-            # Default to clean CLI stdout digest
             print(format_briefing_cli(bundle))
         return
 
     # --- due dates aggregator ---
-    window = f"{args.upcoming}d" if args.upcoming else (args.due if args.due is not None else None)
-    if window is not None:
-        concurrency = get_optimal_concurrency(TaskProfile.MEDIUM, args.concurrency)
+    window = getattr(args, "window", None) or (f"{args.upcoming}d" if getattr(args, "upcoming", None) else (args.due if getattr(args, "due", None) is not None else ("7d" if subcmd == "due" else None)))
+    if subcmd == "due" or window is not None:
+        if not window:
+            window = "7d"
+        concurrency = get_optimal_concurrency(TaskProfile.MEDIUM, getattr(args, "concurrency", None))
         session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=concurrency))
         await session_manager.initialize()
         try:
@@ -654,37 +905,39 @@ async def main_async(args: argparse.Namespace) -> None:
                     page,
                     courses,
                     window_filter=window,
-                    exclude_completed=args.exclude_completed,
+                    exclude_completed=getattr(args, "exclude_completed", False),
                 )
-                if args.md:
+                if getattr(args, "md", False):
                     save_due_dates(items, window_filter=window)
         finally:
             await session_manager.close()
 
-        if args.raw or args.json or args.out:
+        if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
             _emit_json(args, items)
         else:
-            # Default to CLI table
             print(format_due_dates_table(items, window_filter=window))
         return
 
-    # --- course outline scraper ---
-    if args.outline:
+    # --- outline ---
+    if subcmd == "outline" or getattr(args, "outline", False):
         if not target_cids:
-            print("❌ Specify course via -c <ID/Code> (e.g. -c IS410) or --all", file=sys.stderr)
+            print("❌ Specify course (e.g. 'bb outline IS410' or '-c IS410') or '--all'", file=sys.stderr)
             return
 
         raw_all: dict[str, list[dict]] = {}
         async def _fetch_outline(cid: str) -> tuple[str, list[dict]]:
             data = await scrape_course_outline_async(cid)
-            if args.folder and (args.json or args.out or args.raw or args.md):
-                data = filter_outline_by_folder(data, args.folder)
-            if args.type:
-                data = [item for item in data if item.get("content_type", "").lower() == args.type.lower()]
-            if args.keyword_filter:
-                kw = args.keyword_filter.lower()
+            folder_arg = getattr(args, "folder", None)
+            if folder_arg and (getattr(args, "json", False) or getattr(args, "out", None) or getattr(args, "raw", False) or getattr(args, "md", False)):
+                data = filter_outline_by_folder(data, folder_arg)
+            type_arg = getattr(args, "type", None)
+            if type_arg:
+                data = [item for item in data if item.get("content_type", "").lower() == type_arg.lower()]
+            kw_arg = getattr(args, "keyword_filter", None)
+            if kw_arg:
+                kw = kw_arg.lower()
                 data = [item for item in data if kw in item.get("title", "").lower() or kw in item.get("description", "").lower()]
-            if args.md:
+            if getattr(args, "md", False):
                 save_outline(data, cid)
             return cid, data
 
@@ -692,14 +945,14 @@ async def main_async(args: argparse.Namespace) -> None:
         results = await asyncio.gather(*tasks)
         raw_all = dict(results)
 
-        if args.interactive:
+        if getattr(args, "interactive", False):
             for cid, data in raw_all.items():
                 cname = courses.get(cid, cid)
                 if isinstance(data, list):
                     interactive_folder_picker(data, cname, cid)
             return
 
-        if args.raw:
+        if getattr(args, "raw", False):
             formatted_json = [
                 {
                     "course_id": cid,
@@ -709,7 +962,7 @@ async def main_async(args: argparse.Namespace) -> None:
                 for cid, data in raw_all.items()
             ]
             _emit_json(args, formatted_json)
-        elif args.json or args.out:
+        elif getattr(args, "json", False) or getattr(args, "out", None):
             formatted_json = [
                 {
                     "course_id": cid,
@@ -720,7 +973,6 @@ async def main_async(args: argparse.Namespace) -> None:
             ]
             _emit_json(args, formatted_json)
         else:
-            # Default to CLI outline tree (shallow summary by default, with folder / expand-all / depth support)
             for cid, data in raw_all.items():
                 cname = courses.get(cid, cid)
                 if isinstance(data, list):
@@ -728,20 +980,20 @@ async def main_async(args: argparse.Namespace) -> None:
                         data,
                         cname,
                         cid,
-                        target_folder=args.folder,
-                        expand_all=args.expand_all,
-                        depth=args.depth,
+                        target_folder=getattr(args, "folder", None),
+                        expand_all=getattr(args, "expand_all", False),
+                        depth=getattr(args, "depth", None),
                     ))
                     print("")
         return
 
-    # --- deep assignments scraper ---
-    if args.assignments:
+    # --- assignments ---
+    if subcmd in ("assignments", "assign") or getattr(args, "assignments", False):
         if not target_cids:
-            print("❌ Specify course via -c <ID/Code> (e.g. -c IS410) or --all", file=sys.stderr)
+            print("❌ Specify course (e.g. 'bb assignments IS410' or '-c IS410') or '--all'", file=sys.stderr)
             return
 
-        concurrency = get_optimal_concurrency(TaskProfile.HEAVY, args.concurrency)
+        concurrency = get_optimal_concurrency(TaskProfile.HEAVY, getattr(args, "concurrency", None))
         session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=concurrency))
         await session_manager.initialize()
         raw_all_assign: dict[str, list[dict]] = {}
@@ -749,10 +1001,11 @@ async def main_async(args: argparse.Namespace) -> None:
             pool = AsyncCourseWorkerPool(session_manager, task_profile=TaskProfile.HEAVY)
             async def _worker(cid, cname, page):
                 data = await scrape_course_assignments_async(cid, page)
-                if args.keyword_filter:
-                    kw = args.keyword_filter.lower()
+                kw_arg = getattr(args, "keyword_filter", None)
+                if kw_arg:
+                    kw = kw_arg.lower()
                     data = [item for item in data if kw in item.get("title", "").lower() or kw in item.get("instructions", "").lower()]
-                if args.md:
+                if getattr(args, "md", False):
                     save_assignments(data, cid)
                 return data
 
@@ -761,7 +1014,7 @@ async def main_async(args: argparse.Namespace) -> None:
         finally:
             await session_manager.close()
 
-        if args.raw or args.json or args.out:
+        if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
             formatted_json = [
                 {
                     "course_id": cid,
@@ -772,7 +1025,6 @@ async def main_async(args: argparse.Namespace) -> None:
             ]
             _emit_json(args, formatted_json)
         else:
-            # Default to CLI summary
             for cid, data in raw_all_assign.items():
                 cname = courses.get(cid, cid)
                 if isinstance(data, list):
@@ -780,14 +1032,14 @@ async def main_async(args: argparse.Namespace) -> None:
                     print("")
         return
 
-    # --- omnisearch ---
-    if args.find:
-        matches = await find_items_async(args.find, courses, page=None, type_filter=args.type)
-
-        if args.json or args.out:
+    # --- search / find ---
+    search_query = getattr(args, "query", None) or getattr(args, "find", None)
+    if subcmd in ("search", "find") or search_query:
+        matches = await find_items_async(search_query, courses, page=None, type_filter=getattr(args, "type", None))
+        if getattr(args, "json", False) or getattr(args, "out", None):
             _emit_json(args, matches)
         else:
-            print(f"\n🔎 Search Results for '{args.find}':")
+            print(f"\n🔎 Search Results for '{search_query}':")
             print("━" * 50)
             if not matches:
                 print("  (No matching items found across courses)")
@@ -804,28 +1056,30 @@ async def main_async(args: argparse.Namespace) -> None:
                     print(f"  └ 🔗 {m['external_url']}")
         return
 
-    # --- item grabber & downloader ---
-    if args.grab:
-        download_folder = Path(args.out_dir)
+    # --- download / grab ---
+    target_item = getattr(args, "item", None) or getattr(args, "grab", None)
+    if subcmd in ("download", "grab", "get") or target_item:
+        download_folder = Path(getattr(args, "out_dir", "downloads"))
         item = await grab_item_async(
-            target_id_or_title=args.grab,
+            target_id_or_title=target_item,
             courses=courses,
             target_cids=target_cids if target_cids else None,
             page=None,
             download_dir=download_folder,
         )
-
-        if args.json or args.out:
+        if getattr(args, "json", False) or getattr(args, "out", None):
             _emit_json(args, item)
         return
 
     # --- announcements ---
-    if args.announcements:
+    if subcmd in ("announcements", "announce", "news") or getattr(args, "announcements", False):
         if not target_cids:
-            print("❌ Specify course via -c <ID/Code> (e.g. -c IS410) or --all", file=sys.stderr)
+            target_cids = list(courses.keys())
+        if not target_cids:
+            print("❌ No courses configured. Run 'bb courses discover' first.", file=sys.stderr)
             return
 
-        concurrency = get_optimal_concurrency(TaskProfile.LIGHT, args.concurrency)
+        concurrency = get_optimal_concurrency(TaskProfile.LIGHT, getattr(args, "concurrency", None))
         session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=concurrency))
         await session_manager.initialize()
         raw_ann: dict[str, list[dict]] = {}
@@ -833,7 +1087,7 @@ async def main_async(args: argparse.Namespace) -> None:
             pool = AsyncCourseWorkerPool(session_manager, task_profile=TaskProfile.LIGHT)
             async def _worker(cid, cname, page):
                 data = await scrape_announcements_async(cid, page)
-                if args.md:
+                if getattr(args, "md", False):
                     save_announcements(data, cid)
                 return data
 
@@ -842,7 +1096,7 @@ async def main_async(args: argparse.Namespace) -> None:
         finally:
             await session_manager.close()
 
-        if args.raw or args.json or args.out:
+        if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
             formatted_json = [
                 {
                     "course_id": cid,
@@ -853,7 +1107,6 @@ async def main_async(args: argparse.Namespace) -> None:
             ]
             _emit_json(args, formatted_json)
         else:
-            # Default to CLI output
             for cid, data in raw_ann.items():
                 cname = courses.get(cid, cid)
                 print(f"\n📢 Announcements: {cname}")
@@ -868,12 +1121,14 @@ async def main_async(args: argparse.Namespace) -> None:
         return
 
     # --- grades ---
-    if args.grades:
+    if subcmd in ("grades",) or getattr(args, "grades", False):
         if not target_cids:
-            print("❌ Specify course via -c <ID/Code> (e.g. -c IS410) or --all", file=sys.stderr)
+            target_cids = list(courses.keys())
+        if not target_cids:
+            print("❌ No courses configured. Run 'bb courses discover' first.", file=sys.stderr)
             return
 
-        concurrency = get_optimal_concurrency(TaskProfile.LIGHT, args.concurrency)
+        concurrency = get_optimal_concurrency(TaskProfile.LIGHT, getattr(args, "concurrency", None))
         session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=concurrency))
         await session_manager.initialize()
         raw_gr: dict[str, list[dict]] = {}
@@ -881,7 +1136,7 @@ async def main_async(args: argparse.Namespace) -> None:
             pool = AsyncCourseWorkerPool(session_manager, task_profile=TaskProfile.LIGHT)
             async def _worker(cid, cname, page):
                 data = await scrape_grades_async(cid, page)
-                if args.md:
+                if getattr(args, "md", False):
                     save_grades(data, cid)
                 return data
 
@@ -890,7 +1145,7 @@ async def main_async(args: argparse.Namespace) -> None:
         finally:
             await session_manager.close()
 
-        if args.raw or args.json or args.out:
+        if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
             formatted_json = [
                 {
                     "course_id": cid,
@@ -901,7 +1156,6 @@ async def main_async(args: argparse.Namespace) -> None:
             ]
             _emit_json(args, formatted_json)
         else:
-            # Default to CLI table
             for cid, data in raw_gr.items():
                 cname = courses.get(cid, cid)
                 print(f"\n🎓 Grades: {cname}")
@@ -915,37 +1169,37 @@ async def main_async(args: argparse.Namespace) -> None:
         return
 
     # --- calendar ---
-    if args.calendar:
+    if subcmd in ("calendar", "cal") or getattr(args, "calendar", False):
         session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp))
         await session_manager.initialize()
         try:
             async with session_manager.acquire_page() as page:
                 target_cid = target_cids[0] if target_cids else None
                 calendar = await scrape_calendar_async(page, target_cid)
-                if args.md:
+                if getattr(args, "md", False):
                     save_calendar(calendar, target_cid)
         finally:
             await session_manager.close()
 
-        if args.raw or args.json or args.out:
+        if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
             _emit_json(args, calendar)
         else:
             print(format_due_dates_table(calendar, window_filter="calendar"))
         return
 
     # --- activity ---
-    if args.activity:
+    if subcmd == "activity" or getattr(args, "activity", False):
         session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp))
         await session_manager.initialize()
         try:
             async with session_manager.acquire_page() as page:
                 activity = await scrape_activity_async(page)
-                if args.md:
+                if getattr(args, "md", False):
                     save_activity(activity)
         finally:
             await session_manager.close()
 
-        if args.raw or args.json or args.out:
+        if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
             _emit_json(args, activity)
         else:
             print("\n🌊 Activity Stream:")
@@ -962,21 +1216,21 @@ async def main_async(args: argparse.Namespace) -> None:
         return
 
     # --- profile ---
-    if args.profile:
+    if subcmd in ("profile", "whoami") or getattr(args, "profile", False):
         data = await scrape_profile_async()
         if data:
-            if args.json or args.out:
+            if getattr(args, "json", False) or getattr(args, "out", None):
                 _emit_json(args, data)
             else:
                 _print_profile(data)
-            if args.md:
+            if getattr(args, "md", False):
                 save_profile(data)
         return
 
     # --- discussions ---
-    if args.discussions:
+    if subcmd in ("discussions", "discuss") or getattr(args, "discussions", False):
         if not target_cids:
-            print("❌ Specify course via -c <ID/Code> or --all", file=sys.stderr)
+            print("❌ Specify course (e.g. 'bb discussions IS410' or '-c IS410') or '--all'", file=sys.stderr)
             return
         kwargs = {
             "max_post_clicks": getattr(args, "max_posts", None),
@@ -992,7 +1246,7 @@ async def main_async(args: argparse.Namespace) -> None:
             for course_id in target_cids:
                 page = ctx.new_page()
                 data = scrape_discussions(course_id, page, **kwargs)
-                if args.md:
+                if getattr(args, "md", False):
                     save_discussions(data, course_id, titles_only=getattr(args, "titles_only", False))
                 raw_all_disc.append({
                     "course_id": course_id,
@@ -1001,23 +1255,24 @@ async def main_async(args: argparse.Namespace) -> None:
                 })
                 page.close()
             ctx.close()
-        if args.raw or args.json or args.out:
+        if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
             _emit_json(args, raw_all_disc)
             return
         print(f"Scraped discussions for {len(target_cids)} courses.")
         return
 
-    print("No scraper action selected. Run 'python3 main.py --help' to see commands.", file=sys.stderr)
+    print("No subcommand or scraper action selected. Run 'bb --help' to see commands.", file=sys.stderr)
 
 
 def main() -> None:
-    args = _parse_args()
     if len(sys.argv) == 1:
-        print("Run 'python3 main.py --help' to see available commands.", file=sys.stderr)
+        print("Run 'bb --help' to see available commands.", file=sys.stderr)
         sys.exit(1)
 
+    args = _parse_args()
     asyncio.run(main_async(args))
 
 
 if __name__ == "__main__":
     main()
+

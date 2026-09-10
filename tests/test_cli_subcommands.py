@@ -1,0 +1,196 @@
+"""
+Unit tests for Blackboard Scraper Natural CLI Subcommands and Legacy Shim.
+Tests both canonical modern subcommands (bb login, bb due, bb outline)
+and transparent redirection for legacy root flags (bb --due, bb --auto-exp).
+"""
+
+import unittest
+from main import _intercept_legacy_args, _parse_args
+
+
+class TestLegacyInterceptor(unittest.TestCase):
+    def test_legacy_due(self):
+        res, hint = _intercept_legacy_args(["--due", "14d"])
+        self.assertEqual(res, ["due", "14d"])
+        self.assertEqual(hint, "due 14d")
+
+    def test_legacy_due_default_window(self):
+        res, hint = _intercept_legacy_args(["--due", "--json"])
+        self.assertEqual(res, ["due", "7d", "--json"])
+        self.assertEqual(hint, "due 7d")
+
+    def test_legacy_upcoming(self):
+        res, hint = _intercept_legacy_args(["--upcoming", "10"])
+        self.assertEqual(res, ["due", "10d"])
+        self.assertEqual(hint, "due 10d")
+
+    def test_legacy_auto_exp(self):
+        res, hint = _intercept_legacy_args(["--auto-exp"])
+        self.assertEqual(res, ["login"])
+        self.assertEqual(hint, "login")
+
+    def test_legacy_auto_exp_force(self):
+        res, hint = _intercept_legacy_args(["--auto-exp", "--force"])
+        self.assertEqual(res, ["login", "--force"])
+        self.assertEqual(hint, "login --force")
+
+    def test_legacy_login_auto(self):
+        res, hint = _intercept_legacy_args(["--login", "--auto"])
+        self.assertEqual(res, ["login", "auto"])
+        self.assertEqual(hint, "login auto")
+
+    def test_legacy_login_visible(self):
+        res, hint = _intercept_legacy_args(["--login", "--visible"])
+        self.assertEqual(res, ["login", "--manual"])
+        self.assertEqual(hint, "login --manual")
+
+    def test_legacy_check_session(self):
+        res, hint = _intercept_legacy_args(["--check-session"])
+        self.assertEqual(res, ["session", "check"])
+        self.assertEqual(hint, "session check")
+
+    def test_legacy_bot_status(self):
+        res, hint = _intercept_legacy_args(["--bot-status"])
+        self.assertEqual(res, ["bot", "status"])
+        self.assertEqual(hint, "bot status")
+
+    def test_legacy_bot_daemon(self):
+        res, hint = _intercept_legacy_args(["--bot", "-d"])
+        self.assertEqual(res, ["bot", "start"])
+        self.assertEqual(hint, "bot start")
+
+    def test_legacy_search_and_download(self):
+        res_s, hint_s = _intercept_legacy_args(["--search", "Syllabus"])
+        self.assertEqual(res_s, ["search", "Syllabus"])
+        self.assertEqual(hint_s, "search Syllabus")
+
+        res_d, hint_d = _intercept_legacy_args(["--download", "file.pdf"])
+        self.assertEqual(res_d, ["download", "file.pdf"])
+        self.assertEqual(hint_d, "download file.pdf")
+
+    def test_modern_args_untouched(self):
+        modern_cases = [
+            ["login"],
+            ["login", "auto"],
+            ["login", "--manual"],
+            ["due"],
+            ["due", "14d"],
+            ["outline", "IS410", "-f", "Homework"],
+            ["bot", "start"],
+            ["session", "check"],
+            ["check"],
+            ["whoami"],
+        ]
+        for c in modern_cases:
+            res, hint = _intercept_legacy_args(c)
+            self.assertEqual(res, c)
+            self.assertIsNone(hint)
+
+
+class TestSubcommandParsing(unittest.TestCase):
+    def test_login_subcommand_defaults(self):
+        args = _parse_args(["login"])
+        self.assertEqual(args.subcommand, "login")
+        self.assertEqual(args.mode, "auto")
+        self.assertFalse(args.force)
+        self.assertFalse(args.manual)
+
+    def test_login_subcommand_manual(self):
+        args = _parse_args(["login", "manual"])
+        self.assertEqual(args.subcommand, "login")
+        self.assertEqual(args.mode, "manual")
+
+        args_flag = _parse_args(["login", "--manual"])
+        self.assertEqual(args_flag.subcommand, "login")
+        self.assertTrue(args_flag.manual)
+
+    def test_login_subcommand_force(self):
+        args = _parse_args(["login", "--force"])
+        self.assertEqual(args.subcommand, "login")
+        self.assertTrue(args.force)
+
+    def test_due_subcommand(self):
+        args_default = _parse_args(["due"])
+        self.assertEqual(args_default.subcommand, "due")
+        self.assertEqual(args_default.window, "7d")
+
+        args_custom = _parse_args(["due", "14d", "--json"])
+        self.assertEqual(args_custom.subcommand, "due")
+        self.assertEqual(args_custom.window, "14d")
+        self.assertTrue(args_custom.json)
+
+    def test_outline_positional_course(self):
+        args = _parse_args(["outline", "IS410", "-f", "Homework", "--expand-all"])
+        self.assertEqual(args.subcommand, "outline")
+        self.assertEqual(args.course_pos, "IS410")
+        self.assertEqual(args.folder, "Homework")
+        self.assertTrue(args.expand_all)
+
+    def test_grades_and_announcements(self):
+        args_g = _parse_args(["grades", "MATH215"])
+        self.assertEqual(args_g.subcommand, "grades")
+        self.assertEqual(args_g.course_pos, "MATH215")
+
+        args_a = _parse_args(["announcements", "--all"])
+        self.assertEqual(args_a.subcommand, "announcements")
+        self.assertTrue(args_a.all)
+
+    def test_search_and_download(self):
+        args_s = _parse_args(["search", "Python"])
+        self.assertEqual(args_s.subcommand, "search")
+        self.assertEqual(args_s.query, "Python")
+
+        args_d = _parse_args(["download", "hw1.pdf", "--out-dir", "/tmp/dl"])
+        self.assertEqual(args_d.subcommand, "download")
+        self.assertEqual(args_d.item, "hw1.pdf")
+        self.assertEqual(args_d.out_dir, "/tmp/dl")
+
+    def test_bot_daemon_subcommands(self):
+        for act in ["start", "stop", "restart", "status", "run"]:
+            args = _parse_args(["bot", act])
+            self.assertEqual(args.subcommand, "bot")
+            self.assertEqual(args.action, act)
+
+    def test_session_subcommands_and_check_shortcut(self):
+        args_s = _parse_args(["session", "stats"])
+        self.assertEqual(args_s.subcommand, "session")
+        self.assertEqual(args_s.action, "stats")
+
+        args_c = _parse_args(["check", "--debug"])
+        self.assertEqual(args_c.subcommand, "check")
+        self.assertTrue(args_c.debug)
+
+    def test_subcommand_aliases(self):
+        self.assertEqual(_parse_args(["brief"]).subcommand, "brief")
+        self.assertEqual(_parse_args(["cal"]).subcommand, "cal")
+        self.assertEqual(_parse_args(["whoami"]).subcommand, "whoami")
+        self.assertEqual(_parse_args(["find", "Exam"]).query, "Exam")
+        self.assertEqual(_parse_args(["grab", "quiz.pdf"]).item, "quiz.pdf")
+        self.assertEqual(_parse_args(["app"]).subcommand, "app")
+
+
+class TestLegacyEndToEndParsing(unittest.TestCase):
+    def test_legacy_due_redirection(self):
+        args = _parse_args(["--due", "7d", "--json"])
+        self.assertEqual(args.subcommand, "due")
+        self.assertEqual(args.window, "7d")
+        self.assertTrue(args.json)
+
+    def test_legacy_auto_exp_redirection(self):
+        args = _parse_args(["--auto-exp", "--force"])
+        self.assertEqual(args.subcommand, "login")
+        self.assertTrue(args.force)
+
+    def test_legacy_bot_status_redirection(self):
+        args = _parse_args(["--bot-status"])
+        self.assertEqual(args.subcommand, "bot")
+        self.assertEqual(args.action, "status")
+
+    def test_legacy_check_session_redirection(self):
+        args = _parse_args(["--check-session"])
+        self.assertEqual(args.subcommand, "session")
+        self.assertEqual(args.action, "check")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -663,7 +663,7 @@ async def check_session_async(quiet: bool = False, debug: bool = False, headless
     if fast_only:
         if not quiet:
             print("❌ Session EXPIRED or missing cookies.")
-            print("   Run `python3 main.py --login` to authenticate.")
+            print("   Run `bb login` to authenticate.")
         return False
 
     # 2. Browser-level fallback verification (if explicitly requested via fast_only=False)
@@ -703,7 +703,7 @@ async def check_session_async(quiet: bool = False, debug: bool = False, headless
             else:
                 if not quiet:
                     print("❌ Session EXPIRED or missing.")
-                    print("   Run `python3 main.py --login` to re-authenticate.")
+                    print("   Run `bb login` to re-authenticate.")
 
             return valid
     except Exception as e:
@@ -724,7 +724,7 @@ def check_session(quiet: bool = False, debug: bool = False, headless: bool = Tru
     if fast_only:
         if not quiet:
             print("❌ Session EXPIRED or missing cookies.")
-            print("   Run `python3 main.py --login` to authenticate.")
+            print("   Run `bb login` to authenticate.")
         return False
 
     # Fallback to async loop runner if fast_only=False
