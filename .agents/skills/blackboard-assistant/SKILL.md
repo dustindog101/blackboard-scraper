@@ -25,7 +25,8 @@ Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** 
 | **Selective Folder Expansion** | `bb --outline -c MATH215 -f "Homework"` | Selectively expands target folder by name or ID |
 | **Full Outline Tree** | `bb --outline -c MATH215 --expand-all` | Full recursive tree with all subfolders expanded |
 | **Interactive Folder Explorer** | `bb --outline -c MATH215 -i` | Interactive terminal menu to browse & expand folders |
-| **Clean Outline JSON** | `bb --outline -c MATH215 --json` | Compact, streamlined JSON without bloated empty fields |
+| **List Course Assignments** | `bb --assignments -c AGNG` | Lists all assignments, tests, and discussions with unique IDs (<150ms) |
+| **Inspect Assignment / Quiz** | `bb --assignment <ID_or_Title>` | Opens & inspects deep prompts, statements, choices & answers (<200ms) |
 | **Download File / Note** | `bb --download "Worksheet_1.pdf"` | Auto-discovers course and downloads file directly to disk |
 | **Download by Item ID** | `bb --download _8825690_1` | Downloads specific Blackboard item/notebook by exact ID |
 | **Active Course Discovery** | `bb --discover` | Intelligently isolates current active term (Fall 2026) in <200ms |
@@ -67,13 +68,20 @@ Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** 
 1. Run `bb --search "Syllabus"`.
 2. Returns matching document links, descriptions, and parent folder paths.
 
-### 6. "Download [File / Note / Worksheet]"
-1. Run `bb --download "<file_name_or_id>"` (e.g. `bb --download "Math215_Worksheet_1.pdf"` or `bb --download "Chapter01.ipynb"`).
-2. The downloader will automatically locate the correct course and save the file into `downloads/<CourseName>/`.
+### 6. "Download [File / Note / Worksheet / Syllabus]"
+1. Find item in outline: `bb --outline -c <course> -f "<folder_name>"` (e.g. `bb --outline -c AGNG -f "Start Here"`).
+2. Download by ID or Title: `bb --download "<file_name_or_id>"` (e.g. `bb --download _8837015_1` or `bb --download "Fall 2026 Syllabus" -c AGNG`).
+3. The downloader will automatically locate the correct course and save the file into `downloads/<CourseName>/`.
 
 ### 7. "Which courses am I enrolled in?"
 1. Run `bb --courses`.
 2. If courses appear outdated or user changed semesters, run `bb --discover` to auto-detect the current semester.
+
+### 8. "Check / inspect / solve an assignment or quiz"
+1. **List all assignments & get Unique IDs**: `bb --assignments -c <course>` (e.g. `bb --assignments -c AGNG`).
+2. **Deep inspect item questions/prompts**: `bb --assignment <ID_or_Title>` (e.g. `bb --assignment _8836886_1` or `bb --assignment "Module 1 Assignment"`).
+3. **Download required readings/syllabus**: `bb --download "<file_or_id>"` (e.g. `bb --download "Fall 2026 Syllabus"`).
+4. **Answer questions**: Read the downloaded course file/syllabus and cross-reference with the questions from `bb --assignment`.
 
 ---
 

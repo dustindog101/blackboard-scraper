@@ -44,3 +44,28 @@ _Avoid_: Date cutoff, range parameter
 A unified deadline aggregation engine combining global calendar events (`/calendars/items`) with per-course gradebook columns into a single deduplicated schedule.
 _Avoid_: Multi-scraper, calendar merger
 
+**Gradable Item**:
+A course assessment, assignment dropbox, or discussion board that carries point weighting or grading in the course gradebook.
+_Avoid_: Task, quiz item, graded resource
+
+**Assessment Attempt**:
+An individual submission session for a test or assignment holding student answers, start timestamp, submission status, and question attempts.
+_Avoid_: Quiz session, try, test run
+
+**Non-Destructive Info Mode**:
+Inspection of gradable item parameters, instructions, due dates, and rubrics without initiating or modifying student attempt records or triggering exam countdown timers.
+_Avoid_: Passive scraping, safe read, pre-check
+
+**Question Attempt**:
+A specific student answer record within an assessment attempt containing the question prompt, choice options, selected answer, point value, and grading state.
+_Avoid_: Question response, answer object
+
+**Match Terms**:
+The set of prompt concepts extracted from `question.prompts[]` representing the left-hand premises to be matched against choice definitions in a Matching assessment question.
+_Avoid_: Matching prompts, left choices
+
+**Attempt Initiation Guard**:
+The safety mechanism that blocks beginning a new assessment attempt or launching browser exam sessions unless explicit initiation flags (`--start-attempt` and `--force-start`) are supplied.
+_Avoid_: Start blocker, attempt lock
+
+

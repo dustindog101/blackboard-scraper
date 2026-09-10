@@ -43,7 +43,13 @@ from scrapers.outline import (
     filter_outline_by_folder,
     interactive_folder_picker,
 )
-from scrapers.assignments import scrape_course_assignments_async, save_assignments, format_assignments_summary
+from scrapers.assignments import (
+    scrape_course_assignments_async,
+    scrape_course_assignments_http,
+    save_assignments,
+    format_assignments_summary,
+)
+from scrapers.quiz import scrape_assessment_attempt_async, save_assessment_attempt, format_assessment_attempt_cli
 from scrapers.due_dates import aggregate_due_dates_async, save_due_dates, format_due_dates_table
 from scrapers.search import find_items_async, grab_item_async
 
@@ -361,7 +367,10 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     scrapers.add_argument("--grades", action="store_true", help="Scrape gradebook")
     scrapers.add_argument("--discussions", action="store_true", help="Scrape course discussions")
     scrapers.add_argument("--outline", action="store_true", help="Scrape full course outline, modules, syllabi, and files")
-    scrapers.add_argument("--assignments", action="store_true", help="Deep scrape assignments with prompts, rubrics, and files")
+    scrapers.add_argument("--assignments", action="store_true", help="List all assignments, quizzes, and gradable items across course(s)")
+    scrapers.add_argument("--assignment", "--quiz", "--asmt", "--assessment", dest="assignment", metavar="TARGET", help="Open and inspect a specific assignment, quiz, or discussion by ID or Title")
+    scrapers.add_argument("--start-attempt", "--begin-attempt", action="store_true", help="With --assignment: allow beginning a new attempt if none is currently active")
+    scrapers.add_argument("--force-start", action="store_true", help="With --assignment --start-attempt: confirm starting timed assessments/exams")
     scrapers.add_argument("--due", nargs="?", const="7d", default=None, metavar="WINDOW", help="Aggregate cross-course due dates (e.g. 7d, 14d, overdue)")
     scrapers.add_argument("--upcoming", type=int, metavar="DAYS", help="Alias for --due <N>d")
     scrapers.add_argument("--exclude-completed", action="store_true", help="With --due: exclude submitted/graded items")
@@ -735,31 +744,48 @@ async def main_async(args: argparse.Namespace) -> None:
                     print("")
         return
 
-    # --- deep assignments scraper ---
+    # --- assignments list scraper ---
     if args.assignments:
         if not target_cids:
-            print("❌ Specify course via -c <ID/Code> (e.g. -c IS410) or --all", file=sys.stderr)
+            print("❌ Specify course via -c <ID/Code> (e.g. -c AGNG100) or --all", file=sys.stderr)
             return
 
-        concurrency = get_optimal_concurrency(TaskProfile.HEAVY, args.concurrency)
-        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=concurrency))
-        await session_manager.initialize()
         raw_all_assign: dict[str, list[dict]] = {}
-        try:
-            pool = AsyncCourseWorkerPool(session_manager, task_profile=TaskProfile.HEAVY)
-            async def _worker(cid, cname, page):
-                data = await scrape_course_assignments_async(cid, page)
-                if args.keyword_filter:
-                    kw = args.keyword_filter.lower()
-                    data = [item for item in data if kw in item.get("title", "").lower() or kw in item.get("instructions", "").lower()]
-                if args.md:
-                    save_assignments(data, cid)
-                return data
 
-            target_dict = {cid: courses.get(cid, cid) for cid in target_cids}
-            raw_all_assign = await pool.execute_task_per_course(target_dict, _worker)
-        finally:
-            await session_manager.close()
+        # 1. High-speed HTTP REST Fast-Path (<150ms)
+        if not getattr(args, "visible", False):
+            for cid in target_cids:
+                data = scrape_course_assignments_http(cid)
+                if data is not None:
+                    if args.keyword_filter:
+                        kw = args.keyword_filter.lower()
+                        data = [item for item in data if kw in item.get("title", "").lower() or kw in item.get("instructions", "").lower()]
+                    if args.md:
+                        save_assignments(data, cid)
+                    raw_all_assign[cid] = data
+
+        # 2. Playwright Browser Fallback (if REST unavailable for any course)
+        missing_cids = [cid for cid in target_cids if cid not in raw_all_assign]
+        if missing_cids:
+            concurrency = get_optimal_concurrency(TaskProfile.HEAVY, args.concurrency)
+            session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=concurrency))
+            await session_manager.initialize()
+            try:
+                pool = AsyncCourseWorkerPool(session_manager, task_profile=TaskProfile.HEAVY)
+                async def _worker(cid, cname, page):
+                    data = await scrape_course_assignments_async(cid, page)
+                    if args.keyword_filter:
+                        kw = args.keyword_filter.lower()
+                        data = [item for item in data if kw in item.get("title", "").lower() or kw in item.get("instructions", "").lower()]
+                    if args.md:
+                        save_assignments(data, cid)
+                    return data
+
+                target_dict = {cid: courses.get(cid, cid) for cid in missing_cids}
+                fallback_results = await pool.execute_task_per_course(target_dict, _worker)
+                raw_all_assign.update(fallback_results)
+            finally:
+                await session_manager.close()
 
         if args.raw or args.json or args.out:
             formatted_json = [
@@ -778,6 +804,31 @@ async def main_async(args: argparse.Namespace) -> None:
                 if isinstance(data, list):
                     print(format_assignments_summary(data, cname, cid))
                     print("")
+        return
+
+    # --- assignment / quiz / assessment attempt inspector ---
+    if getattr(args, "assignment", None):
+        target_cid = target_cids[0] if target_cids else None
+        force_browser = getattr(args, "visible", False)
+        allow_start = getattr(args, "start_attempt", False)
+        force_start = getattr(args, "force_start", False)
+        data = await scrape_assessment_attempt_async(
+            target=args.assignment,
+            course_id=target_cid,
+            headless=headless,
+            force_browser=force_browser,
+            allow_start=allow_start,
+            force_start=force_start,
+        )
+
+        if args.md:
+            saved_path = save_assessment_attempt(data)
+            print(f"💾 Saved assessment Markdown report to: {_safe_relpath(saved_path)}", file=sys.stderr)
+
+        if args.raw or args.json or args.out:
+            _emit_json(args, data)
+        else:
+            print(format_assessment_attempt_cli(data))
         return
 
     # --- omnisearch ---
