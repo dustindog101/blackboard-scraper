@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -121,9 +122,13 @@ async def aggregate_due_dates_async(
     is_overdue_only = "overdue" in window_lower
 
     if not is_overdue_only and window_lower not in ("all", "calendar", "global"):
-        m = re.match(r"^(\d+)\s*d?$", window_lower)
+        m = re.match(r"^(\d+)\s*([dw])?$", window_lower)
         if m:
-            days_limit = float(m.group(1))
+            val = float(m.group(1))
+            unit = (m.group(2) or "d").lower()
+            days_limit = val * 7 if unit == "w" else val
+        else:
+            print(f"⚠️ Unrecognized date window '{window_filter}'. Defaulting to all upcoming deadlines (supported: 7d, 14d, 2w, overdue, all).", file=sys.stderr)
 
     results: List[Dict[str, Any]] = []
     for item in combined.values():

@@ -201,15 +201,25 @@ def _scrape_assessment_http(
     matching_col = None
     cols = _api_get(f"/learn/api/public/v2/courses/{course_id}/gradebook/columns", cookie_header)
     if cols and "results" in cols:
+        # First pass: check for assessment_id or exact title match
         for c in cols["results"]:
             cid = c.get("contentId")
             c_name = c.get("name", "")
             if assessment_id and cid == assessment_id:
                 matching_col = c
                 break
-            if target_query and (target_query.lower() in c_name.lower() or target_query == c.get("id")):
+            if target_query and (target_query.strip().lower() == c_name.strip().lower() or target_query == c.get("id")):
                 matching_col = c
                 break
+
+        # Second pass: check for substring match if no exact match found
+        if not matching_col and target_query:
+            tq_lower = target_query.strip().lower()
+            for c in cols["results"]:
+                c_name = c.get("name", "")
+                if tq_lower in c_name.lower():
+                    matching_col = c
+                    break
 
     asmt_title = matching_col.get("name") if matching_col else "Assessment"
     col_id = matching_col.get("id") if matching_col else None
@@ -275,6 +285,9 @@ def _scrape_assessment_http(
     # ------------------------------------------------------------------------
     # B. Assessment / Assignment / Test Inspection
     # ------------------------------------------------------------------------
+    if not matching_col and not assessment_id:
+        return None
+
     due_date = ""
     time_limit = "No time limit"
     max_points = ""
@@ -336,6 +349,21 @@ def _scrape_assessment_http(
             raw_possible = grading_col.get("possible") or assessment_meta.get("totalPoints") or (matching_col.get("score", {}).get("possible") if matching_col else None)
             if raw_possible is not None:
                 max_points = f"{int(raw_possible) if float(raw_possible).is_integer() else raw_possible} points"
+        elif not matching_col:
+            # Neither gradebook column nor course content found for this assessment_id
+            return None
+
+    if not due_date and matching_col and matching_col.get("dueDate"):
+        raw_due = matching_col["dueDate"]
+        try:
+            dt = datetime.fromisoformat(raw_due.replace("Z", "+00:00"))
+            due_date = dt.strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            due_date = raw_due
+
+    if not max_points and matching_col and matching_col.get("score", {}).get("possible") is not None:
+        raw_possible = matching_col["score"]["possible"]
+        max_points = f"{int(raw_possible) if float(raw_possible).is_integer() else raw_possible} points"
 
     # 3. Locate Attempt ID if not directly provided
     user_attempt_status = "NOT_ATTEMPTED"
@@ -733,6 +761,19 @@ async def _scrape_assessment_playwright(
         };
     }""")
 
+    # Guard against empty/failed page extractions (e.g. blank page, navigation failure, or 404)
+    has_content = (
+        bool(extracted.get("questions"))
+        or bool(extracted.get("instructions"))
+        or bool(extracted.get("due_date"))
+        or bool(extracted.get("max_points"))
+    )
+    raw_title = extracted.get("title", "").strip()
+    title_lower = raw_title.lower()
+    is_error_title = any(err in title_lower for err in ("not found", "error", "404", "blackboard learn"))
+    if not has_content or is_error_title:
+        return None
+
     return {
         "engine": "playwright_browser",
         "item_type": "Quiz / Test" if len(extracted.get("questions", [])) > 0 else "Assignment",
@@ -802,26 +843,36 @@ async def scrape_assessment_attempt_async(
     att_id = parsed.get("attempt_id")
     full_url = parsed.get("url")
 
+    cookie_header = _get_cookie_header()
+
     # If course_id is omitted, auto-discover which enrolled course contains this assessment
-    if not cid and (asmt_id or target):
-        cookie_header = _get_cookie_header()
-        if cookie_header:
-            courses = load_courses()
-            for cand_cid in courses.keys():
-                if asmt_id:
-                    c_info = _api_get(f"/learn/api/v1/courses/{cand_cid}/contents/{asmt_id}", cookie_header)
-                    if c_info and "_http_status" not in c_info:
+    if not cid and (asmt_id or target) and cookie_header:
+        courses = load_courses()
+        for cand_cid in courses.keys():
+            if asmt_id:
+                c_info = _api_get(f"/learn/api/v1/courses/{cand_cid}/contents/{asmt_id}", cookie_header)
+                if c_info and "_http_status" not in c_info:
+                    cid = cand_cid
+                    break
+            cols = _api_get(f"/learn/api/public/v2/courses/{cand_cid}/gradebook/columns", cookie_header)
+            if cols and "results" in cols:
+                # Pass 1: exact match or ID match
+                for col in cols["results"]:
+                    c_name = col.get("name", "")
+                    if (target and target.strip().lower() == c_name.strip().lower()) or (asmt_id and col.get("contentId") == asmt_id):
                         cid = cand_cid
+                        asmt_id = col.get("contentId") or asmt_id
                         break
-                cols = _api_get(f"/learn/api/public/v2/courses/{cand_cid}/gradebook/columns", cookie_header)
-                if cols and "results" in cols:
+                # Pass 2: substring match
+                if not cid and target:
+                    t_lower = target.strip().lower()
                     for col in cols["results"]:
-                        if target.lower() in col.get("name", "").lower() or (asmt_id and col.get("contentId") == asmt_id):
+                        if t_lower in col.get("name", "").lower():
                             cid = cand_cid
                             asmt_id = col.get("contentId") or asmt_id
                             break
-                if cid:
-                    break
+            if cid:
+                break
 
     # 1. Fast-Path HTTP REST API Engine (if not forced to browser and we have course_id)
     if not force_browser and cid and (att_id or asmt_id or target):
@@ -849,6 +900,16 @@ async def scrape_assessment_attempt_async(
                     )
                 else:
                     return http_result
+            elif not allow_start and cookie_header:
+                # REST checked the course gradebook and contents with valid cookies and found nothing.
+                courses = load_courses()
+                course_hint = f" in course '{courses.get(cid, cid)}'" if cid else ""
+                return {
+                    "status": "NOT_FOUND",
+                    "error": f"No assignment or quiz matching '{target}' was found{course_hint}.",
+                    "target": target,
+                    "course_id": cid or course_id,
+                }
         except Exception as e:
             logger.debug(f"HTTP REST assessment fast-path failed: {e}")
 
@@ -858,8 +919,17 @@ async def scrape_assessment_attempt_async(
             full_url = f"{BLACKBOARD_BASE}/ultra/courses/{cid}/assessment/{asmt_id}/attempt/{att_id}?courseId={cid}"
         elif cid and asmt_id:
             full_url = f"{BLACKBOARD_BASE}/ultra/courses/{cid}/outline/assessment/{asmt_id}"
-        else:
+        elif target.startswith("http://") or target.startswith("https://"):
             full_url = target
+        else:
+            courses = load_courses()
+            course_hint = f" in course '{courses.get(cid, cid)}'" if cid else " across configured courses"
+            return {
+                "status": "NOT_FOUND",
+                "error": f"No assignment or quiz matching '{target}' was found{course_hint}.",
+                "target": target,
+                "course_id": cid or course_id,
+            }
 
     if page is not None:
         result = await _scrape_assessment_playwright(
@@ -878,7 +948,14 @@ async def scrape_assessment_attempt_async(
             result = await _scrape_assessment_playwright(
                 full_url, p, course_id=cid, assessment_id=asmt_id, attempt_id=att_id, allow_start=allow_start, force_start=force_start
             )
-            return result or {}
+            if not result:
+                return {
+                    "status": "NOT_FOUND",
+                    "error": f"Could not load assessment details for '{target}'.",
+                    "target": target,
+                    "course_id": cid or course_id,
+                }
+            return result
     finally:
         await session_mgr.close()
 
@@ -918,6 +995,11 @@ def format_assessment_attempt_cli(data: Dict[str, Any]) -> str:
     """Renders structured assessment questions and metadata as a rich CLI string."""
     if not data:
         return "⚠️ No assessment data found."
+
+    if data.get("status") == "NOT_FOUND" or (data.get("error") and not data.get("title")):
+        err = data.get("error") or f"No assignment or quiz matching '{data.get('target', '')}' was found."
+        tip_course = f" -c {data['course_id']}" if data.get("course_id") else ""
+        return f"\n❌ {err}\n💡 Tip: Run 'bb assignments{tip_course}' or 'bb due' to see valid assignment titles and IDs.\n"
 
     title = data.get("title", "Assessment")
     item_type = data.get("item_type", "Assessment")

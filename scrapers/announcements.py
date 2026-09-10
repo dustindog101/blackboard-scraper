@@ -123,13 +123,13 @@ async def scrape_announcements_playwright_async(course_id: str, page: Any) -> Li
     """Playwright browser DOM fallback for course announcements."""
     courses = load_courses()
     name = courses.get(course_id, course_id)
-    print(f"📢 Scraping announcements for {name} (Playwright fallback)...")
+    print(f"📢 Scraping announcements for {name} (Playwright fallback)...", file=sys.stderr)
 
     outline_url = f"{BLACKBOARD_BASE}/ultra/courses/{course_id}/outline"
     try:
         await page.goto(outline_url, wait_until="domcontentloaded", timeout=20_000)
     except Exception as e:
-        print(f"   ⚠️ Could not load outline for {name}: {e}")
+        print(f"   ⚠️ Could not load outline for {name}: {e}", file=sys.stderr)
         return []
 
     # Check if course is unavailable
@@ -144,7 +144,7 @@ async def scrape_announcements_playwright_async(course_id: str, page: Any) -> Li
     )
 
     if not matched_sel or "You can't access" in matched_sel:
-        print("   ℹ️  Course is currently unavailable or closed.")
+        print("   ℹ️  Course is currently unavailable or closed.", file=sys.stderr)
         return []
 
     # Click announcements navigation
@@ -167,7 +167,7 @@ async def scrape_announcements_playwright_async(course_id: str, page: Any) -> Li
     )
 
     if not matched_data_sel or "no-announcements" in matched_data_sel:
-        print(f"   ℹ️  No announcements found for {name}.")
+        print(f"   ℹ️  No announcements found for {name}.", file=sys.stderr)
         return []
 
     # Adaptive scroll to load all lazy items
@@ -197,7 +197,7 @@ async def scrape_announcements_playwright_async(course_id: str, page: Any) -> Li
         return items;
     }""")
 
-    print(f"   ✅ Extracted {len(announcements_data)} announcements from {name}.")
+    print(f"   ✅ Extracted {len(announcements_data)} announcements from {name}.", file=sys.stderr)
     return announcements_data
 
 

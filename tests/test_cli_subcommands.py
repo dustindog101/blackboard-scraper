@@ -4,8 +4,15 @@ Tests both canonical modern subcommands (bb login, bb due, bb outline)
 and transparent redirection for legacy root flags (bb --due, bb --auto-exp).
 """
 
+import asyncio
+import io
 import unittest
-from main import _intercept_legacy_args, _parse_args
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, patch
+
+from main import _intercept_legacy_args, _parse_args, main_async
+from scrapers.quiz import format_assessment_attempt_cli
+from scrapers.due_dates import aggregate_due_dates_async
 
 
 class TestLegacyInterceptor(unittest.TestCase):
@@ -150,6 +157,16 @@ class TestSubcommandParsing(unittest.TestCase):
             args = _parse_args(["bot", act])
             self.assertEqual(args.subcommand, "bot")
             self.assertEqual(args.action, act)
+
+    def test_bot_default_action_is_status(self):
+        args = _parse_args(["bot"])
+        self.assertEqual(args.subcommand, "bot")
+        self.assertEqual(args.action, "status")
+
+    def test_terms_subcommand_parsing(self):
+        args = _parse_args(["terms", "--json"])
+        self.assertEqual(args.subcommand, "terms")
+        self.assertTrue(args.json)
 
     def test_session_subcommands_and_check_shortcut(self):
         args_s = _parse_args(["session", "stats"])
@@ -348,6 +365,130 @@ class TestGuideAndCompatDetails(unittest.TestCase):
 
         args2 = _parse_args(["login", "--duo-passcode", "654321"])
         self.assertEqual(args2.duo_passcode, "654321")
+
+    def test_assignment_help_interception(self):
+        # 'bb assignment help' -> 'bb assignment --help'
+        res, hint = _intercept_legacy_args(["assignment", "help"])
+        self.assertEqual(res, ["assignment", "--help"])
+        self.assertIsNone(hint)
+
+        # 'bb assignment -h' -> 'bb assignment --help'
+        res, hint = _intercept_legacy_args(["assignment", "-h"])
+        self.assertEqual(res, ["assignment", "--help"])
+        self.assertIsNone(hint)
+
+        # 'bb quiz help' -> 'bb quiz --help'
+        res, hint = _intercept_legacy_args(["quiz", "help"])
+        self.assertEqual(res, ["quiz", "--help"])
+        self.assertIsNone(hint)
+
+        # 'bb help assignment' -> 'bb assignment --help'
+        res, hint = _intercept_legacy_args(["help", "assignment"])
+        self.assertEqual(res, ["assignment", "--help"])
+        self.assertIsNone(hint)
+
+        # 'bb help due' -> 'bb due --help'
+        res, hint = _intercept_legacy_args(["help", "due"])
+        self.assertEqual(res, ["due", "--help"])
+        self.assertIsNone(hint)
+
+    def test_search_help_not_intercepted(self):
+        # Free-text search for the query 'help' must NOT be converted to --help
+        res, hint = _intercept_legacy_args(["search", "help"])
+        self.assertEqual(res, ["search", "help"])
+        self.assertIsNone(hint)
+
+        res, hint = _intercept_legacy_args(["find", "help"])
+        self.assertEqual(res, ["find", "help"])
+        self.assertIsNone(hint)
+
+    def test_guide_topics_not_redirected_to_subcommand_help(self):
+        # Guide topics ('auth', 'courses', etc.) must remain guide topics
+        res, hint = _intercept_legacy_args(["help", "auth"])
+        self.assertEqual(res, ["help", "auth"])
+        self.assertIsNone(hint)
+
+        res, hint = _intercept_legacy_args(["help", "courses"])
+        self.assertEqual(res, ["help", "courses"])
+        self.assertIsNone(hint)
+
+    def test_assignment_not_found_cli_formatting(self):
+        data = {
+            "status": "NOT_FOUND",
+            "error": "No assignment or quiz matching 'Nonexistent Homework' was found in course 'IS410'.",
+            "target": "Nonexistent Homework",
+            "course_id": "IS410",
+        }
+        formatted = format_assessment_attempt_cli(data)
+        self.assertIn("❌ No assignment or quiz matching 'Nonexistent Homework' was found in course 'IS410'.", formatted)
+        self.assertIn("💡 Tip: Run 'bb assignments -c IS410' or 'bb due'", formatted)
+
+
+class TestEnhancedSubcommandBehaviors(unittest.TestCase):
+    def test_due_date_week_window_filtering(self):
+        now = datetime.now(timezone.utc)
+        item1 = {
+            "title": "HW 1 (5 days)",
+            "course": "IS 410",
+            "due": (now + timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        item2 = {
+            "title": "HW 2 (10 days)",
+            "course": "IS 410",
+            "due": (now + timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        item3 = {
+            "title": "HW 3 (20 days)",
+            "course": "IS 410",
+            "due": (now + timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+        with patch("scrapers.due_dates.scrape_calendar_async", new_callable=AsyncMock) as mock_cal:
+            mock_cal.return_value = [item1, item2, item3]
+
+            # 1w window (7 days) -> only item1
+            res_1w = asyncio.run(aggregate_due_dates_async(courses={}, window_filter="1w"))
+            self.assertEqual(len(res_1w), 1)
+            self.assertEqual(res_1w[0]["title"], "HW 1 (5 days)")
+
+            # 2w window (14 days) -> item1 and item2
+            res_2w = asyncio.run(aggregate_due_dates_async(courses={}, window_filter="2w"))
+            self.assertEqual(len(res_2w), 2)
+            self.assertEqual([r["title"] for r in res_2w], ["HW 1 (5 days)", "HW 2 (10 days)"])
+
+            # Unrecognized window prints warning to stderr and defaults to all upcoming deadlines
+            stderr_buf = io.StringIO()
+            with patch("sys.stderr", stderr_buf):
+                res_all = asyncio.run(aggregate_due_dates_async(courses={}, window_filter="foobar"))
+            self.assertIn("Unrecognized date window 'foobar'", stderr_buf.getvalue())
+            self.assertEqual(len(res_all), 3)
+
+    @patch("main.load_courses", return_value={"_100_1": "CMSC 201"})
+    @patch("main.grab_item_async", new_callable=AsyncMock)
+    def test_download_failure_exits_with_code_1(self, mock_grab, mock_load):
+        mock_grab.return_value = {"status": "not_found", "query": "missing.pdf"}
+        args = _parse_args(["download", "missing.pdf"])
+        with self.assertRaises(SystemExit) as ctx:
+            asyncio.run(main_async(args))
+        self.assertEqual(ctx.exception.code, 1)
+
+    @patch("main.load_courses", return_value={"_100_1": "CMSC 201"})
+    @patch("main._emit_json")
+    def test_terms_json_export_structure(self, mock_emit, mock_load):
+        fake_terms = {
+            "Spring 2026": {"_100_1": "CMSC 201"},
+            "Fall 2025": {"_99_1": "IS 300"},
+        }
+        with patch("core.course_discovery.discover_courses_via_api", return_value=fake_terms):
+            with patch("core.course_discovery.get_current_term_name", return_value="Spring 2026"):
+                args = _parse_args(["terms", "--json"])
+                asyncio.run(main_async(args))
+                mock_emit.assert_called_once()
+                payload = mock_emit.call_args[0][1]
+                self.assertEqual(payload["active_term"], "Spring 2026")
+                self.assertEqual(len(payload["terms"]), 2)
+                self.assertTrue(payload["terms"][0]["is_active"])
+                self.assertEqual(payload["terms"][0]["course_count"], 1)
 
 
 if __name__ == "__main__":
