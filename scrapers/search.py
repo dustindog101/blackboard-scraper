@@ -113,7 +113,7 @@ async def grab_item_async(
         print(f"   ⚠️ Found {len(all_matches)} matching items across courses for '{target_id_or_title}':")
         for i, m in enumerate(all_matches, 1):
             print(f"      {i}. [{m['course_name']}] {m['title']} (ID: {m['content_id']})")
-        print(f"   💡 Please specify course: bb --download \"{target_id_or_title}\" -c <CourseID>")
+        print(f"   💡 Please specify course: bb download \"{target_id_or_title}\" -c <CourseID>")
         return {
             "status": "multiple_matches",
             "query": target_id_or_title,

@@ -371,7 +371,7 @@ def format_assignments_summary(assignments: List[Dict[str, Any]], course_name: s
         for att in a.get("attachments", []):
             lines.append(f"   ├ 📎 File:      {att['filename']} ({att['url']})")
         if item_id:
-            lines.append(f"   └ 💡 Inspect:   bb --assignment {item_id}")
+            lines.append(f"   └ 💡 Inspect:   bb assignment {item_id}")
 
     return "\n".join(lines)
 

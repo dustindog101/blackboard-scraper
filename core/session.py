@@ -903,7 +903,7 @@ def login(force: bool = False, username: str = None, password: str = None, cdp_u
             track_session_usage("login")
             print("✨ Session saved successfully.")
         else:
-            print("⚠️ URL looks correct, but it might still be a login page. Please verify by running --check-session.")
+            print("⚠️ URL looks correct, but it might still be a login page. Please verify by running 'bb check'.")
 
         context.close()
 
@@ -917,7 +917,7 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
     Returns True if login succeeds, False otherwise.
     """
     if cdp_url:
-        print("🔌 Ignoring --login --auto since you are connected to an existing CDP browser.")
+        print("🔌 Ignoring 'bb login auto' since you are connected to an existing CDP browser.")
         return False
 
     # Ensure config exists. If missing, blank config is created with notification.
@@ -948,8 +948,14 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
             print("❌ No login detected and no credentials found in config.json.")
             if not created_blank:
                 print("   A blank config has been created or verified at: config.json")
-            print("   Please populate config.json['auto_login'] or run: bb --auto-exp")
+            print("   Please populate config.json['auto_login'] or run: bb login")
             return False
+
+    if not force:
+        valid, _ = quick_check_session_http()
+        if valid:
+            print("✅ You are already logged in! (Use 'bb login --force' to re-authenticate)")
+            return True
 
     if auto_exp:
         if is_mac:
@@ -957,9 +963,9 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
         else:
             print("\n⚡ Automated SSO Login with Terminal & Telegram 2FA Entry (Windows/Linux)")
     else:
-        print("\n⚠️  [EXPERIMENTAL] --login --auto is an experimental feature.")
+        print("\n⚠️  [EXPERIMENTAL] 'bb login auto' is an experimental feature.")
         print("   UMBC's SSO or Duo configuration may change at any time, breaking this feature without notice.")
-        print("   If login fails, run: python3 main.py --login\n")
+        print("   If login fails, run: bb login --manual\n")
 
     print(f"   📋 Credentials loaded (username: {usr})")
     print("🚀 Starting Automated SSO Login...")

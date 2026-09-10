@@ -152,20 +152,24 @@ def format_due_dates_table(items: List[Dict[str, Any]], window_filter: str = "7d
     """Formats aggregated due dates into a clean CLI table."""
     lines = [
         f"📅 Upcoming Deadlines & Due Dates ({window_filter.upper()})",
-        "━" * 60,
+        "━" * 80,
     ]
     if not items:
         lines.append("  (No upcoming deadlines found in this window)")
         return "\n".join(lines)
 
-    lines.append(f"{'Course':<25} | {'Assignment':<35} | {'Due Date':<20} | {'Status'}")
-    lines.append("-" * 25 + "-+-" + "-" * 35 + "-+-" + "-" * 20 + "-+-" + "-" * 10)
+    lines.append(f"{'Course':<25} | {'Assignment':<34} | {'Due Date':<24} | {'Status'}")
+    lines.append("-" * 25 + "-+-" + "-" * 34 + "-+-" + "-" * 24 + "-+-" + "-" * 10)
     for it in items:
-        c = (it.get("course") or "Unknown")[:24]
-        t = (it.get("title") or "Untitled")[:34]
-        d = (it.get("due_date") or it.get("due") or "TBD")[:19]
+        c_raw = (it.get("course") or "Unknown").strip()
+        if ": " in c_raw:
+            c = c_raw.split(": ", 1)[1][:24]
+        else:
+            c = c_raw[:24]
+        t = (it.get("title") or "Untitled")[:33]
+        d = (it.get("due_date") or it.get("due") or "TBD")[:24]
         s = it.get("status") or "Upcoming"
-        lines.append(f"{c:<25} | {t:<35} | {d:<20} | {s}")
+        lines.append(f"{c:<25} | {t:<34} | {d:<24} | {s}")
 
     return "\n".join(lines)
 

@@ -1413,7 +1413,8 @@ async def main_async(args: argparse.Namespace) -> None:
 
 def main() -> None:
     if len(sys.argv) == 1:
-        print("Run 'bb --help' to see available commands.", file=sys.stderr)
+        parser = _build_parser()
+        parser.print_help(sys.stderr)
         sys.exit(1)
 
     args = _parse_args()
