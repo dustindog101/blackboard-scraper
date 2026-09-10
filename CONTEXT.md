@@ -68,4 +68,19 @@ _Avoid_: Matching prompts, left choices
 The safety mechanism that blocks beginning a new assessment attempt or launching browser exam sessions unless explicit initiation flags (`--start-attempt` and `--force-start`) are supplied.
 _Avoid_: Start blocker, attempt lock
 
+**Subcommand**:
+A first-class positional noun or verb identifying the primary operation to execute (e.g. `login`, `due`, `grades`, `outline`, `bot`, `assignment`).
+_Avoid_: Root flag command, option trigger
+
+**Legacy Flag Interceptor**:
+A transparent pre-parsing compatibility layer that maps deprecated root double-dash flags to canonical subcommands without breaking existing caller scripts.
+_Avoid_: Flag converter, shim script
+
+**Smart Login**:
+Automated headless SSO authentication leveraging monotonic macOS Messages SQLite delta tracking to intercept Duo 2FA SMS passcodes in <3ms.
+_Avoid_: Auto-exp, experimental login
+
+**Daemon Command Group**:
+The hierarchical subcommands (`start`, `stop`, `restart`, `status`, `run`) controlling background daemon lifecycles.
+_Avoid_: Bot flag flags, daemon options
 

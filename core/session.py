@@ -663,7 +663,7 @@ async def check_session_async(quiet: bool = False, debug: bool = False, headless
     if fast_only:
         if not quiet:
             print("❌ Session EXPIRED or missing cookies.")
-            print("   Run `python3 main.py --login` to authenticate.")
+            print("   Run `bb login` to authenticate.")
         return False
 
     # 2. Browser-level fallback verification (if explicitly requested via fast_only=False)
@@ -703,7 +703,7 @@ async def check_session_async(quiet: bool = False, debug: bool = False, headless
             else:
                 if not quiet:
                     print("❌ Session EXPIRED or missing.")
-                    print("   Run `python3 main.py --login` to re-authenticate.")
+                    print("   Run `bb login` to re-authenticate.")
 
             return valid
     except Exception as e:
@@ -724,7 +724,7 @@ def check_session(quiet: bool = False, debug: bool = False, headless: bool = Tru
     if fast_only:
         if not quiet:
             print("❌ Session EXPIRED or missing cookies.")
-            print("   Run `python3 main.py --login` to authenticate.")
+            print("   Run `bb login` to authenticate.")
         return False
 
     # Fallback to async loop runner if fast_only=False
@@ -903,20 +903,21 @@ def login(force: bool = False, username: str = None, password: str = None, cdp_u
             track_session_usage("login")
             print("✨ Session saved successfully.")
         else:
-            print("⚠️ URL looks correct, but it might still be a login page. Please verify by running --check-session.")
+            print("⚠️ URL looks correct, but it might still be a login page. Please verify by running 'bb check'.")
 
         context.close()
 
 
-def login_auto(username: str = None, password: str = None, headless: bool = False, cdp_url: str = None, auto_exp: bool = False, force: bool = False) -> bool:
+def login_auto(username: str = None, password: str = None, headless: bool = False, cdp_url: str = None, auto_exp: bool = False, force: bool = False, passcode: str = None) -> bool:
     """
     Automated login via SSO + Duo text passcode.
     When auto_exp=True, automatically listens for incoming macOS SMS/iMessage 2FA passcodes.
     When force=True, clears cookies and forces a full re-authentication.
+    When passcode is provided, submits the supplied 6-digit code directly on the first attempt.
     Returns True if login succeeds, False otherwise.
     """
     if cdp_url:
-        print("🔌 Ignoring --login --auto since you are connected to an existing CDP browser.")
+        print("🔌 Ignoring 'bb login auto' since you are connected to an existing CDP browser.")
         return False
 
     # Ensure config exists. If missing, blank config is created with notification.
@@ -947,8 +948,14 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
             print("❌ No login detected and no credentials found in config.json.")
             if not created_blank:
                 print("   A blank config has been created or verified at: config.json")
-            print("   Please populate config.json['auto_login'] or run: bb --auto-exp")
+            print("   Please populate config.json['auto_login'] or run: bb login")
             return False
+
+    if not force:
+        valid, _ = quick_check_session_http()
+        if valid:
+            print("✅ You are already logged in! (Use 'bb login --force' to re-authenticate)")
+            return True
 
     if auto_exp:
         if is_mac:
@@ -956,9 +963,9 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
         else:
             print("\n⚡ Automated SSO Login with Terminal & Telegram 2FA Entry (Windows/Linux)")
     else:
-        print("\n⚠️  [EXPERIMENTAL] --login --auto is an experimental feature.")
+        print("\n⚠️  [EXPERIMENTAL] 'bb login auto' is an experimental feature.")
         print("   UMBC's SSO or Duo configuration may change at any time, breaking this feature without notice.")
-        print("   If login fails, run: python3 main.py --login\n")
+        print("   If login fails, run: bb login --manual\n")
 
     print(f"   📋 Credentials loaded (username: {usr})")
     print("🚀 Starting Automated SSO Login...")
@@ -1244,78 +1251,84 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
             passcode_accepted = False
 
             for attempt in range(1, max_attempts + 1):
-                result_queue = queue.Queue()
-                stop_event = threading.Event()
-                trigger_time = time.time()
+                code = None
 
-                # A. Real-time macOS SMS/iMessage Listener (macOS only)
-                if is_mac:
-                    def _sms_worker():
+                # If passcode was supplied via CLI argument, submit directly on first attempt
+                if passcode and attempt == 1:
+                    code = str(passcode).strip()
+                    print(f"\n   🔑 Submitting Duo passcode supplied via CLI: {code}")
+                else:
+                    result_queue = queue.Queue()
+                    stop_event = threading.Event()
+                    trigger_time = time.time()
+
+                    # A. Real-time macOS SMS/iMessage Listener (macOS only)
+                    if is_mac:
+                        def _sms_worker():
+                            try:
+                                from core.sms_listener import wait_for_duo_sms_passcode
+                                c = wait_for_duo_sms_passcode(start_rowid=start_rowid, after_unix_timestamp=trigger_time, timeout_seconds=90)
+                                if c and not stop_event.is_set():
+                                    result_queue.put(("sms", c))
+                            except Exception:
+                                pass
+                        threading.Thread(target=_sms_worker, daemon=True).start()
+
+                    # B. Telegram prompt
+                    if tg_notifier:
+                        header = "🔐 <b>UMBC Duo 2FA Passcode Required</b>" if attempt == 1 else f"❌ <b>Incorrect Duo Passcode (Attempt {attempt}/{max_attempts})</b>"
                         try:
-                            from core.sms_listener import wait_for_duo_sms_passcode
-                            c = wait_for_duo_sms_passcode(start_rowid=start_rowid, after_unix_timestamp=trigger_time, timeout_seconds=90)
-                            if c and not stop_event.is_set():
-                                result_queue.put(("sms", c))
+                            tg_notifier.send_raw_message(
+                                f"{header}\n\n"
+                                f"Duo sent a 6-digit text passcode to your phone{sent_to_hint}.\n\n"
+                                f"Reply with the 6-digit code or enter it in your terminal."
+                            )
+                            def _tg_worker():
+                                c = tg_notifier.poll_for_passcode(timeout_sec=120, stop_event=stop_event)
+                                if c and not stop_event.is_set():
+                                    result_queue.put(("telegram", c))
+                            threading.Thread(target=_tg_worker, daemon=True).start()
                         except Exception:
                             pass
-                    threading.Thread(target=_sms_worker, daemon=True).start()
 
-                # B. Telegram prompt
-                if tg_notifier:
-                    header = "🔐 <b>UMBC Duo 2FA Passcode Required</b>" if attempt == 1 else f"❌ <b>Incorrect Duo Passcode (Attempt {attempt}/{max_attempts})</b>"
+                    print("\n" + "=" * 60)
+                    if attempt > 1:
+                        print("  ❌ Incorrect passcode. Please check your phone for the latest code.")
+                    print(f"  📲 Duo text passcode sent to your phone{sent_to_hint} (Attempt {attempt}/{max_attempts}).")
+                    if is_mac:
+                        print("  ⚡ Listening for incoming macOS SMS passcode in real-time...")
+                    else:
+                        print("  💡 Enter the 6-digit passcode below, or reply via Telegram.")
+                    if tg_notifier:
+                        print("  💡 You can also reply directly in Telegram or type it below.")
+                    print("=" * 60)
+
+                    # C. CLI terminal fallback
+                    def _cli_worker():
+                        try:
+                            prompt_label = "  🔑 Enter your Duo passcode (or wait for SMS auto-capture): " if is_mac else "  🔑 Enter your Duo passcode: "
+                            cli_input = input(prompt_label).strip()
+                            if cli_input and not stop_event.is_set():
+                                result_queue.put(("cli", cli_input))
+                        except (EOFError, KeyboardInterrupt):
+                            pass
+
+                    threading.Thread(target=_cli_worker, daemon=True).start()
+
                     try:
-                        tg_notifier.send_raw_message(
-                            f"{header}\n\n"
-                            f"Duo sent a 6-digit text passcode to your phone{sent_to_hint}.\n\n"
-                            f"Reply with the 6-digit code or enter it in your terminal."
-                        )
-                        def _tg_worker():
-                            c = tg_notifier.poll_for_passcode(timeout_sec=120, stop_event=stop_event)
-                            if c and not stop_event.is_set():
-                                result_queue.put(("telegram", c))
-                        threading.Thread(target=_tg_worker, daemon=True).start()
-                    except Exception:
-                        pass
-
-                print("\n" + "=" * 60)
-                if attempt > 1:
-                    print("  ❌ Incorrect passcode. Please check your phone for the latest code.")
-                print(f"  📲 Duo text passcode sent to your phone{sent_to_hint} (Attempt {attempt}/{max_attempts}).")
-                if is_mac:
-                    print("  ⚡ Listening for incoming macOS SMS passcode in real-time...")
-                else:
-                    print("  💡 Enter the 6-digit passcode below, or reply via Telegram.")
-                if tg_notifier:
-                    print("  💡 You can also reply directly in Telegram or type it below.")
-                print("=" * 60)
-
-                # C. CLI terminal fallback
-                def _cli_worker():
-                    try:
-                        prompt_label = "  🔑 Enter your Duo passcode (or wait for SMS auto-capture): " if is_mac else "  🔑 Enter your Duo passcode: "
-                        cli_input = input(prompt_label).strip()
-                        if cli_input and not stop_event.is_set():
-                            result_queue.put(("cli", cli_input))
-                    except (EOFError, KeyboardInterrupt):
-                        pass
-
-                threading.Thread(target=_cli_worker, daemon=True).start()
-
-                code = None
-                try:
-                    src, code = result_queue.get(timeout=120)
-                    stop_event.set()
-                    if src == "sms":
-                        print(f"\n   ⚡ \033[32mAuto-captured Duo SMS Passcode from macOS Messages: {code}\033[0m")
-                        if tg_notifier:
-                            tg_notifier.send_raw_message(f"⚡ <i>Auto-detected SMS passcode <code>{code}</code> from macOS Messages. Submitting...</i>")
-                    elif src == "telegram":
-                        print(f"\n   📲 Received Duo passcode from Telegram: {code}")
-                except queue.Empty:
-                    stop_event.set()
-                    print("\n   ❌ Timeout waiting for passcode entry.")
-                    context.close()
-                    return False
+                        src, code = result_queue.get(timeout=120)
+                        stop_event.set()
+                        if src == "sms":
+                            print(f"\n   ⚡ \033[32mAuto-captured Duo SMS Passcode from macOS Messages: {code}\033[0m")
+                            if tg_notifier:
+                                tg_notifier.send_raw_message(f"⚡ <i>Auto-detected SMS passcode <code>{code}</code> from macOS Messages. Submitting...</i>")
+                        elif src == "telegram":
+                            print(f"\n   📲 Received Duo passcode from Telegram: {code}")
+                    except queue.Empty:
+                        stop_event.set()
+                        print("\n   ❌ Timeout waiting for passcode entry.")
+                        context.close()
+                        return False
 
                 if not code:
                     print("   ❌ No passcode entered. Aborting.")
