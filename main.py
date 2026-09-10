@@ -306,6 +306,18 @@ def _intercept_legacy_args(argv: List[str]) -> Tuple[List[str], Optional[str]]:
         "profile", "whoami", "courses", "discover", "terms", "bot", "menubar", "app",
         "guide", "help", "discussions", "discuss"
     }
+    GUIDE_TOPICS = {"auth", "courses", "schema", "telegram", "concurrency"}
+
+    # Intercept 'bb help <subcommand>' (e.g. 'bb help assignment' -> 'bb assignment --help')
+    if len(argv) >= 2 and argv[0] in ("help", "guide"):
+        target_topic = argv[1]
+        if target_topic not in GUIDE_TOPICS and target_topic in subcommands:
+            return [target_topic, "--help"] + argv[2:], None
+
+    # Intercept 'bb <subcommand> help' (e.g. 'bb assignment help' -> 'bb assignment --help')
+    if len(argv) >= 2 and argv[1] in ("help", "-h") and argv[0] in subcommands and argv[0] not in ("search", "find"):
+        return [argv[0], "--help"] + argv[2:], None
+
     if argv[0] in subcommands:
         return argv, None
 
@@ -1173,6 +1185,13 @@ async def main_async(args: argparse.Namespace) -> None:
             allow_start=allow_start,
             force_start=force_start,
         )
+
+        if not data or data.get("status") == "NOT_FOUND":
+            if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
+                _emit_json(args, data or {"status": "NOT_FOUND", "target": assignment_target})
+            else:
+                print(format_assessment_attempt_cli(data or {"status": "NOT_FOUND", "target": assignment_target}), file=sys.stderr)
+            sys.exit(1)
 
         if getattr(args, "md", False):
             saved_path = save_assessment_attempt(data)

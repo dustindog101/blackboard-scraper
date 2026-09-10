@@ -6,6 +6,7 @@ and transparent redirection for legacy root flags (bb --due, bb --auto-exp).
 
 import unittest
 from main import _intercept_legacy_args, _parse_args
+from scrapers.quiz import format_assessment_attempt_cli
 
 
 class TestLegacyInterceptor(unittest.TestCase):
@@ -348,6 +349,63 @@ class TestGuideAndCompatDetails(unittest.TestCase):
 
         args2 = _parse_args(["login", "--duo-passcode", "654321"])
         self.assertEqual(args2.duo_passcode, "654321")
+
+    def test_assignment_help_interception(self):
+        # 'bb assignment help' -> 'bb assignment --help'
+        res, hint = _intercept_legacy_args(["assignment", "help"])
+        self.assertEqual(res, ["assignment", "--help"])
+        self.assertIsNone(hint)
+
+        # 'bb assignment -h' -> 'bb assignment --help'
+        res, hint = _intercept_legacy_args(["assignment", "-h"])
+        self.assertEqual(res, ["assignment", "--help"])
+        self.assertIsNone(hint)
+
+        # 'bb quiz help' -> 'bb quiz --help'
+        res, hint = _intercept_legacy_args(["quiz", "help"])
+        self.assertEqual(res, ["quiz", "--help"])
+        self.assertIsNone(hint)
+
+        # 'bb help assignment' -> 'bb assignment --help'
+        res, hint = _intercept_legacy_args(["help", "assignment"])
+        self.assertEqual(res, ["assignment", "--help"])
+        self.assertIsNone(hint)
+
+        # 'bb help due' -> 'bb due --help'
+        res, hint = _intercept_legacy_args(["help", "due"])
+        self.assertEqual(res, ["due", "--help"])
+        self.assertIsNone(hint)
+
+    def test_search_help_not_intercepted(self):
+        # Free-text search for the query 'help' must NOT be converted to --help
+        res, hint = _intercept_legacy_args(["search", "help"])
+        self.assertEqual(res, ["search", "help"])
+        self.assertIsNone(hint)
+
+        res, hint = _intercept_legacy_args(["find", "help"])
+        self.assertEqual(res, ["find", "help"])
+        self.assertIsNone(hint)
+
+    def test_guide_topics_not_redirected_to_subcommand_help(self):
+        # Guide topics ('auth', 'courses', etc.) must remain guide topics
+        res, hint = _intercept_legacy_args(["help", "auth"])
+        self.assertEqual(res, ["help", "auth"])
+        self.assertIsNone(hint)
+
+        res, hint = _intercept_legacy_args(["help", "courses"])
+        self.assertEqual(res, ["help", "courses"])
+        self.assertIsNone(hint)
+
+    def test_assignment_not_found_cli_formatting(self):
+        data = {
+            "status": "NOT_FOUND",
+            "error": "No assignment or quiz matching 'Nonexistent Homework' was found in course 'IS410'.",
+            "target": "Nonexistent Homework",
+            "course_id": "IS410",
+        }
+        formatted = format_assessment_attempt_cli(data)
+        self.assertIn("❌ No assignment or quiz matching 'Nonexistent Homework' was found in course 'IS410'.", formatted)
+        self.assertIn("💡 Tip: Run 'bb assignments -c IS410' or 'bb due'", formatted)
 
 
 if __name__ == "__main__":
