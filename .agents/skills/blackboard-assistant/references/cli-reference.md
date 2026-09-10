@@ -1,95 +1,118 @@
 # Blackboard Scraper CLI Complete Reference
 
+Commands can be invoked globally via `bb`, `blackboard`, `bbscraper`, or directly via `python3 main.py <command>`. Legacy `--flags` are fully backward-compatible.
+
 ### Authentication & Sessions
 ```bash
 # Verify session token validity (<150ms HTTP probe)
-python3 main.py --check-session
+bb check
+bb session check
 
 # View session creation timestamp and usage stats
-python3 main.py --session-info
+bb session info
 
 # View detailed session lifespan telemetry & rolling stats
-python3 main.py --session-stats
+bb session stats
 
 # Fully automated login with real-time macOS SMS Duo 2FA extraction
-python3 main.py --auto-exp
+bb login
+bb login auto
 
 # Force clean re-login with automated SMS 2FA extraction
-python3 main.py --auto-exp --force
+bb login --force
 
 # Manual browser login with visible window
-python3 main.py --login --visible
+bb login --manual
 
 # Logout (clears cached cookies and session metadata)
-python3 main.py --logout
+bb logout
 ```
 
 ### Academic Scrapers
 ```bash
 # Run daily briefing across all enrolled courses
-python3 main.py --briefing
+bb briefing
 
 # Check upcoming deadlines (default: 7 days)
-python3 main.py --due 7d
-python3 main.py --due 14d --json
+bb due 7d
+bb due 14d --json
+bb due overdue
 
 # Check latest grades across all courses
-python3 main.py --grades
-python3 main.py --grades -c IS410
+bb grades
+bb grades IS410
+
+# List assignments across course(s) — HTTP fast-path first
+bb assignments
+bb assignments IS410
+bb assignments IS410 --json
+
+# Inspect ONE assignment/quiz — safe info mode, never starts an attempt
+bb assignment "Homework 1" -c IS410
+bb assignment _8954640_1 --json
+
+# Allow starting an attempt (guarded); confirm timed exams explicitly
+bb assignment "Quiz 2" -c MATH215 --start-attempt
+bb assignment "Final" -c IS410 --start-attempt --force-start
 
 # Check announcements across all courses
-python3 main.py --announcements
+bb announcements
+bb announcements ECON122
 
 # Search course content / syllabus
-python3 main.py --search "Syllabus"
-python3 main.py --search "Midterm Exam" -c ECON122
+bb search "Syllabus"
+bb search "Midterm Exam" -c ECON122
 
 # Inspect course outline (shallow summary by default with folder item counts)
-python3 main.py --outline -c IS410
+bb outline IS410
 
 # Selectively expand a specific folder by name or ID
-python3 main.py --outline -c IS410 -f "Homework"
-python3 main.py --outline -c IS410 -f _105740_1
+bb outline IS410 -f "Homework"
+bb outline IS410 -f _105740_1
 
 # Inspect full recursive tree (all folders expanded)
-python3 main.py --outline -c IS410 --expand-all
+bb outline IS410 --expand-all
 
 # Limit tree depth
-python3 main.py --outline -c IS410 --depth 2
+bb outline IS410 --depth 2
 
 # Launch interactive terminal folder explorer
-python3 main.py --outline -c IS410 -i
+bb outline IS410 -i
+
+# Download course file or document
+bb download "Worksheet_1.pdf"
 ```
 
 ### Course Discovery & Term Isolation
 ```bash
 # Auto-discover and save current active semester courses
-python3 main.py --discover
+bb discover
 
 # List all lifetime enrolled academic terms and courses
-python3 main.py --list-terms
+bb terms
 
 # Filter discovery to a specific term
-python3 main.py --discover --term FA2026
+bb discover --term FA2026
 
 # List currently configured courses in config.json
-python3 main.py --courses
+bb courses
 ```
 
 ### Background Telegram Bot Daemon
 ```bash
 # Start background Telegram bot daemon
-python3 main.py --bot-start
+bb bot start
 
 # Stop running bot daemon
-python3 main.py --bot-stop
+bb bot stop
 
 # Restart bot daemon (broadcasts rich startup card)
-python3 main.py --bot-restart
+bb bot restart
 
 # Check daemon health, PID, and RSS memory
-python3 main.py --bot-status
+bb bot status
 
 # Run bot directly in foreground (for debugging)
-python3 main.py --bot
+bb bot
 ```
+
