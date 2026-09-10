@@ -60,4 +60,12 @@ _Avoid_: Passive scraping, safe read, pre-check
 A specific student answer record within an assessment attempt containing the question prompt, choice options, selected answer, point value, and grading state.
 _Avoid_: Question response, answer object
 
+**Match Terms**:
+The set of prompt concepts extracted from `question.prompts[]` representing the left-hand premises to be matched against choice definitions in a Matching assessment question.
+_Avoid_: Matching prompts, left choices
+
+**Attempt Initiation Guard**:
+The safety mechanism that blocks beginning a new assessment attempt or launching browser exam sessions unless explicit initiation flags (`--start-attempt` and `--force-start`) are supplied.
+_Avoid_: Start blocker, attempt lock
+
 

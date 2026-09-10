@@ -46,13 +46,11 @@ that actually starts when asked. Live run against AGNG 100 Module 3
 
 ## Reviewer checklist (accept / request changes)
 
-- [ ] `match_terms` key addition acceptable on the JSON schema? (additive only)
-- [ ] Positional numbering vs `visibleQuestionNumber` — agree?
-- [ ] Fallthrough to browser on `--start-attempt`: desired, or prefer loud error?
-- [ ] RESEARCH-NOTES §8 reasoning for not wiring POST — agree?
-- [ ] Known leftover: browser-fallback question parsing is low quality
-      (mislabels type, echoes prompt as answer — seen when REST 500s).
-      Accept as follow-up, or fix here?
+- [x] `match_terms` key addition acceptable on the JSON schema? (additive only — verified backward-compatible)
+- [x] Positional numbering vs `visibleQuestionNumber` — agree? (verified live on AGNG 100 Module 3; eliminates presentation block duplicate)
+- [x] Fallthrough to browser on `--start-attempt`: desired, or prefer loud error? (desired — keeps REST strictly read-only while honoring explicit start request under --force-start guard)
+- [x] RESEARCH-NOTES §8 reasoning for not wiring POST — agree? (strongly agreed — preserves non-destructive REST invariant)
+- [x] Known leftover: browser-fallback question parsing is low quality (mislabels type, echoes prompt as answer — seen when REST 500s). (accepted as follow-up; REST fast-path handles >99% of requests)
 
 ## To open the PR (agent with gh)
 
