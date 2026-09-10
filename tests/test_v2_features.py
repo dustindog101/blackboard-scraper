@@ -249,7 +249,9 @@ class TestConfigInitializationAndCredentials(unittest.TestCase):
         self.assertTrue(has_auto_login_credentials({"auto_login": {"username": "user123", "password": "securepassword"}}))
 
     def test_save_auto_login_credentials(self):
+        import io
         import tempfile
+        from contextlib import redirect_stdout
         from pathlib import Path
         from unittest.mock import patch
         import core.config as config_mod
@@ -257,7 +259,7 @@ class TestConfigInitializationAndCredentials(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             test_cfg_path = Path(tmpdir) / "config.json"
             test_cfg_path.write_text(json.dumps({"courses": {"_1001_1": "Test Course"}}))
-            with patch.object(config_mod, "CONFIG_FILE", test_cfg_path):
+            with patch.object(config_mod, "CONFIG_FILE", test_cfg_path), redirect_stdout(io.StringIO()):
                 config_mod.save_auto_login_credentials("student1", "secret123")
                 saved = json.loads(test_cfg_path.read_text())
                 self.assertEqual(saved["auto_login"]["username"], "student1")
@@ -270,19 +272,26 @@ class TestTUIAuthPromptAndAutoRecovery(unittest.TestCase):
     @patch("builtins.input", side_effect=["testuser@umbc.edu", "y", "1"])
     @patch("core.session.getpass", return_value="mypassword123")
     def test_prompt_credentials_tui_success(self, mock_getpass, mock_input):
+        import io
+        from contextlib import redirect_stdout
         from core.session import prompt_credentials_tui
 
-        usr, pwd, save_creds, mode = prompt_credentials_tui(default_auto_exp=True)
+        with redirect_stdout(io.StringIO()):
+            usr, pwd, save_creds, mode = prompt_credentials_tui(default_auto_exp=True)
         self.assertEqual(usr, "testuser@umbc.edu")
         self.assertEqual(pwd, "mypassword123")
         self.assertTrue(save_creds)
-        self.assertEqual(mode, "auto_exp")
+        expected_mode = "auto_exp" if sys.platform == "darwin" else "auto"
+        self.assertEqual(mode, expected_mode)
 
     @patch("builtins.input", side_effect=KeyboardInterrupt)
     def test_prompt_credentials_tui_cancel(self, mock_input):
+        import io
+        from contextlib import redirect_stdout
         from core.session import prompt_credentials_tui
 
-        usr, pwd, save_creds, mode = prompt_credentials_tui(default_auto_exp=True)
+        with redirect_stdout(io.StringIO()):
+            usr, pwd, save_creds, mode = prompt_credentials_tui(default_auto_exp=True)
         self.assertIsNone(usr)
         self.assertIsNone(pwd)
         self.assertFalse(save_creds)
@@ -307,9 +316,12 @@ class TestTUIAuthPromptAndAutoRecovery(unittest.TestCase):
     @patch("core.session.has_auto_login_credentials", return_value=True)
     @patch("core.session.login_auto")
     def test_require_session_auto_recovery_with_credentials(self, mock_login_auto, mock_has_creds, mock_ensure, mock_check, mock_http):
+        import io
+        from contextlib import redirect_stdout
         from core.session import _require_session
 
-        res = _require_session()
+        with redirect_stdout(io.StringIO()):
+            res = _require_session()
         self.assertTrue(res)
         mock_login_auto.assert_called_once_with(username=None, password=None, headless=True, cdp_url=None, auto_exp=True, force=False)
 
@@ -361,13 +373,17 @@ class TestWindowsCrossPlatformBehaviors(unittest.TestCase):
     @patch("builtins.input", side_effect=["testuser@umbc.edu", "y", "1"])
     @patch("core.session.getpass", return_value="mypassword123")
     def test_prompt_credentials_tui_windows_mode(self, mock_getpass, mock_input):
+        import io
+        from contextlib import redirect_stdout
         from core.session import prompt_credentials_tui
 
-        usr, pwd, save_creds, mode = prompt_credentials_tui(default_auto_exp=True)
+        with redirect_stdout(io.StringIO()):
+            usr, pwd, save_creds, mode = prompt_credentials_tui(default_auto_exp=True)
         self.assertEqual(usr, "testuser@umbc.edu")
         self.assertEqual(pwd, "mypassword123")
         self.assertTrue(save_creds)
         self.assertEqual(mode, "auto")
+
 
 class TestBrowserLaunchCandidates(unittest.TestCase):
     def test_candidates_order_and_structure(self):
