@@ -109,7 +109,7 @@ bb [GLOBAL_FLAGS] <SUBCOMMAND> [SUB_ACTION] [POSITIONAL_ARGS] [OPTIONS]
 
 ## 3. Backward Compatibility Contract
 
-A lightweight pre-parsing interceptor converts legacy root flags to canonical subcommands before argument evaluation. **Complete inventory** (every historical root flag MUST map — adding a flag without a shim entry is a release-blocking bug):
+A lightweight pre-parsing interceptor converts legacy root flags to canonical subcommands before argument evaluation. **Complete inventory** (every historical root flag MUST map — adding a flag without an interceptor entry is a release-blocking bug):
 
 | Legacy invocation | Canonical |
 | :--- | :--- |
@@ -164,4 +164,4 @@ Existing automation, cron tasks, and agents will continue executing without fail
 4. **Missing positionals**: `bb search` / `bb download` without the required positional fail via argparse (`error: the following arguments are required`); `bb assignment` without target fails with a guiding stderr message. `bb due` with no window defaults to `7d`.
 5. **Attempt safety is inviolable**: `bb assignment` MUST NOT start attempts or timers unless `--start-attempt` is passed, and MUST NOT start timed exams without `--force-start`. Any refactor touching this path requires re-verification against ADR-0003.
 6. **Engine preservation checklist** (run on every CLI refactor): assignments HTTP fast-path hit returns data in <2s; `bb assignment "Homework 1" -c IS410` returns `[REST Fast-Path]`; `ruff check main.py` clean (the v1 `Tuple` import bug broke Python 3.10–3.13); full unit suite green.
-7. **Adding a future command**: add (a) subparser, (b) dispatcher branch, (c) interceptor set entry + legacy mapping if replacing flags, (d) README + CLI_REFERENCE + skill docs, (e) spec row above, (f) shim + parse tests. Missing (c) or (f) blocks the release.
+7. **Adding a future command**: add (a) subparser, (b) dispatcher branch, (c) interceptor set entry + legacy mapping if replacing flags, (d) README + CLI_REFERENCE + skill docs, (e) spec row above, (f) interceptor + parse tests. Missing (c) or (f) blocks the release.

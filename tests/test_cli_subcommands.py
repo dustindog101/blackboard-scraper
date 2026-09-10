@@ -1,5 +1,5 @@
 """
-Unit tests for Blackboard Scraper Natural CLI Subcommands and Legacy Shim.
+Unit tests for Blackboard Scraper Natural CLI Subcommands and Legacy Flag Interceptor.
 Tests both canonical modern subcommands (bb login, bb due, bb outline)
 and transparent redirection for legacy root flags (bb --due, bb --auto-exp).
 """
@@ -192,7 +192,7 @@ class TestLegacyEndToEndParsing(unittest.TestCase):
         self.assertEqual(args.action, "check")
 
 
-class TestAssignmentShimAndSubcommand(unittest.TestCase):
+class TestAssignmentInterceptorAndSubcommand(unittest.TestCase):
     """Regression coverage for the single-assessment inspector (ADR-0003):
     every historical spelling must survive the subcommand migration."""
 
@@ -283,6 +283,71 @@ class TestGuideAndCompatDetails(unittest.TestCase):
         res, hint = _intercept_legacy_args(["--upcoming", "10"])
         self.assertEqual(res, ["due", "10d"])
         self.assertEqual(hint, "due 10d")
+
+    def test_legacy_guide_no_topic_interceptor_and_parsing(self):
+        res, hint = _intercept_legacy_args(["--guide"])
+        self.assertEqual(res, ["guide"])
+        self.assertEqual(hint, "guide")
+        args = _parse_args(["--guide"])
+        self.assertEqual(args.subcommand, "guide")
+        self.assertIsNone(args.topic)
+
+        res_topic, hint_topic = _intercept_legacy_args(["--guide", "auth"])
+        self.assertEqual(res_topic, ["guide", "auth"])
+        self.assertEqual(hint_topic, "guide auth")
+        args_topic = _parse_args(["--guide", "auth"])
+        self.assertEqual(args_topic.subcommand, "guide")
+        self.assertEqual(args_topic.topic, "auth")
+
+    def test_search_and_download_with_course_flag(self):
+        args_s1 = _parse_args(["search", "test", "-c", "IS410"])
+        self.assertEqual(args_s1.query, "test")
+        self.assertEqual(args_s1.course, "IS410")
+
+        args_s2 = _parse_args(["search", "test", "--course", "IS410", "--all"])
+        self.assertEqual(args_s2.query, "test")
+        self.assertEqual(args_s2.course, "IS410")
+        self.assertTrue(args_s2.all)
+
+        args_d1 = _parse_args(["download", "file.pdf", "-c", "IS410"])
+        self.assertEqual(args_d1.item, "file.pdf")
+        self.assertEqual(args_d1.course, "IS410")
+
+        args_d2 = _parse_args(["download", "file.pdf", "--course", "IS410", "--all"])
+        self.assertEqual(args_d2.item, "file.pdf")
+        self.assertEqual(args_d2.course, "IS410")
+        self.assertTrue(args_d2.all)
+
+    def test_leading_boolean_flags_reordering(self):
+        res1, _ = _intercept_legacy_args(["--json", "briefing"])
+        self.assertEqual(res1[0], "briefing")
+        self.assertIn("--json", res1)
+
+        res2, _ = _intercept_legacy_args(["-v", "outline", "IS410"])
+        self.assertEqual(res2[0], "outline")
+        self.assertIn("-v", res2)
+        self.assertIn("IS410", res2)
+
+        res3, _ = _intercept_legacy_args(["--raw", "--json", "grades"])
+        self.assertEqual(res3[0], "grades")
+        self.assertIn("--raw", res3)
+        self.assertIn("--json", res3)
+
+    def test_standalone_begin_attempt_interceptor(self):
+        res, hint = _intercept_legacy_args(["--begin-attempt", "_123_1"])
+        self.assertEqual(res, ["assignment", "_123_1", "--start-attempt"])
+        self.assertEqual(hint, "assignment _123_1 --start-attempt")
+
+        res_bare, hint_bare = _intercept_legacy_args(["--begin-attempt"])
+        self.assertEqual(res_bare, ["assignment", "--start-attempt"])
+        self.assertEqual(hint_bare, "assignment --start-attempt")
+
+    def test_login_passcode_flag(self):
+        args1 = _parse_args(["login", "--passcode", "123456"])
+        self.assertEqual(args1.duo_passcode, "123456")
+
+        args2 = _parse_args(["login", "--duo-passcode", "654321"])
+        self.assertEqual(args2.duo_passcode, "654321")
 
 
 if __name__ == "__main__":

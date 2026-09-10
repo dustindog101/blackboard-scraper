@@ -11,7 +11,7 @@ This skill teaches agents how to operate, debug, and query the **UMBC Blackboard
 
 ## ⚡ Quick Reference: Most Common Commands
 
-Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** from any terminal directory (or `./.venv/bin/python main.py <command>` from the repo root). All legacy `--flag` invocations remain supported via the legacy shim.
+Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** from any terminal directory (or `./.venv/bin/python main.py <command>` from the repo root). All legacy `--flag` invocations remain supported via the Legacy Flag Interceptor.
 
 | Goal | Modern CLI Command | Output / Behavior |
 | :--- | :--- | :--- |

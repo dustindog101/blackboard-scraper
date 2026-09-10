@@ -308,6 +308,18 @@ def _intercept_legacy_args(argv: List[str]) -> Tuple[List[str], Optional[str]]:
     }
     if argv[0] in subcommands:
         return argv, None
+
+    BOOLEAN_PRE_FLAGS = {"--json", "--compact", "--raw", "-v", "--visible", "--md", "--save"}
+    if argv[0] in BOOLEAN_PRE_FLAGS and len(argv) > 1:
+        subcmd_idx = None
+        for idx, token in enumerate(argv):
+            if token in subcommands:
+                subcmd_idx = idx
+                break
+        if subcmd_idx is not None:
+            reordered = [argv[subcmd_idx]] + [arg for i, arg in enumerate(argv) if i != subcmd_idx]
+            return reordered, None
+
     if argv[0] in ("-h", "--help", "-v", "--version"):
         return argv, None
 
@@ -405,9 +417,21 @@ def _intercept_legacy_args(argv: List[str]) -> Tuple[List[str], Optional[str]]:
             target = new_argv.pop(idx)
         if "--begin-attempt" in new_argv:
             new_argv[new_argv.index("--begin-attempt")] = "--start-attempt"
-        new_argv.insert(0, target)
+        if target:
+            new_argv.insert(0, target)
         new_argv.insert(0, "assignment")
-        legacy_found = f"assignment {target}".strip()
+        legacy_found = f"assignment {target}".strip() if target else "assignment"
+    elif "--begin-attempt" in new_argv:
+        idx = new_argv.index("--begin-attempt")
+        new_argv.pop(idx)
+        target = ""
+        if idx < len(new_argv) and not new_argv[idx].startswith("-"):
+            target = new_argv.pop(idx)
+        new_argv.append("--start-attempt")
+        if target:
+            new_argv.insert(0, target)
+        new_argv.insert(0, "assignment")
+        legacy_found = f"assignment {target} --start-attempt".strip() if target else "assignment --start-attempt"
     elif "--discussions" in new_argv:
         new_argv.remove("--discussions")
         new_argv.insert(0, "discussions")
@@ -445,9 +469,9 @@ def _intercept_legacy_args(argv: List[str]) -> Tuple[List[str], Optional[str]]:
         query = ""
         if idx < len(new_argv) and not new_argv[idx].startswith("-"):
             query = new_argv.pop(idx)
-        new_argv.insert(0, query)
+            new_argv.insert(0, query)
         new_argv.insert(0, "search")
-        legacy_found = f"search {query}".strip()
+        legacy_found = f"search {query}".strip() if query else "search"
     elif "--grab" in new_argv or "--download" in new_argv:
         flag = "--grab" if "--grab" in new_argv else "--download"
         idx = new_argv.index(flag)
@@ -455,9 +479,9 @@ def _intercept_legacy_args(argv: List[str]) -> Tuple[List[str], Optional[str]]:
         item = ""
         if idx < len(new_argv) and not new_argv[idx].startswith("-"):
             item = new_argv.pop(idx)
-        new_argv.insert(0, item)
+            new_argv.insert(0, item)
         new_argv.insert(0, "download")
-        legacy_found = f"download {item}".strip()
+        legacy_found = f"download {item}".strip() if item else "download"
     elif "--bot-start" in new_argv:
         new_argv.remove("--bot-start")
         new_argv.insert(0, "start")
@@ -502,9 +526,9 @@ def _intercept_legacy_args(argv: List[str]) -> Tuple[List[str], Optional[str]]:
         topic = ""
         if idx < len(new_argv) and not new_argv[idx].startswith("-"):
             topic = new_argv.pop(idx)
-        new_argv.insert(0, topic)
+            new_argv.insert(0, topic)
         new_argv.insert(0, "guide")
-        legacy_found = f"guide {topic}".strip()
+        legacy_found = f"guide {topic}".strip() if topic else "guide"
 
     return new_argv, legacy_found
 
@@ -581,7 +605,7 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     login_p.add_argument("--force", "-f", action="store_true", help="Force re-login even if active session exists")
     login_p.add_argument("--username", "-u", help="Username for login (prompts if omitted)")
     login_p.add_argument("--password", "-p", help="Password for login (prompts if omitted)")
-    login_p.add_argument("--duo-passcode", help="Provide 6-digit Duo SMS passcode directly via CLI")
+    login_p.add_argument("--passcode", "--duo-passcode", dest="duo_passcode", help="Provide 6-digit Duo SMS passcode directly via CLI")
 
     subparsers.add_parser("logout", help="Logout (clear cached session cookies)")
 
@@ -625,10 +649,14 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     search_p = subparsers.add_parser("search", aliases=["find"], parents=[output_parent, engine_parent], help="Search for content/assignments matching query across courses")
     search_p.add_argument("query", metavar="QUERY", help="Search query string")
     search_p.add_argument("--type", help="Filter results by content type")
+    search_p.add_argument("--course", "-c", help="Restrict search to specific course ID(s) or code(s)")
+    search_p.add_argument("--all", action="store_true", help="Search across all configured courses")
 
     dl_p = subparsers.add_parser("download", aliases=["grab", "get"], parents=[output_parent, engine_parent], help="Grab and download specific content item or file")
     dl_p.add_argument("item", metavar="ITEM_ID_OR_NAME", help="Content item ID or file title")
     dl_p.add_argument("--out-dir", default="downloads", help="Destination directory (default: downloads)")
+    dl_p.add_argument("--course", "-c", help="Restrict download target to specific course ID(s) or code(s)")
+    dl_p.add_argument("--all", action="store_true", help="Search across all configured courses")
 
     subparsers.add_parser("calendar", aliases=["cal"], parents=[course_parent, output_parent, engine_parent], help="Scrape calendar due-dates")
     subparsers.add_parser("activity", parents=[output_parent, engine_parent], help="Scrape homepage activity stream")
@@ -646,8 +674,8 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     courses_p.add_argument("action", nargs="?", choices=["list", "discover", "terms"], default="list", help="Course action ('list', 'discover', 'terms')")
     courses_p.add_argument("--term", metavar="TERM", help="Filter academic term (e.g. current, FA2026, all)")
 
-    disc_p = subparsers.add_parser("discover", parents=[output_parent, engine_parent], help="Auto-discover and intelligently save current active semester courses")
-    disc_p.add_argument("--term", metavar="TERM", help="Filter academic term (e.g. current, FA2026, all)")
+    discover_p = subparsers.add_parser("discover", parents=[output_parent, engine_parent], help="Auto-discover and intelligently save current active semester courses")
+    discover_p.add_argument("--term", metavar="TERM", help="Filter academic term (e.g. current, FA2026, all)")
 
     subparsers.add_parser("terms", parents=[output_parent, engine_parent], help="List all lifetime enrolled academic terms and courses")
 
@@ -722,6 +750,34 @@ def _handle_discover_courses(term_filter: str | None = None, list_only: bool = F
             else:
                 print("   ❌ No courses found.", file=sys.stderr)
             ctx.close()
+
+
+def _run_discussions_sync(
+    target_cids: list[str],
+    courses: dict[str, str],
+    headless: bool,
+    cdp: str | None,
+    kwargs: dict,
+    md: bool,
+    titles_only: bool,
+) -> list[dict]:
+    raw_all_disc: list[dict] = []
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        ctx, _ = _launch_context(p, headless, cdp)
+        for course_id in target_cids:
+            page = ctx.new_page()
+            data = scrape_discussions(course_id, page, **kwargs)
+            if md:
+                save_discussions(data, course_id, titles_only=titles_only)
+            raw_all_disc.append({
+                "course_id": course_id,
+                "course_name": courses.get(course_id, course_id),
+                "discussions": data,
+            })
+            page.close()
+        ctx.close()
+    return raw_all_disc
 
 
 
@@ -838,6 +894,7 @@ async def main_async(args: argparse.Namespace) -> None:
                 cdp_url=cdp,
                 auto_exp=True,
                 force=force_flag,
+                passcode=getattr(args, "duo_passcode", None),
             )
         return
 
@@ -895,7 +952,14 @@ async def main_async(args: argparse.Namespace) -> None:
     }
     if subcmd in _NEEDS_COURSE_EXAMPLE and not target_cids:
         print(f"❌ Specify course (e.g. '{_NEEDS_COURSE_EXAMPLE[subcmd]}' or '-c IS410') or '--all'", file=sys.stderr)
-        return
+        sys.exit(1)
+
+    # A supplied-but-unmatched course token must never silently fan out to
+    # all courses (grades/announcements/search/download default to all only
+    # when NO course argument was given at all).
+    if subcmd in ("grades", "announcements", "announce", "news", "search", "find", "download", "grab", "get") and target_course_arg and not target_cids:
+        print(f"❌ No courses matched '{target_course_arg}'. Check the course code or use '--all'.", file=sys.stderr)
+        sys.exit(1)
 
     # From here down, academic commands require an active session
     if not await _require_session_async(cdp):
@@ -1096,7 +1160,7 @@ async def main_async(args: argparse.Namespace) -> None:
     if subcmd in ("assignment", "quiz", "asmt", "assessment") or assignment_target:
         if not assignment_target:
             print("❌ Specify an assignment ID or title (e.g. 'bb assignment \"Homework 1\" -c IS410')", file=sys.stderr)
-            return
+            sys.exit(1)
         target_cid = target_cids[0] if target_cids else None
         force_browser = getattr(args, "visible", False)
         allow_start = getattr(args, "start_attempt", False)
@@ -1123,7 +1187,8 @@ async def main_async(args: argparse.Namespace) -> None:
     # --- search / find ---
     search_query = getattr(args, "query", None)
     if subcmd in ("search", "find") or search_query:
-        matches = await find_items_async(search_query, courses, page=None, type_filter=getattr(args, "type", None))
+        search_scope = {cid: courses[cid] for cid in target_cids} if target_cids else courses
+        matches = await find_items_async(search_query, search_scope, page=None, type_filter=getattr(args, "type", None))
         if getattr(args, "json", False) or getattr(args, "out", None):
             _emit_json(args, matches)
         else:
@@ -1319,7 +1384,7 @@ async def main_async(args: argparse.Namespace) -> None:
     if subcmd in ("discussions", "discuss") or getattr(args, "discussions", False):
         if not target_cids:
             print("❌ Specify course (e.g. 'bb discussions IS410' or '-c IS410') or '--all'", file=sys.stderr)
-            return
+            sys.exit(1)
         kwargs = {
             "max_post_clicks": getattr(args, "max_posts", None),
             "max_participant_clicks": getattr(args, "max_parts", None),
@@ -1327,22 +1392,16 @@ async def main_async(args: argparse.Namespace) -> None:
             "participants_only": getattr(args, "participants_only", False),
             "titles_only": getattr(args, "titles_only", False),
         }
-        raw_all_disc: list[dict] = []
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            ctx, _ = _launch_context(p, headless, cdp)
-            for course_id in target_cids:
-                page = ctx.new_page()
-                data = scrape_discussions(course_id, page, **kwargs)
-                if getattr(args, "md", False):
-                    save_discussions(data, course_id, titles_only=getattr(args, "titles_only", False))
-                raw_all_disc.append({
-                    "course_id": course_id,
-                    "course_name": courses.get(course_id, course_id),
-                    "discussions": data
-                })
-                page.close()
-            ctx.close()
+        raw_all_disc = await asyncio.to_thread(
+            _run_discussions_sync,
+            target_cids=target_cids,
+            courses=courses,
+            headless=headless,
+            cdp=cdp,
+            kwargs=kwargs,
+            md=getattr(args, "md", False),
+            titles_only=getattr(args, "titles_only", False),
+        )
         if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
             _emit_json(args, raw_all_disc)
             return
