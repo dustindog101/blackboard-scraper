@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import difflib
 import json
 import os
 import re
@@ -307,6 +308,9 @@ def _intercept_legacy_args(argv: List[str]) -> Tuple[List[str], Optional[str]]:
         "guide", "help", "discussions", "discuss"
     }
     if argv[0] in subcommands:
+        # `bb <command> help` -> `bb <command> --help` (imsg-style helper).
+        if len(argv) == 2 and argv[1] == "help":
+            return [argv[0], "--help"], None
         return argv, None
 
     BOOLEAN_PRE_FLAGS = {"--json", "--compact", "--raw", "-v", "--visible", "--md", "--save"}
@@ -320,7 +324,7 @@ def _intercept_legacy_args(argv: List[str]) -> Tuple[List[str], Optional[str]]:
             reordered = [argv[subcmd_idx]] + [arg for i, arg in enumerate(argv) if i != subcmd_idx]
             return reordered, None
 
-    if argv[0] in ("-h", "--help", "-v", "--version"):
+    if argv[0] in ("-h", "--help", "-V", "--version"):
         return argv, None
 
     new_argv = list(argv)
@@ -533,48 +537,123 @@ def _intercept_legacy_args(argv: List[str]) -> Tuple[List[str], Optional[str]]:
     return new_argv, legacy_found
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="bb",
-        description="""
-╔═══════════════════════════════════════════════════════════════════════╗
-║       UMBC Blackboard Ultra High-Performance Scraper & Assistant      ║
-╚═══════════════════════════════════════════════════════════════════════╝
-High-speed headless scraper with adaptive concurrency, deep outline & syllabus
-extraction, safe assignment drawer inspection, dead-simple course selection,
-clean terminal UI by default, and standardized v2 JSON schemas.
-        """,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-═══════════════════════════════════════════════════════════════════════
-💡 CANONICAL SUBCOMMANDS (Global CLI: bb / blackboard / bbscraper)
-═══════════════════════════════════════════════════════════════════════
-  bb briefing                                         # Print high-speed briefing to CLI stdout
-  bb due 7d                                           # Print upcoming deadlines table (defaults to 7d)
-  bb outline MATH215                                  # View shallow outline summary with folder counts
-  bb outline MATH215 -f "Homework"                    # Selectively expand a specific folder
-  bb outline MATH215 --expand-all                     # View full recursive outline tree
-  bb outline MATH215 -i                               # Interactive terminal folder explorer
-  bb search "Python"                                  # Search content across all courses
-  bb download "Chapter01.ipynb"                       # Auto-detects course and downloads file
-  bb assignments IS410                                # List assignments (HTTP fast-path, <150ms)
-  bb assignment "Homework 1" -c IS410                 # Inspect one item, safe info mode (no attempt started)
-  bb grades MATH215                                   # View gradebook and feedback
-  bb announcements MATH215                            # View course announcements
-  bb profile                                          # View student profile (<150ms)
-  bb login                                            # Smart automated SSO login + Duo 2FA SMS capture
-  bb login --manual                                   # Manual visible browser login
-  bb bot start                                        # Launch Telegram bot daemon in background
-  bb session check                                    # Rapid session token validity probe
+__version__ = "2.0.0"
 
-📖 DETAILED TOPIC GUIDES:
-  bb guide auth                                       # Authentication & Headless execution
-  bb guide courses                                    # Course selection & multi-course syntax
-  bb guide schema                                     # Standardized v2 JSON schemas
-  bb guide telegram                                   # Telegram bot & notifications
-  bb guide concurrency                                # Adaptive async worker engine
-        """,
+
+# ---------------------------------------------------------------------------
+# Help UX infrastructure (imsg-style: `bb --help`, `bb <command> --help`)
+# ---------------------------------------------------------------------------
+# HOW TO ADD A NEW COMMAND (future-proofing):
+#   1. Add the canonical name to _CANONICAL_COMMANDS (keep grouped order).
+#   2. If it has aliases, add them to _COMMAND_ALIASES (alias -> canonical).
+#   3. Add one add_parser() call in _build_parser() with:
+#        help="<short verb phrase>",
+#        description="<one-line description>",
+#        epilog="Examples:\n  bb <cmd> ...\n  bb <cmd> ...",
+#      following the template of the existing commands below.
+#   4. `bb help <name>` / `bb <name> help` / did-you-mean then work for free.
+
+_CANONICAL_COMMANDS = [
+    # Getting started
+    "login", "logout", "check", "session",
+    # Daily workflow
+    "briefing", "due", "grades", "announcements",
+    # Course content
+    "outline", "assignments", "assignment", "search", "download",
+    "calendar", "activity", "profile", "discussions",
+    # Discovery
+    "courses", "discover", "terms",
+    # System
+    "bot", "menubar", "guide", "help",
+]
+
+_COMMAND_ALIASES = {
+    "brief": "briefing",
+    "announce": "announcements",
+    "news": "announcements",
+    "assign": "assignments",
+    "quiz": "assignment",
+    "asmt": "assignment",
+    "assessment": "assignment",
+    "find": "search",
+    "grab": "download",
+    "get": "download",
+    "cal": "calendar",
+    "whoami": "profile",
+    "discuss": "discussions",
+    "app": "menubar",
+}
+
+_GUIDE_TOPICS = ["auth", "courses", "schema", "telegram", "concurrency"]
+
+# Last argv passed to _parse_args (lets HelpfulParser.error() scope invalid
+# values to the right subcommand even when sys.argv belongs to a test runner).
+_LAST_ARGV: List[str] = []
+
+
+class HelpfulParser(argparse.ArgumentParser):
+    """ArgumentParser with concise did-you-mean errors (imsg-style)."""
+
+    def error(self, message: str) -> None:
+        # Invalid subcommand choice -> short suggestion, not a 500-char dump.
+        if "invalid choice" in message and "argument <command>" in message:
+            bad = ""
+            m = re.search(r"invalid choice:\s*'([^']+)'", message)
+            if m:
+                bad = m.group(1)
+            suggestion = _suggest_command(bad) if bad else None
+            self.print_usage(sys.stderr)
+            lines = [f"bb: unknown command '{bad}'"] if bad else ["bb: unknown command"]
+            if suggestion:
+                lines.append(f"Did you mean 'bb {suggestion}'?")
+            lines.append("Run 'bb --help' to see commands.")
+            self.exit(2, "\n".join(lines) + "\n")
+        # Invalid choice for a subcommand action (e.g. bot action, guide
+        # topic) -> point at that command's help instead of dumping usage.
+        m2 = re.search(r"invalid choice:\s*'([^']+)'", message)
+        if m2:
+            bad = m2.group(1)
+            argv = _LAST_ARGV or (sys.argv[1:] if isinstance(sys.argv, list) else [])
+            scope = argv[0] if argv and argv[0] in _CANONICAL_COMMANDS else None
+            self.print_usage(sys.stderr)
+            if scope:
+                self.exit(2, f"bb: unknown value '{bad}' for 'bb {scope}'. Run 'bb {scope} --help' to see valid values.\n")
+            self.exit(2, f"bb: unknown value '{bad}'. Run 'bb --help' to see commands.\n")
+        super().error(message)
+
+
+def _suggest_command(name: str) -> Optional[str]:
+    """Closest canonical command or alias target for a typo."""
+    candidates = _CANONICAL_COMMANDS + list(_COMMAND_ALIASES.keys())
+    matches = difflib.get_close_matches(name, candidates, n=1, cutoff=0.6)
+    if not matches:
+        return None
+    hit = matches[0]
+    return _COMMAND_ALIASES.get(hit, hit)
+
+
+def _print_subcommand_help(canonical: str) -> None:
+    """Print `bb <command> --help` for the help dispatcher (raises SystemExit)."""
+    parser = _build_parser()
+    parser.parse_args([canonical, "--help"])
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = HelpfulParser(
+        prog="bb",
+        description="UMBC Blackboard Ultra scraper & assistant.\nHeadless course scraping with smart course selection and v2 JSON output.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Common commands:
+  bb login                  First-time SSO login (auto Duo SMS capture)
+  bb due 7d                 Upcoming deadlines (7d, 14d, overdue, all)
+  bb outline IS410          Course outline (shallow summary with counts)
+  bb grades IS410           Gradebook and feedback
+  bb briefing               Daily briefing across all courses
+
+Run 'bb <command> --help' for options, usage, and examples.
+Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
     )
+    parser.add_argument("--version", "-V", action="version", version=f"bb {__version__}")
 
     # Common parent parsers
     output_parent = argparse.ArgumentParser(add_help=False)
@@ -591,14 +670,29 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     engine_parent.add_argument("--cdp", help="Connect to existing browser via CDP URL")
 
     course_parent = argparse.ArgumentParser(add_help=False)
-    course_parent.add_argument("course_pos", nargs="?", metavar="COURSE", help="Course code or ID (e.g. IS410, MATH215)")
-    course_parent.add_argument("--course", "-c", help="Target course ID(s) or code(s)")
+    course_parent.add_argument("course_pos", nargs="?", metavar="COURSE", help="Course code, ID, or keyword (e.g. IS410). Comma-separated or --all")
+    course_parent.add_argument("--course", "-c", help="Target course code(s) or ID(s)")
     course_parent.add_argument("--all", action="store_true", help="Target all configured courses")
 
     subparsers = parser.add_subparsers(dest="subcommand", metavar="<command>")
+    # Every subcommand keeps newlines in description/epilog (Examples stay
+    # copy-pasteable). Future add_parser() calls inherit this automatically.
+    _orig_add_parser = subparsers.add_parser
 
-    # --- auth ---
-    login_p = subparsers.add_parser("login", parents=[engine_parent], help="Login via UMBC SSO (smart automated headless default)")
+    def _add_parser(name: str, **kwargs: object) -> argparse.ArgumentParser:
+        kwargs.setdefault("formatter_class", argparse.RawDescriptionHelpFormatter)
+        return _orig_add_parser(name, **kwargs)
+
+    subparsers.add_parser = _add_parser  # type: ignore[method-assign]
+
+    # --- getting started ---
+    login_p = subparsers.add_parser(
+        "login",
+        parents=[engine_parent],
+        help="Log in via UMBC SSO",
+        description="Smart Login: automated headless SSO with Duo SMS capture.",
+        epilog="Examples:\n  bb login\n  bb login --manual\n  bb login --force",
+    )
     login_p.add_argument("mode", nargs="?", choices=["auto", "manual", "browser", "sms"], default="auto", help="Login mode ('auto' or 'manual')")
     login_p.add_argument("--manual", action="store_true", help="Open visible browser window for manual 2FA")
     login_p.add_argument("--auto", "-a", action="store_true", help="Automated SSO login (default)")
@@ -607,28 +701,78 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     login_p.add_argument("--password", "-p", help="Password for login (prompts if omitted)")
     login_p.add_argument("--passcode", "--duo-passcode", dest="duo_passcode", help="Provide 6-digit Duo SMS passcode directly via CLI")
 
-    subparsers.add_parser("logout", help="Logout (clear cached session cookies)")
+    subparsers.add_parser(
+        "logout",
+        help="Log out (clear session)",
+        description="Clear cached session cookies.",
+        epilog="Examples:\n  bb logout",
+    )
 
     # --- session ---
-    session_p = subparsers.add_parser("session", parents=[engine_parent], help="Session health probes, metadata, and telemetry")
+    session_p = subparsers.add_parser(
+        "session",
+        parents=[engine_parent],
+        help="Check session health and telemetry",
+        description="Session probes, metadata, and lifespan telemetry.",
+        epilog="Examples:\n  bb session check\n  bb session stats\n  bb session info",
+    )
     session_p.add_argument("action", nargs="?", choices=["check", "stats", "info", "telemetry"], default="check", help="Session action ('check', 'stats', 'info')")
     session_p.add_argument("--debug", action="store_true", help="Print debug output with check")
 
-    check_p = subparsers.add_parser("check", parents=[engine_parent], help="Quick session health check probe")
+    check_p = subparsers.add_parser(
+        "check",
+        parents=[engine_parent],
+        help="Quick session health check",
+        description="Rapid session token validity probe.",
+        epilog="Examples:\n  bb check\n  bb check --debug",
+    )
     check_p.add_argument("--debug", action="store_true", help="Print debug output")
 
-    # --- scrapers ---
-    brief_p = subparsers.add_parser("briefing", aliases=["brief"], parents=[output_parent, engine_parent], help="Run concurrent daily briefing across all courses")
+    # --- daily workflow ---
+    brief_p = subparsers.add_parser(
+        "briefing",
+        aliases=["brief"],
+        parents=[output_parent, engine_parent],
+        help="Daily briefing across all courses",
+        description="Concurrent daily briefing across all courses.",
+        epilog="Examples:\n  bb briefing\n  bb briefing --json\n  bb briefing --telegram",
+    )
     brief_p.add_argument("--telegram", action="store_true", help="Send briefing to Telegram")
 
-    due_p = subparsers.add_parser("due", parents=[output_parent, engine_parent], help="Aggregate cross-course due dates")
+    due_p = subparsers.add_parser(
+        "due",
+        parents=[output_parent, engine_parent],
+        help="Upcoming deadlines across courses",
+        description="Cross-Source Aggregator: calendar events + gradebook columns, filtered by a Window Filter.",
+        epilog="Examples:\n  bb due\n  bb due 7d\n  bb due 14d --exclude-completed\n  bb due overdue",
+    )
     due_p.add_argument("window", nargs="?", default="7d", metavar="WINDOW", help="Relative date window (e.g. 7d, 14d, overdue, all; default: 7d)")
     due_p.add_argument("--exclude-completed", action="store_true", help="Exclude submitted/graded items")
 
-    subparsers.add_parser("grades", parents=[course_parent, output_parent, engine_parent], help="Scrape course gradebook")
-    subparsers.add_parser("announcements", aliases=["announce", "news"], parents=[course_parent, output_parent, engine_parent], help="Scrape course announcements")
+    subparsers.add_parser(
+        "grades",
+        parents=[course_parent, output_parent, engine_parent],
+        help="Gradebook and feedback",
+        description="Scrape a course gradebook.",
+        epilog="Examples:\n  bb grades IS410\n  bb grades -c IS410 --json\n  bb grades --all",
+    )
+    subparsers.add_parser(
+        "announcements",
+        aliases=["announce", "news"],
+        parents=[course_parent, output_parent, engine_parent],
+        help="Course announcements",
+        description="Scrape course announcements.",
+        epilog="Examples:\n  bb announcements IS410\n  bb announcements --all",
+    )
 
-    outline_p = subparsers.add_parser("outline", parents=[course_parent, output_parent, engine_parent], help="Scrape course outline, modules, syllabi, and files")
+    # --- course content ---
+    outline_p = subparsers.add_parser(
+        "outline",
+        parents=[course_parent, output_parent, engine_parent],
+        help="Course outline and files",
+        description="Shallow Outline by default; expand one folder with -f or everything with --expand-all.",
+        epilog='Examples:\n  bb outline IS410\n  bb outline IS410 -f "Homework"\n  bb outline IS410 --expand-all\n  bb outline IS410 -i',
+    )
     outline_p.add_argument("--folder", "-f", metavar="FOLDER", help="Expand specific folder or module by name or ID")
     outline_p.add_argument("--expand-all", "--deep", "--all-folders", dest="expand_all", action="store_true", help="Expand all folders into full tree")
     outline_p.add_argument("--depth", type=int, metavar="N", help="Limit outline display depth")
@@ -636,33 +780,88 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     outline_p.add_argument("--type", help="Filter items by type (e.g. syllabus, document, assignment, folder, link)")
     outline_p.add_argument("--filter", dest="keyword_filter", help="Filter items by text keyword")
 
-    assign_p = subparsers.add_parser("assignments", aliases=["assign"], parents=[course_parent, output_parent, engine_parent], help="Deep scrape assignments with prompts, rubrics, and files")
+    assign_p = subparsers.add_parser(
+        "assignments",
+        aliases=["assign"],
+        parents=[course_parent, output_parent, engine_parent],
+        help="List assignments with rubrics",
+        description="Deep scrape of Gradable Items with prompts, rubrics, and files (REST Fast-Path).",
+        epilog="Examples:\n  bb assignments IS410\n  bb assignments IS410 --json\n  bb assignments --all",
+    )
     assign_p.add_argument("--filter", dest="keyword_filter", help="Filter assignments by keyword")
 
-    single_p = subparsers.add_parser("assignment", aliases=["quiz", "asmt", "assessment"], parents=[output_parent, engine_parent], help="Inspect a single assignment/quiz: prompts, questions, attempts (safe info mode by default)")
+    single_p = subparsers.add_parser(
+        "assignment",
+        aliases=["quiz", "asmt", "assessment"],
+        parents=[output_parent, engine_parent],
+        help="Inspect one assignment (safe info mode)",
+        description="Non-Destructive Info Mode: prompts, questions, and attempts without starting anything.",
+        epilog='Examples:\n  bb assignment "Homework 1" -c IS410\n  bb assignment _8954640_1 -c IS410 --json\n  bb assignment "Midterm" -c IS410 --start-attempt --force-start',
+    )
     single_p.add_argument("target", nargs="?", metavar="TARGET", help="Assignment ID or title (e.g. _8954640_1 or 'Homework 1')")
     single_p.add_argument("--course", "-c", help="Scope the title search to course ID(s) or code(s)")
     single_p.add_argument("--all", action="store_true", help="Search across all configured courses")
     single_p.add_argument("--start-attempt", "--begin-attempt", dest="start_attempt", action="store_true", help="Allow beginning a new attempt if none is active (guarded)")
     single_p.add_argument("--force-start", dest="force_start", action="store_true", help="With --start-attempt: confirm starting timed assessments/exams")
 
-    search_p = subparsers.add_parser("search", aliases=["find"], parents=[output_parent, engine_parent], help="Search for content/assignments matching query across courses")
+    search_p = subparsers.add_parser(
+        "search",
+        aliases=["find"],
+        parents=[output_parent, engine_parent],
+        help="Search content across courses",
+        description="Search Content Items across one, several, or all courses.",
+        epilog='Examples:\n  bb search "Python"\n  bb search "Syllabus" -c IS410\n  bb search "Exam" --all --json',
+    )
     search_p.add_argument("query", metavar="QUERY", help="Search query string")
     search_p.add_argument("--type", help="Filter results by content type")
     search_p.add_argument("--course", "-c", help="Restrict search to specific course ID(s) or code(s)")
     search_p.add_argument("--all", action="store_true", help="Search across all configured courses")
 
-    dl_p = subparsers.add_parser("download", aliases=["grab", "get"], parents=[output_parent, engine_parent], help="Grab and download specific content item or file")
+    dl_p = subparsers.add_parser(
+        "download",
+        aliases=["grab", "get"],
+        parents=[output_parent, engine_parent],
+        help="Download a file by name or ID",
+        description="Find a Content Item by title or ID and download it.",
+        epilog='Examples:\n  bb download "Chapter01.ipynb"\n  bb download "Syllabus.pdf" -c IS410\n  bb download _123_1 --out-dir downloads',
+    )
     dl_p.add_argument("item", metavar="ITEM_ID_OR_NAME", help="Content item ID or file title")
     dl_p.add_argument("--out-dir", default="downloads", help="Destination directory (default: downloads)")
     dl_p.add_argument("--course", "-c", help="Restrict download target to specific course ID(s) or code(s)")
     dl_p.add_argument("--all", action="store_true", help="Search across all configured courses")
 
-    subparsers.add_parser("calendar", aliases=["cal"], parents=[course_parent, output_parent, engine_parent], help="Scrape calendar due-dates")
-    subparsers.add_parser("activity", parents=[output_parent, engine_parent], help="Scrape homepage activity stream")
-    subparsers.add_parser("profile", aliases=["whoami"], parents=[output_parent, engine_parent], help="Show student profile information")
+    subparsers.add_parser(
+        "calendar",
+        aliases=["cal"],
+        parents=[course_parent, output_parent, engine_parent],
+        help="Calendar due dates",
+        description="Scrape calendar due dates.",
+        epilog="Examples:\n  bb calendar\n  bb calendar IS410\n  bb calendar --json",
+    )
+    subparsers.add_parser(
+        "activity",
+        parents=[output_parent, engine_parent],
+        help="Homepage activity stream",
+        description="Scrape the Blackboard homepage activity stream.",
+        epilog="Examples:\n  bb activity\n  bb activity --json",
+    )
+    subparsers.add_parser(
+        "profile",
+        aliases=["whoami"],
+        parents=[output_parent, engine_parent],
+        help="Show your student profile",
+        description="Show student profile information.",
+        epilog="Examples:\n  bb profile\n  bb whoami --json",
+    )
 
-    disc_p = subparsers.add_parser("discussions", aliases=["discuss"], parents=[course_parent, output_parent, engine_parent], help="Scrape course discussions")
+    disc_p = subparsers.add_parser(
+        "discussions",
+        aliases=["discuss"],
+        parents=[course_parent, output_parent, engine_parent],
+        help="Course discussions",
+        description="Scrape course discussions.",
+        epilog="Examples:\n  bb discussions IS410\n  bb discussions IS410 --titles-only",
+    )
     disc_p.add_argument("--max-posts", type=int, help="Maximum posts to click")
     disc_p.add_argument("--max-parts", type=int, help="Maximum participants to click")
     disc_p.add_argument("--posts-only", action="store_true", help="Scrape posts only")
@@ -670,31 +869,75 @@ clean terminal UI by default, and standardized v2 JSON schemas.
     disc_p.add_argument("--titles-only", action="store_true", help="Scrape thread titles only")
 
     # --- discovery ---
-    courses_p = subparsers.add_parser("courses", parents=[output_parent, engine_parent], help="Course configuration and discovery")
+    courses_p = subparsers.add_parser(
+        "courses",
+        parents=[output_parent, engine_parent],
+        help="List configured courses",
+        description="Course configuration and discovery.",
+        epilog="Examples:\n  bb courses\n  bb courses discover\n  bb courses terms",
+    )
     courses_p.add_argument("action", nargs="?", choices=["list", "discover", "terms"], default="list", help="Course action ('list', 'discover', 'terms')")
     courses_p.add_argument("--term", metavar="TERM", help="Filter academic term (e.g. current, FA2026, all)")
 
-    discover_p = subparsers.add_parser("discover", parents=[output_parent, engine_parent], help="Auto-discover and intelligently save current active semester courses")
+    discover_p = subparsers.add_parser(
+        "discover",
+        parents=[output_parent, engine_parent],
+        help="Discover current semester courses",
+        description="Auto-discover and save current active semester courses.",
+        epilog="Examples:\n  bb discover\n  bb discover --term FA2026",
+    )
     discover_p.add_argument("--term", metavar="TERM", help="Filter academic term (e.g. current, FA2026, all)")
 
-    subparsers.add_parser("terms", parents=[output_parent, engine_parent], help="List all lifetime enrolled academic terms and courses")
+    subparsers.add_parser(
+        "terms",
+        parents=[output_parent, engine_parent],
+        help="List all enrolled terms",
+        description="List all lifetime enrolled academic terms and courses.",
+        epilog="Examples:\n  bb terms",
+    )
 
-    # --- bot ---
-    bot_p = subparsers.add_parser("bot", help="Manage background Telegram bot daemon")
+    # --- system ---
+    bot_p = subparsers.add_parser(
+        "bot",
+        help="Manage the Telegram bot daemon",
+        description="Daemon Command Group: control the background Telegram bot.",
+        epilog="Examples:\n  bb bot run\n  bb bot start\n  bb bot status\n  bb bot stop",
+    )
     bot_p.add_argument("action", nargs="?", choices=["run", "start", "stop", "restart", "status"], default="run", help="Bot action ('start', 'stop', 'restart', 'status', 'run')")
     bot_p.add_argument("--daemon", "-d", action="store_true", help="Run daemon detached in background")
 
-    subparsers.add_parser("menubar", aliases=["app"], help="Launch native macOS Menubar app")
+    subparsers.add_parser(
+        "menubar",
+        aliases=["app"],
+        help="Launch the macOS menubar app",
+        description="Launch the native macOS menubar app.",
+        epilog="Examples:\n  bb menubar",
+    )
 
-    guide_p = subparsers.add_parser("guide", aliases=["help"], help="Show comprehensive topic manual")
-    guide_p.add_argument("topic", nargs="?", choices=["auth", "courses", "schema", "telegram", "concurrency"], help="Topic manual")
+    guide_p = subparsers.add_parser(
+        "guide",
+        help="Topic guides (auth, courses, ...)",
+        description="Comprehensive topic manuals. For command help use 'bb help <command>'.",
+        epilog="Examples:\n  bb guide\n  bb guide auth\n  bb guide courses",
+    )
+    guide_p.add_argument("topic", nargs="?", help="Guide topic (auth, courses, schema, telegram, concurrency)")
+
+    help_p = subparsers.add_parser(
+        "help",
+        help="Show help for a command or topic",
+        description="Show help for a command or guide topic. Same as 'bb <command> --help'.",
+        epilog="Examples:\n  bb help\n  bb help outline\n  bb help auth",
+    )
+    help_p.add_argument("topic", nargs="?", metavar="COMMAND_OR_TOPIC", help="Command or guide topic (e.g. outline, auth)")
 
     return parser
 
 
 def _parse_args(args_list: Optional[List[str]] = None) -> argparse.Namespace:
+    global _LAST_ARGV
     raw_args = list(sys.argv[1:] if args_list is None else args_list)
     translated_args, legacy_hint = _intercept_legacy_args(raw_args)
+    _LAST_ARGV = translated_args
     if legacy_hint and sys.stderr.isatty():
         print(f"💡 Tip: You can run 'bb {legacy_hint}' directly without '--'.", file=sys.stderr)
 
@@ -788,17 +1031,46 @@ def _run_discussions_sync(
 async def main_async(args: argparse.Namespace) -> None:
     subcmd = getattr(args, "subcommand", None)
 
-    # --- topic guides ---
-    topic = getattr(args, "topic", None) or getattr(args, "guide", None)
-    if subcmd in ("guide", "help") or topic:
+    # --- help dispatcher (`bb help [command|topic]`) ---
+    if subcmd == "help":
+        topic = getattr(args, "topic", None)
         if not topic:
-            print("📖 Available guides: auth, courses, schema, telegram, concurrency\nRun 'bb guide <topic>' (e.g. 'bb guide auth').")
+            _build_parser().print_help()
+            return
+        canonical = _COMMAND_ALIASES.get(topic, topic)
+        if topic in HELP_GUIDES or canonical in HELP_GUIDES:
+            print(HELP_GUIDES[canonical if canonical in HELP_GUIDES else topic].strip())
+            return
+        if canonical in _CANONICAL_COMMANDS:
+            try:
+                _print_subcommand_help(canonical)
+            except SystemExit as e:
+                # argparse prints subcommand help then exits 0; propagate.
+                raise e
+            return
+        suggestion = _suggest_command(topic)
+        print(f"bb: unknown help topic '{topic}'", file=sys.stderr)
+        if suggestion:
+            print(f"Did you mean 'bb help {suggestion}'?", file=sys.stderr)
+        print("Run 'bb --help' to see commands or 'bb guide' to see guide topics.", file=sys.stderr)
+        sys.exit(2)
+
+    # --- topic guides (`bb guide [topic]`) ---
+    if subcmd == "guide":
+        topic = getattr(args, "topic", None)
+        if not topic:
+            print("Available guides: auth, courses, schema, telegram, concurrency\nRun 'bb guide <topic>' (e.g. 'bb guide auth').")
+            print("For command help run 'bb help <command>' (e.g. 'bb help outline').")
             return
         guide_text = HELP_GUIDES.get(topic)
         if guide_text:
             print(guide_text.strip())
         else:
-            print(f"Unknown guide topic '{topic}'. Available: auth, courses, schema, telegram, concurrency", file=sys.stderr)
+            suggestion = _suggest_command(topic)
+            print(f"bb: unknown guide topic '{topic}'. Available: auth, courses, schema, telegram, concurrency", file=sys.stderr)
+            if suggestion and suggestion not in HELP_GUIDES:
+                print(f"Hint: 'bb help {suggestion}' shows command help.", file=sys.stderr)
+            sys.exit(2)
         return
 
     headless = not getattr(args, "visible", False)

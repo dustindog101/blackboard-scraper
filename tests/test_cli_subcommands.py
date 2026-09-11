@@ -350,5 +350,78 @@ class TestGuideAndCompatDetails(unittest.TestCase):
         self.assertEqual(args2.duo_passcode, "654321")
 
 
+class TestHelpUX(unittest.TestCase):
+    """imsg-style help: `bb --help`, `bb help <cmd>`, `bb <cmd> --help`,
+    `bb <cmd> help`, did-you-mean errors, and per-command examples."""
+
+    def test_version_flag(self):
+        import contextlib
+        import io
+
+        from main import _parse_args as parse
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as ctx:
+                parse(["--version"])
+        self.assertEqual(ctx.exception.code, 0)
+
+    def test_help_freeform_topic(self):
+        from main import _parse_args as parse
+
+        for topic in ("outline", "auth", "badthing", None):
+            args = parse(["help"] if topic is None else ["help", topic])
+            self.assertEqual(args.subcommand, "help")
+            self.assertEqual(args.topic, topic)
+
+    def test_guide_freeform_topic(self):
+        # Unknown guide topics must parse (friendly dispatch error in
+        # main_async) instead of crashing inside argparse.
+        from main import _parse_args as parse
+
+        args = parse(["guide", "badtopic"])
+        self.assertEqual(args.subcommand, "guide")
+        self.assertEqual(args.topic, "badtopic")
+
+    def test_cmd_help_suffix_interceptor(self):
+        from main import _intercept_legacy_args as intercept
+
+        for cmd in ("outline", "due", "bot", "help"):
+            res, hint = intercept([cmd, "help"])
+            self.assertEqual(res, [cmd, "--help"])
+            self.assertIsNone(hint)
+
+    def test_suggest_command(self):
+        from main import _suggest_command as suggest
+
+        self.assertEqual(suggest("outlin"), "outline")
+        self.assertEqual(suggest("brief"), "briefing")  # alias resolves
+        self.assertEqual(suggest("due"), "due")
+        self.assertIsNone(suggest("zzz-no-such-cmd"))
+
+    def test_every_command_has_examples(self):
+        # Future-proofing: any new subcommand must ship copy-pasteable
+        # examples or this test fails with its name.
+        import contextlib
+        import io
+
+        from main import _CANONICAL_COMMANDS, _COMMAND_ALIASES, _build_parser
+
+        parser = _build_parser()
+        for cmd in _CANONICAL_COMMANDS:
+            with self.subTest(command=cmd):
+                with contextlib.redirect_stdout(io.StringIO()) as buf:
+                    with self.assertRaises(SystemExit) as ctx:
+                        parser.parse_args([cmd, "--help"])
+                self.assertEqual(ctx.exception.code, 0, msg=cmd)
+                self.assertIn("Examples:", buf.getvalue(), msg=cmd)
+        # Aliases must resolve to the same help.
+        for alias, canonical in _COMMAND_ALIASES.items():
+            with self.subTest(alias=alias):
+                with contextlib.redirect_stdout(io.StringIO()) as buf:
+                    with self.assertRaises(SystemExit):
+                        parser.parse_args([alias, "--help"])
+                self.assertIn("Examples:", buf.getvalue(), msg=alias)
+
+
 if __name__ == "__main__":
     unittest.main()
