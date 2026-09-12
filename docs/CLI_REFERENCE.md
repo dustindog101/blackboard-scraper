@@ -10,6 +10,7 @@ All modern subcommands support natural syntax (e.g. `bb briefing`, `bb due 7d`, 
 
 ## 📑 Command Categories
 
+- [🆘 Getting Help (`bb help`, `bb --help`)](#-getting-help)
 - [🔐 Authentication & Sessions (`bb login`, `bb logout`, `bb session`)](#-authentication--sessions)
 - [🧭 Course Discovery & Term Management (`bb discover`, `bb courses`, `bb terms`)](#-course-discovery--term-management)
 - [📚 Academic Scrapers (`bb briefing`, `bb due`, `bb grades`, etc.)](#-academic-scrapers)
@@ -20,6 +21,24 @@ All modern subcommands support natural syntax (e.g. `bb briefing`, `bb due 7d`, 
 - [🖥️ Native macOS Menubar App (`bb menubar`)](#️-native-macos-menubar-app)
 - [📖 Built-in Help Guides (`bb guide`)](#-built-in-help-guides)
 - [🔄 Legacy Flags Backward Compatibility](#-legacy-flags-backward-compatibility)
+
+---
+
+## 🆘 Getting Help
+
+Anything is learnable in 1–2 commands. Start at the top, then drill into one command:
+
+```bash
+bb --help              # All commands + 5 common examples
+bb help                # Same concise overview
+bb help <COMMAND>      # Help for one command (aliases work: bb help brief)
+bb <COMMAND> --help    # Same thing (e.g. bb outline --help)
+bb <COMMAND> help      # Same thing (e.g. bb outline help)
+bb guide <TOPIC>       # Topic manuals: auth, courses, schema, telegram, concurrency
+bb --version           # Print CLI version (also -V)
+```
+
+Every `bb <COMMAND> --help` page ends with copy-pasteable `Examples:`. Unknown commands fail fast with a suggestion (`bb outlin` → `Did you mean 'bb outline'?`).
 
 ---
 
@@ -208,7 +227,10 @@ bb menubar        # Launches native macOS status bar menu app (🎓 BB 🟢)
 
 ## 📖 Built-in Help Guides
 
+For command help use `bb help <COMMAND>` (see [🆘 Getting Help](#-getting-help)). Topic manuals live under `bb guide`:
+
 ```bash
+bb guide               # List available guide topics
 bb guide auth         # Authentication & headless execution guide
 bb guide courses      # Course selection & syntax guide
 bb guide schema       # Standardized v2 JSON schemas

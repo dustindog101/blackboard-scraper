@@ -470,7 +470,10 @@ All commands support natural subcommands. Legacy `--flags` (e.g. `bb --briefing`
 | | `bb bot stop` | `--bot-stop` | Stop background bot daemon |
 | | `bb bot` | `--bot` | Launch interactive Telegram bot in foreground |
 | | `bb menubar` | `--menubar` | Launch optional native macOS Menubar app |
-| **Help & Guides** | `bb guide <TOPIC>` | `--guide <TOPIC>` | Show detailed topic manuals (`auth`, `courses`, `schema`, etc.) |
+| **Help & Guides** | `bb help [CMD]` | — | Show help (all commands, or one command: `bb help outline`) |
+| | `bb <CMD> --help` | — | Per-command options, usage, and examples |
+| | `bb guide <TOPIC>` | `--guide <TOPIC>` | Show detailed topic manuals (`auth`, `courses`, `schema`, etc.) |
+| | `bb --version` | — | Print CLI version |
 
 ---
 

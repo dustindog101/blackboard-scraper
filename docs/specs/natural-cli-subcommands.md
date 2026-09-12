@@ -103,7 +103,9 @@ bb [GLOBAL_FLAGS] <SUBCOMMAND> [SUB_ACTION] [POSITIONAL_ARGS] [OPTIONS]
 
 #### System & Documentation
 - `bb menubar` (alias: `app`): Starts native macOS status bar menu app.
-- `bb guide [topic]` (alias: `help`): Shows rich topic manual (`auth`, `courses`, `schema`, `telegram`, `concurrency`). With no topic, lists available topics (must NOT default to auth).
+- `bb help [command|topic]`: Help dispatcher. Bare `bb help` prints the concise top-level overview; `bb help <command>` (aliases resolve, e.g. `brief`) prints that command's help; `bb help <guide-topic>` prints the topic manual; unknown topics fail friendly with a did-you-mean hint (exit 2).
+- `bb <command> help`: Suffix form, rewritten to `bb <command> --help` by the pre-parsing interceptor.
+- `bb guide [topic]`: Shows rich topic manual (`auth`, `courses`, `schema`, `telegram`, `concurrency`). With no topic, lists available topics (must NOT default to auth). Unknown topics fail friendly (exit 2), hinting at `bb help <command>` when the topic looks like a command. (The former `help` alias was removed — `help` is now the dispatcher above.)
 
 ---
 
