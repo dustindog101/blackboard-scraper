@@ -143,7 +143,26 @@ def resolve_target_courses(course_arg: Optional[str], all_flag: bool, courses: D
             matched_ids.append(token)
             continue
 
-        # 2. Match by course code or title keyword
+        # 2. Prefer explicit course-code matches. This prevents a token such as
+        # "ECON" from also matching AGNG's title "Longevity Economy".
+        code_matches: List[str] = []
+        for cid, cname in courses.items():
+            code_match = re.match(r"^\s*([A-Za-z]{2,6})\s*([0-9]{3,4})\b", cname)
+            if not code_match:
+                continue
+            department = code_match.group(1).lower()
+            full_code = f"{department}{code_match.group(2)}"
+            if token_clean in (department, full_code):
+                code_matches.append(cid)
+
+        if code_matches:
+            for cid in code_matches:
+                if cid not in matched_ids:
+                    matched_ids.append(cid)
+            continue
+
+        # 3. Fall back to fuzzy title/ID matching for human keywords such as
+        # "Accounting" or "Database".
         found = False
         for cid, cname in courses.items():
             cname_clean = cname.lower().replace(" ", "").replace("_", "")
@@ -794,9 +813,16 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
         "assignment",
         aliases=["quiz", "asmt", "assessment"],
         parents=[output_parent, engine_parent],
-        help="Inspect one assignment (safe info mode)",
-        description="Non-Destructive Info Mode: prompts, questions, and attempts without starting anything.",
-        epilog='Examples:\n  bb assignment "Homework 1" -c IS410\n  bb assignment _8954640_1 -c IS410 --json\n  bb assignment "Midterm" -c IS410 --start-attempt --force-start',
+        help="Inspect an assignment and your submission",
+        description="Safely inspect one assignment, including prompts, questions, answers, attempts, and your submitted discussion posts.",
+        epilog=(
+            "Examples:\n"
+            '  bb assignment "M3 Discussion" -c ECON\n'
+            '  bb assignment "Module 4" -c AGNG\n'
+            '  bb assignments ECON --filter "M3"   # Find the exact title first\n'
+            "  bb assignment _8954640_1 --json\n"
+            '  bb assignment "Final" -c IS410 --start-attempt --force-start'
+        ),
     )
     single_p.add_argument("target", nargs="?", metavar="TARGET", help="Assignment ID or title (e.g. _8954640_1 or 'Homework 1')")
     single_p.add_argument("--course", "-c", help="Scope the title search to course ID(s) or code(s)")
@@ -1446,6 +1472,13 @@ async def main_async(args: argparse.Namespace) -> None:
             force_start=force_start,
         )
 
+        if data.get("error"):
+            if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
+                _emit_json(args, data)
+            else:
+                print(format_assessment_attempt_cli(data), file=sys.stderr)
+            sys.exit(2)
+
         if getattr(args, "md", False):
             saved_path = save_assessment_attempt(data)
             print(f"💾 Saved assessment Markdown report to: {_safe_relpath(saved_path)}", file=sys.stderr)
@@ -1695,4 +1728,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

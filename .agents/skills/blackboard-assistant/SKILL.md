@@ -26,7 +26,7 @@ Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** 
 | **Full Outline Tree** | `bb outline MATH215 --expand-all` | Full recursive tree with all subfolders expanded |
 | **Interactive Folder Explorer** | `bb outline MATH215 -i` | Interactive terminal menu to browse & expand folders |
 | **List Course Assignments** | `bb assignments AGNG` | Lists all assignments, tests, and discussions with unique IDs (<150ms via HTTP fast-path) |
-| **Inspect Assignment / Quiz** | `bb assignment <ID_or_Title>` | Opens & inspects deep prompts, statements, choices & answers (<200ms, non-destructive info mode) |
+| **Inspect Assignment / Submission** | `bb assignment <ID_or_Title>` | Shows prompts, questions, existing answers/attempts, and your submitted discussion posts (<200ms, non-destructive) |
 | **Clean Outline JSON** | `bb outline MATH215 --json` | Compact, streamlined JSON without bloated empty fields |
 | **Download File / Note** | `bb download "Worksheet_1.pdf"` | Auto-discovers course and downloads file directly to disk |
 | **Download by Item ID** | `bb download _8825690_1` | Downloads specific Blackboard item/notebook by exact ID |
@@ -79,11 +79,14 @@ Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** 
 1. Run `bb courses`.
 2. If courses appear outdated or user changed semesters, run `bb discover` to auto-detect the current semester.
 
-### 8. "Check / inspect / solve an assignment or quiz"
-1. **List all assignments & get Unique IDs**: `bb assignments <course>` (e.g. `bb assignments AGNG`).
-2. **Deep inspect item questions/prompts**: `bb assignment <ID_or_Title>` (e.g. `bb assignment _8836886_1` or `bb assignment "Module 1 Assignment"`). Safe info mode by default — never starts an attempt unless `--start-attempt` (+ `--force-start` for timed exams) is passed.
-3. **Download required readings/syllabus**: `bb download "<file_or_id>"` (e.g. `bb download "Fall 2026 Syllabus"`).
-4. **Answer questions**: Read the downloaded course file/syllabus and cross-reference with the questions from `bb assignment`.
+### 8. "Check / inspect / solve an assignment or view my submission"
+1. **List or search assignments**: `bb assignments <course> --filter <text>` (e.g. `bb assignments ECON --filter "M3"`). This is the discovery step when a short title could match multiple items.
+2. **Inspect one item and your existing work**: `bb assignment <ID_or_Title> -c <course>` (e.g. `bb assignment "M3 Discussion" -c ECON` or `bb assignment "Module 4" -c AGNG`). For discussion boards, the normal output includes only the current user's submitted posts. For quizzes/tests it includes existing attempt answers. Safe info mode never starts an attempt unless `--start-attempt` (+ `--force-start` for timed exams) is passed.
+3. **Use structured output when scripting**: append `--json`; human-readable output requires no `jq` or other filter.
+4. **Download required readings/syllabus**: `bb download "<file_or_id>"` (e.g. `bb download "Fall 2026 Syllabus"`).
+5. **Answer questions**: Read the downloaded course file/syllabus and cross-reference with the questions from `bb assignment`.
+
+Short title searches are case-insensitive and auto-resolve only when the best match is unique. If several items match, the command lists candidates and asks for a more specific title instead of silently choosing the first result.
 
 ---
 

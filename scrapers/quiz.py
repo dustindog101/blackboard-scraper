@@ -26,6 +26,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from playwright.async_api import Page
 
@@ -130,6 +131,65 @@ def _map_question_type(raw_type: str) -> str:
     return raw_type or "Question"
 
 
+def _match_gradebook_columns(
+    columns: List[Dict[str, Any]],
+    target: Optional[str] = None,
+    assessment_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return the best exact or partial gradebook-column matches."""
+    target_key = (target or "").casefold()
+    ranked: List[tuple[int, Dict[str, Any]]] = []
+
+    for column in columns:
+        column_id = column.get("id")
+        content_id = column.get("contentId")
+        title_key = column.get("name", "").casefold()
+        rank: Optional[int] = None
+
+        if assessment_id and assessment_id in (column_id, content_id):
+            rank = 0
+        elif target and target in (column_id, content_id):
+            rank = 0
+        elif target_key and target_key == title_key:
+            rank = 1
+        elif target_key and target_key in title_key:
+            rank = 2
+
+        if rank is not None:
+            ranked.append((rank, column))
+
+    if not ranked:
+        return []
+    best_rank = min(rank for rank, _ in ranked)
+    return [column for rank, column in ranked if rank == best_rank]
+
+
+def _ambiguous_target_result(
+    target: str,
+    matches: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Build a stable error payload for ambiguous title searches."""
+    return {
+        "error": "ambiguous_assignment",
+        "target": target,
+        "message": f"Multiple assignments matched '{target}'.",
+        "matches": matches,
+        "hint": "Refine the title, add -c COURSE, or list matches with: bb assignments COURSE --filter \"TITLE\"",
+    }
+
+
+def _format_local_datetime(value: Optional[str]) -> str:
+    """Render a Blackboard ISO timestamp in the user's local timezone."""
+    if not value:
+        return "Unknown date"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        local = parsed.astimezone(ZoneInfo("America/New_York"))
+        return local.strftime("%b %d, %Y at %I:%M %p %Z").replace(" 0", " ")
+    except (ValueError, TypeError):
+        return value
+
+
 # ============================================================================
 # 2. HTTP REST Fast-Path Engine (< 200ms)
 # ============================================================================
@@ -201,15 +261,22 @@ def _scrape_assessment_http(
     matching_col = None
     cols = _api_get(f"/learn/api/public/v2/courses/{course_id}/gradebook/columns", cookie_header)
     if cols and "results" in cols:
-        for c in cols["results"]:
-            cid = c.get("contentId")
-            c_name = c.get("name", "")
-            if assessment_id and cid == assessment_id:
-                matching_col = c
-                break
-            if target_query and (target_query.lower() in c_name.lower() or target_query == c.get("id")):
-                matching_col = c
-                break
+        matches = _match_gradebook_columns(
+            cols["results"], target=target_query, assessment_id=assessment_id
+        )
+        if len(matches) > 1:
+            return _ambiguous_target_result(
+                target_query or assessment_id or "assignment",
+                [{
+                    "course_id": course_id,
+                    "course_name": course_name,
+                    "title": match.get("name"),
+                    "column_id": match.get("id"),
+                    "content_id": match.get("contentId"),
+                } for match in matches],
+            )
+        if matches:
+            matching_col = matches[0]
 
     asmt_title = matching_col.get("name") if matching_col else "Assessment"
     col_id = matching_col.get("id") if matching_col else None
@@ -252,6 +319,44 @@ def _scrape_assessment_http(
             if matching_col and matching_col.get("score", {}).get("possible") is not None:
                 max_pts = f"{matching_col['score']['possible']} points"
 
+            # Discussion submissions are messages, not gradebook attempts.  The
+            # old inspector returned only the topic prompt, which made a graded
+            # discussion look as if the student's response did not exist.
+            # Keep this path GET-only and filter the message list to the current
+            # user so `bb assignment ...` shows only the caller's own posts.
+            submissions: List[Dict[str, Any]] = []
+            me_info = _api_get("/learn/api/v1/users/me", cookie_header)
+            user_id = me_info.get("id") if me_info and "_http_status" not in me_info else None
+            discussion_id = matching_disc.get("id")
+            gradebook_status = "OPEN"
+            if discussion_id and user_id:
+                grades = _api_get(
+                    f"/learn/api/v1/courses/{course_id}/gradebook/columns/{col_id}/grades?userId={user_id}",
+                    cookie_header,
+                ) if col_id else None
+                if grades and grades.get("results"):
+                    gradebook_status = grades["results"][0].get("status", gradebook_status)
+
+                messages = _api_get(
+                    f"/learn/api/public/v1/courses/{course_id}/discussions/{discussion_id}/messages?limit=100",
+                    cookie_header,
+                )
+                if messages and "results" in messages:
+                    for message in messages["results"]:
+                        if message.get("userId") != user_id:
+                            continue
+                        submissions.append({
+                            "id": message.get("id"),
+                            "status": message.get("status"),
+                            "body": _clean_html_text(message.get("body", "")),
+                            "post_date": message.get("postDate") or message.get("createdDate"),
+                            "edit_date": message.get("editDate") or message.get("modifiedDate"),
+                            "parent_id": message.get("parentId"),
+                            "thread_id": message.get("threadId"),
+                            "group_id": message.get("groupId"),
+                            "attachments": message.get("attachments", []),
+                        })
+
             return {
                 "engine": "http_rest",
                 "item_type": "Discussion Board",
@@ -261,7 +366,7 @@ def _scrape_assessment_http(
                 "assessment_id": assessment_id,
                 "column_id": col_id,
                 "attempt_id": None,
-                "status": "OPEN",
+                "status": gradebook_status,
                 "due_date": due_date,
                 "max_points": max_pts,
                 "attempts_allowed": "Unlimited",
@@ -269,6 +374,10 @@ def _scrape_assessment_http(
                 "instructions": prompt_text,
                 "question_count": 0,
                 "questions": [],
+                "discussion_id": discussion_id,
+                "group_discussion": bool(matching_disc.get("groupDiscussion")),
+                "submission_count": len(submissions),
+                "submissions": submissions,
                 "is_timed_test": False,
             }
 
@@ -807,6 +916,7 @@ async def scrape_assessment_attempt_async(
         cookie_header = _get_cookie_header()
         if cookie_header:
             courses = load_courses()
+            discovered_matches: List[Dict[str, Any]] = []
             for cand_cid in courses.keys():
                 if asmt_id:
                     c_info = _api_get(f"/learn/api/v1/courses/{cand_cid}/contents/{asmt_id}", cookie_header)
@@ -815,13 +925,33 @@ async def scrape_assessment_attempt_async(
                         break
                 cols = _api_get(f"/learn/api/public/v2/courses/{cand_cid}/gradebook/columns", cookie_header)
                 if cols and "results" in cols:
-                    for col in cols["results"]:
-                        if target.lower() in col.get("name", "").lower() or (asmt_id and col.get("contentId") == asmt_id):
-                            cid = cand_cid
-                            asmt_id = col.get("contentId") or asmt_id
-                            break
-                if cid:
-                    break
+                    for col in _match_gradebook_columns(
+                        cols["results"], target=target, assessment_id=asmt_id
+                    ):
+                        discovered_matches.append({
+                            "course_id": cand_cid,
+                            "course_name": courses.get(cand_cid, cand_cid),
+                            "title": col.get("name"),
+                            "column_id": col.get("id"),
+                            "content_id": col.get("contentId"),
+                        })
+
+            if not cid and discovered_matches:
+                target_key = target.casefold()
+                exact_matches = [
+                    match for match in discovered_matches
+                    if target in (match.get("column_id"), match.get("content_id"))
+                    or target_key == (match.get("title") or "").casefold()
+                ]
+                if exact_matches:
+                    discovered_matches = exact_matches
+
+            if not cid and len(discovered_matches) == 1:
+                match = discovered_matches[0]
+                cid = match["course_id"]
+                asmt_id = match.get("content_id") or asmt_id
+            elif not cid and len(discovered_matches) > 1:
+                return _ambiguous_target_result(target, discovered_matches)
 
     # 1. Fast-Path HTTP REST API Engine (if not forced to browser and we have course_id)
     if not force_browser and cid and (att_id or asmt_id or target):
@@ -919,6 +1049,15 @@ def format_assessment_attempt_cli(data: Dict[str, Any]) -> str:
     if not data:
         return "⚠️ No assessment data found."
 
+    if data.get("error") == "ambiguous_assignment":
+        lines = [f"❌ {data.get('message', 'Assignment title is ambiguous')}"]
+        for match in data.get("matches", []):
+            course = match.get("course_name") or match.get("course_id") or "Unknown course"
+            lines.append(f"  • {match.get('title', 'Untitled')} — {course}")
+        if data.get("hint"):
+            lines.extend(["", f"💡 {data['hint']}"])
+        return "\n".join(lines)
+
     title = data.get("title", "Assessment")
     item_type = data.get("item_type", "Assessment")
     cname = data.get("course_name", data.get("course_id", "Course"))
@@ -934,7 +1073,7 @@ def format_assessment_attempt_cli(data: Dict[str, Any]) -> str:
     lines = [
         f"\n📝 {title} [{item_type}] • {cname} {engine_badge}",
         "━" * 68,
-        f"  📊 Status:           {status}",
+        f"  📊 Gradebook Status: {status}",
         f"  🎯 Maximum Points:   {max_pts}",
         f"  ⏰ Due Date:         {due}",
         f"  ⏱️ Time Limit:       {time_lim}",
@@ -947,10 +1086,32 @@ def format_assessment_attempt_cli(data: Dict[str, Any]) -> str:
     lines.append("━" * 68)
     lines.append("")
 
+    submissions = data.get("submissions")
+    if submissions is not None:
+        noun = "Post" if len(submissions) == 1 else "Posts"
+        lines.append(f"📤 Your Submitted {noun}: {len(submissions)}")
+        if not submissions:
+            lines.append("  No submitted post was found for your account.")
+        for index, submission in enumerate(submissions, 1):
+            posted = _format_local_datetime(submission.get("post_date"))
+            submission_status = submission.get("status") or "Unknown status"
+            lines.append(f"\n  Submission {index} • {submission_status} • {posted}")
+            body = submission.get("body", "")
+            if body:
+                for line in body.splitlines():
+                    lines.append(f"    > {line}")
+            for attachment in submission.get("attachments", []):
+                if isinstance(attachment, dict):
+                    name = attachment.get("fileName") or attachment.get("name") or attachment.get("id") or "Attachment"
+                else:
+                    name = str(attachment)
+                lines.append(f"    📎 {name}")
+        lines.append("")
+
     # Instructions or Prompt Body
     instructions = data.get("instructions")
     if instructions:
-        lines.append("📖 Instructions / Prompt:")
+        lines.append("📖 Assignment Prompt:")
         for line in instructions.splitlines():
             lines.append(f"  > {line}")
         lines.append("")
@@ -1036,6 +1197,37 @@ def save_assessment_attempt(data: Dict[str, Any], filepath: Optional[Path] = Non
         lines.append("## Instructions / Prompt")
         lines.append(f"> {instructions.replace(chr(10), chr(10) + '> ')}")
         lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    submissions = data.get("submissions")
+    if submissions is not None:
+        lines.append("## Your Submitted Posts")
+        lines.append("")
+        if not submissions:
+            lines.append("_No submitted post was returned for your account._")
+            lines.append("")
+        for index, submission in enumerate(submissions, 1):
+            posted = submission.get("post_date") or "Unknown date"
+            submission_status = submission.get("status") or "Unknown status"
+            lines.append(f"### Submission {index}")
+            lines.append(f"- **Status:** `{submission_status}`")
+            lines.append(f"- **Posted:** `{posted}`")
+            body = submission.get("body", "")
+            if body:
+                lines.append("")
+                lines.append(body)
+            attachments = submission.get("attachments", [])
+            if attachments:
+                lines.append("")
+                lines.append("**Attachments:**")
+                for attachment in attachments:
+                    if isinstance(attachment, dict):
+                        name = attachment.get("fileName") or attachment.get("name") or attachment.get("id") or "Attachment"
+                    else:
+                        name = str(attachment)
+                    lines.append(f"- {name}")
+            lines.append("")
         lines.append("---")
         lines.append("")
 

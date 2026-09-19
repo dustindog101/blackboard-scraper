@@ -296,15 +296,19 @@ bb assignments --all
 bb assignments IS410 --json
 ```
 
-### 3b. Single Assignment / Quiz Inspector (`bb assignment`)
-Non-destructive info mode by default — inspects prompts, questions, rubrics, and attempt status without starting an attempt or triggering exam timers:
+### 3b. Single Assignment / Submission Inspector (`bb assignment`)
+Non-destructive info mode by default — inspects prompts, questions, rubrics, prior attempt answers, and your own submitted discussion posts without starting an attempt or triggering exam timers. Human-readable output is the default; `jq` is not required:
 ```bash
 bb assignment "Homework 1" -c IS410          # By title (searches all courses if -c omitted)
 bb assignment _8954640_1                     # By content ID
+bb assignment "M3 Discussion" -c ECON        # Show the prompt and your submitted post
+bb assignment "Module 4" -c AGNG             # Show whether Blackboard has your submission
+bb assignments ECON --filter "M3"             # List candidates when a short title is ambiguous
 bb assignment "Midterm" -c IS410 --json      # Structured JSON output
 bb assignment "Quiz 2" -c MATH215 --start-attempt            # Allow starting an attempt if none active
 bb assignment "Final" -c IS410 --start-attempt --force-start # Confirm starting a TIMED exam
 ```
+Title matching is case-insensitive. Exact titles win; a unique partial title auto-resolves. Multiple partial matches produce a candidate list instead of silently selecting the wrong assignment.
 Legacy flags still work: `bb --assignment <ID_or_Title>`, `bb --quiz <ID>`, `--begin-attempt` (= `--start-attempt`).
 
 ### 4. Cross-Course Deadline Aggregator (`bb due`)
@@ -440,7 +444,7 @@ All commands support natural subcommands. Legacy `--flags` (e.g. `bb --briefing`
 | | `bb due [WINDOW]` | `--due [WINDOW]` | Upcoming deadlines (`7d`, `14d`, `overdue`) |
 | | `bb outline [COURSE]` | `--outline -c <C>` | Full course outline tree, syllabi, and files |
 | | `bb assignments [COURSE]` | `--assignments -c <C>` | Assignment details, rubrics, points, starter files |
-| | `bb assignment <TARGET>` | `--assignment <T>` | Single-item inspector, safe info mode (aliases: `quiz`, `asmt`, `assessment`) |
+| | `bb assignment <TARGET>` | `--assignment <T>` | Single-item inspector with existing answers and the current user's discussion submissions (aliases: `quiz`, `asmt`, `assessment`) |
 | | `bb assignment <T> --start-attempt` | `--assignment <T> --start-attempt` | Allow starting an attempt (`--begin-attempt` also accepted) |
 | | `bb assignment <T> --start-attempt --force-start` | `--force-start` | Confirm starting a timed exam |
 | | `bb grades [COURSE]` | `--grades -c <C>` | Gradebook items and scores |

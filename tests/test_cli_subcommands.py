@@ -5,7 +5,33 @@ and transparent redirection for legacy root flags (bb --due, bb --auto-exp).
 """
 
 import unittest
-from main import _intercept_legacy_args, _parse_args
+from main import _intercept_legacy_args, _parse_args, resolve_target_courses
+
+
+class TestCourseResolution(unittest.TestCase):
+    COURSES = {
+        "_econ_1": "ECON 122 Principles of Accounting II FA2026",
+        "_agng_1": "AGNG 100 Longevity Economy FA2026",
+        "_is_1": "IS 410 Database Administration FA2026",
+    }
+
+    def test_department_code_beats_title_substring(self):
+        self.assertEqual(
+            resolve_target_courses("ECON", False, self.COURSES),
+            ["_econ_1"],
+        )
+
+    def test_compact_full_course_code(self):
+        self.assertEqual(
+            resolve_target_courses("AGNG100", False, self.COURSES),
+            ["_agng_1"],
+        )
+
+    def test_fuzzy_title_keyword_still_works(self):
+        self.assertEqual(
+            resolve_target_courses("Accounting", False, self.COURSES),
+            ["_econ_1"],
+        )
 
 
 class TestLegacyInterceptor(unittest.TestCase):

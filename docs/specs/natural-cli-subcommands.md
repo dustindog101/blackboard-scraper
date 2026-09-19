@@ -76,6 +76,9 @@ bb [GLOBAL_FLAGS] <SUBCOMMAND> [SUB_ACTION] [POSITIONAL_ARGS] [OPTIONS]
   - Flags: `-c <course>`, `--all`, `--filter <kw>`, `--json`, `--out <file>`, `--md`.
 - `bb assignment <target> [-c course]` (aliases: `quiz`, `asmt`, `assessment`): Single gradable-item inspector. **Must keep non-destructive info mode default + attempt guards** (`scrape_assessment_attempt_async`).
   - Example: `bb assignment "Homework 1" -c IS410`, `bb assignment _8954640_1 --json`.
+  - Discussion items include only the current user's submitted posts in normal and JSON output.
+  - Exact titles win over partial matches. A partial title auto-resolves only when unique; ambiguous matches must return candidate titles instead of silently selecting the first gradebook column.
+  - Use `bb assignments <course> --filter <text>` to discover the exact title before inspection.
   - Flags: `--start-attempt` / `--begin-attempt` (allow starting an attempt if none active), `--force-start` (confirm TIMED exams), `--json`, `--out <file>`, `--md`.
 - `bb calendar [course]` (alias: `cal`): HTTP REST calendar items.
   - Flags: `-c <course>`, `--json`, `--out <file>`, `--md`.

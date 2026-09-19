@@ -46,10 +46,18 @@ bb grades IS410
 bb assignments
 bb assignments IS410
 bb assignments IS410 --json
+bb assignments ECON --filter "M3"
 
-# Inspect ONE assignment/quiz — safe info mode, never starts an attempt
+# Inspect ONE assignment/quiz/submission — safe info mode, never starts an attempt
 bb assignment "Homework 1" -c IS410
 bb assignment _8954640_1 --json
+
+# Human-readable prior discussion submissions (no jq needed)
+bb assignment "M3 Discussion" -c ECON
+bb assignment "Module 4" -c AGNG
+
+# Omit -c to search all configured courses; ambiguous matches are listed safely
+bb assignment "Syllabus Quiz"
 
 # Allow starting an attempt (guarded); confirm timed exams explicitly
 bb assignment "Quiz 2" -c MATH215 --start-attempt
@@ -115,4 +123,3 @@ bb bot status
 # Run bot directly in foreground (for debugging)
 bb bot
 ```
-
