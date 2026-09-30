@@ -1707,13 +1707,12 @@ async def _main_async(args: argparse.Namespace) -> None:
     # --- profile ---
     if subcmd in ("profile", "whoami") or getattr(args, "profile", False):
         data = await scrape_profile_async()
-        if data:
-            if getattr(args, "json", False) or getattr(args, "out", None):
-                _emit_json(args, data)
-            else:
-                _print_profile(data)
-            if getattr(args, "md", False):
-                save_profile(data)
+        if getattr(args, "json", False) or getattr(args, "out", None):
+            _emit_json(args, data or {})
+        elif data:
+            _print_profile(data)
+        if data and getattr(args, "md", False):
+            save_profile(data)
         return
 
     # --- discussions ---
