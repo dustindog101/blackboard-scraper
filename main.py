@@ -236,6 +236,8 @@ You can target courses in multiple flexible ways:
 • Target All Configured Courses:
   $ bb outline --all
   $ bb briefing
+  Sections use reconciled status and dates: Overdue, Due within 48 h, This week,
+  Submitted awaiting grade, Newly graded, Unread announcements, and untracked items.
 """,
     "schema": """
 📦 Standardized v2 JSON Schemas:

@@ -287,3 +287,14 @@ precedence and applies to all windows. Relative windows include timestamps from
 now through exactly N days. Undated items (`tracked: false`) appear only in `all`,
 under “Not tracked by Blackboard”, never overdue. Cross-Source Aggregator matching
 uses content/column identity, then an unambiguous normalized title within a course.
+
+### Briefing sections
+
+The composite JSON retains its existing keys and adds arrays `overdue`, `due_soon`,
+`this_week`, `awaiting_grade`, `newly_graded`, `unread_announcements`, and `untracked`.
+The first three contain only incomplete, dated Gradable Items. Due soon is within
+48 hours; this week is after 48 hours through seven days. In-progress items sort
+first within urgency sections (related #4). CLI, Telegram formatting and menubar
+urgency use the same builder; raw activity is retained in JSON but does not set urgency.
+Undated items appear once in the neutral untracked section. The menubar computes
+urgency from the last fetched briefing while checking session health separately.
