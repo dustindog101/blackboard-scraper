@@ -1,3 +1,4 @@
+from core.time import due_at
 import json
 import re
 from datetime import datetime
@@ -61,7 +62,7 @@ def build_item(
         "course_name": course_name,
         "title": (title or "").strip(),
         "notes": (notes or "").strip() or None,
-        "due_at": _to_unix_timestamp(due_text),
+        "due_at": due_at(due_text),
         "source_ref": source_ref,
         "url": url,
         "group_name": group_name,

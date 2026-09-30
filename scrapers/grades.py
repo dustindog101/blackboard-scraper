@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from core.config import BLACKBOARD_BASE, SESSION_DIR, load_courses
 from core.output import ensure_output_dir
 from core.async_engine import AdaptiveDOM
+from core.time import due_at, format_local
 from core.gradebook import fetch_user_grades, TOTAL_NAMES
 from scrapers.quiz import _api_get
 
@@ -33,13 +34,7 @@ def get_cookie_header() -> Optional[str]:
 
 def _format_grade_due(iso_str: str) -> str:
     """Format ISO UTC timestamp into clean date string (e.g. 8/30/26)."""
-    if not iso_str:
-        return ""
-    try:
-        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00")).astimezone()
-        return dt.strftime("%-m/%-d/%y")
-    except Exception:
-        return iso_str
+    return format_local(iso_str) if iso_str else ""
 
 
 def scrape_grades_api(course_id: str) -> Optional[List[Dict[str, Any]]]:
@@ -63,7 +58,7 @@ def scrape_grades_api(course_id: str) -> Optional[List[Dict[str, Any]]]:
         record = records[col.get("id")]
         due = col.get("dueDate") or col.get("grading", {}).get("due") or ""
         extracted.append({"name": col.get("name", "Untitled"), "dueDate": _format_grade_due(due),
-                          "raw_due": due, **record})
+                          "raw_due": due, "due_at": due_at(due), **record})
     return extracted
 
 
