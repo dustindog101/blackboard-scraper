@@ -89,14 +89,14 @@ Every `bb <COMMAND> --help` page ends with copy-pasteable `Examples:`. Unknown c
 ## 📚 Academic Scrapers
 
 ### `bb briefing`
-**Description:** Master aggregation command. Concurrently queries global activity stream, calendar due dates, course announcements, and gradebooks across all courses in parallel (<6s).
+**Description:** Master aggregation command. Concurrently queries global activity stream, calendar due dates, course announcements, and gradebooks across all courses in parallel; requested read-state fallback can take longer.
 - `--json`: Emits complete standardized v2 JSON schema to stdout.
 - `--out <file>`: Exports JSON directly to specified filepath.
 - `--telegram`: Dispatches formatted summary card to configured Telegram chat.
 - `--md`, `--save`: Saves Markdown report to `output/briefing.md`.
 
 ### `bb due [WINDOW]`
-**Description:** Cross-source deadline aggregator combining Blackboard's global calendar items and per-course gradebooks in <200ms. Deduplicates items and applies relative window filters.
+**Description:** Cross-source deadline aggregator combining Blackboard's global calendar items and per-course gradebooks through the REST Fast-Path. Deduplicates items and applies relative window filters.
 - `WINDOW`: Positional filter, e.g. `7d` (default), `14d`, `30d`, `150d`, `overdue`, `all`.
   - Example: `bb due 14d`
   - Example: `bb due overdue`
@@ -118,7 +118,7 @@ Every `bb <COMMAND> --help` page ends with copy-pasteable `Examples:`. Unknown c
 - `--json`: Emits structured JSON.
 
 ### `bb grades [COURSE]`
-**Description:** Fast REST API gradebook extractor (<150ms per course) retrieving assessment titles, points possible, earned scores, due dates, and running grades.
+**Description:** Fast REST API gradebook extractor (<150ms per course) retrieving assessment titles, points possible, posted earned scores, due dates, status, and feedback. Course totals are excluded.
 - `COURSE`: Positional course code or keyword (e.g. `bb grades IS410`).
 - `-c <COURSE>`: Named course flag.
 - `--all`: Scrape all courses in parallel.
@@ -326,3 +326,21 @@ omits the older-term marker. Read state absent from public REST is null; --unrea
 and briefing request the read-only Playwright fallback. Unknown states are excluded
 with a warning; age is never used as proof of unread. Duplicate titles are not
 joined ambiguously. Course targeting is unchanged.
+
+### Data reliability
+
+| Command | REST Fast-Path source | Caveats |
+|---|---|---|
+| assignments, grades | Public v2 gradebook columns; foundations v1 per-student column grades | Posted scores only; totals excluded. Raw submission_status is retained. Discussions require confirmed current-user posts for completed (#22). Missing or paginated posts remain unverified. |
+| assignment | Content metadata, assessment attempts, public discussions/messages | Non-Destructive Info Mode; no attempt is initiated without explicit guards (ADR 0003). |
+| due | Public calendar items plus reconciled gradebook records | Same-course identity join before Window Filter. Undated items are untracked; completed items are excluded from overdue by default. |
+| briefing | Corrected due model, student grade records, announcements | Activity titles are not urgency evidence. Newly graded requires a posted score explicitly unseen by the student. Browser read-state gaps may omit unknown announcements from unread sections (#38). |
+| announcements | Public v1 course announcements; terms availability.duration.start | Dates/age are reliable REST metadata; unread needs browser verification when missing from REST. Unknown read states are null, never inferred from age (#38). |
+| outline, search | Public/foundations content outline and metadata | Clean outline uses type; search emits canonical type and retains content_type as a compatibility alias. Optional fields are omitted when empty. |
+| terms, discover | Public terms and current-user course memberships | terms is read-only; discover saves selected courses. Term start may be unavailable. |
+
+ADR 0002 keeps the Playwright Fallback for unavailable REST data. Session lifetime
+varies, typically a few hours: run `bb check` before scripted use and use automated
+`bb login` when needed. `bb session stats` reports measured local history rather
+than a guaranteed lifespan. JSON examples in `bb guide schema` are synthetic and
+checked against fixture output keys by the unittest suite.

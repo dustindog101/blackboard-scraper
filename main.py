@@ -193,7 +193,8 @@ HELP_GUIDES: Dict[str, str] = {
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 1. Daily & Ongoing Scraping (100% Fully Headless):
    - Persistent session cookies are stored in .session/cookies.json.
-   - Sessions last for weeks to months without re-authenticating.
+   - Sessions typically last a few hours; run bb check before scripted use.
+   - bb login is automated; use bb session stats for measured local guidance.
    - All CLI commands, background cron jobs, and Telegram bot commands run
      completely in the background with zero browser popups and zero user intervention.
 
@@ -254,25 +255,77 @@ stdout is JSON, stderr is progress. Machine modes omit ANSI colors.
 Dated items include ISO-8601 UTC due_at; text uses local time with a timezone
 abbreviation. Set BB_TZ or config timezone to an IANA zone; default America/New_York.
 
-• Full Composite Document (bb briefing --json):
+Examples below use synthetic values. Outline JSON uses canonical type; search
+also emits type (content_type remains a compatibility alias in raw search data).
+Overdue excludes completed work; --include-completed restores it for debugging.
+Undated items appear under Not tracked by Blackboard in bb due all.
+
+Composite briefing (bb briefing --json):
+```json
+{
+  "version": "2.0",
+  "source": "blackboard-scraper",
+  "generated_at": 0,
+  "generated_at_human": "2026-01-01T00:00:00",
+  "summary": {
+    "total_courses": 0,
+    "upcoming_deadlines_count": 0,
+    "total_announcements_count": 0,
+    "unread_announcements_count": 0
+  },
+  "user": {},
+  "courses": [],
+  "global": {
+    "activity_stream": [],
+    "calendar_due_dates": []
+  },
+  "overdue": [],
+  "due_soon": [],
+  "this_week": [],
+  "awaiting_grade": [],
+  "newly_graded": [],
+  "unread_announcements": [],
+  "untracked": []
+}
+```
+
+Deadlines (bb due all --json):
+```json
+[
   {
-    "version": "2.0",
-    "generated_at": 1786938000,
-    "generated_at_human": "2026-08-16T23:40:00Z",
-    "summary": { "total_courses": 5, "upcoming_deadlines_count": 2, ... },
-    "user": { "username": "BH69617", "name": "Amanuel Hailie" },
-    "courses": [ { "course_id": "...", "syllabus": {...}, "outline": [...], "assignments": [...], ... } ],
-    "global": { "activity_stream": [...], "calendar_due_dates": [...] }
+    "name": "Synthetic",
+    "raw_due": "2026-01-02T12:00:00Z",
+    "dueDate": "1/2/26, 7:00 AM EST",
+    "status": "Not attempted",
+    "submission_status": "NOT_ATTEMPTED",
+    "completed": false,
+    "title": "Synthetic",
+    "course_id": "synthetic-course",
+    "course": "Synthetic Course",
+    "due_date": "1/2/26, 7:00 AM EST",
+    "source": "gradebook",
+    "tracked": true,
+    "due_at": "2026-01-02T12:00:00Z"
   }
+]
+```
 
-• Overdue excludes completed work; --include-completed restores it for debugging.
-  Undated items appear under Not tracked by Blackboard in bb due all.
-
-• Targeted Deadline Items (bb due 7d --json):
-  { "version": "2.0", "total_items": 3, "items": [ { "title": "...", "course": "...", "due_date": "..." } ] }
-
-• Targeted Outline Trees (bb outline IS410 --json):
-  [ { "course_id": "_105737_1", "course_name": "IS 410", "items": [ { "title": "...", "content_type": "folder", "depth": 0 } ] } ]
+Outline (bb outline COURSE --json):
+```json
+[
+  {
+    "course_id": "synthetic-course",
+    "course_name": "Synthetic Course",
+    "items": [
+      {
+        "id": "synthetic-node",
+        "title": "Synthetic Folder",
+        "type": "folder"
+      }
+    ]
+  }
+]
+```
 """,
     "telegram": """
 🤖 Telegram Bot & Alerts Guide:
@@ -1545,7 +1598,7 @@ async def _main_async(args: argparse.Namespace) -> None:
                 due_str = f" (Due: {m['due_date']})" if m.get("due_date") else ""
                 dl_str = " 💾 [File Ready]" if m.get("is_downloadable") else ""
                 path_str = f" [{ ' > '.join(m.get('parent_path', [])) }]" if m.get("parent_path") else ""
-                print(f"• [{m['course_name']}]{path_str} {m['title']} [{m['content_type']}]{dl_str}{due_str}")
+                print(f"• [{m['course_name']}]{path_str} {m['title']} [{m.get('type') or m.get('content_type', 'item')}]{dl_str}{due_str}")
                 if m.get("description"):
                     print(f"  > 💬 {m['description'][:130]}")
                 if m.get("download_url"):

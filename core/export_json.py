@@ -133,7 +133,7 @@ def build_composite_schema(
         # Detect syllabus item in outline
         syllabus = None
         for item in outline:
-            if item.get("content_type") == "syllabus" or "syllabus" in item.get("title", "").lower():
+            if (item.get("type") or item.get("content_type")) == "syllabus" or "syllabus" in item.get("title", "").lower():
                 syllabus = item
                 break
 
