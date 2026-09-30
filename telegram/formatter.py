@@ -92,59 +92,13 @@ def format_bot_status_telegram(metrics: Dict[str, Any]) -> str:
 
 def format_daily_briefing(briefing_data: Dict[str, Any]) -> List[str]:
     """Format full composite daily briefing into Telegram HTML."""
-    now_str = datetime.now().strftime("%a, %b %d • %I:%M %p")
-    lines = [
-        "<b>📋 Blackboard Daily Briefing</b>",
-        f"<i>{escape_html(now_str)}</i>",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "",
-    ]
-
-    # 1. Urgent Items
-    urgent = briefing_data.get("urgent", [])
-    if urgent:
-        lines.append("🚨 <b>URGENT & OVERDUE:</b>")
-        for u in urgent:
-            lines.append(f"• <b>{escape_html(u.get('title'))}</b>")
-            lines.append(f"  └ <i>{escape_html(u.get('course'))}</i> • Due: <b>{escape_html(u.get('due_date', 'Today'))}</b>")
-        lines.append("")
-
-    # 2. Upcoming Due Dates
-    calendar = briefing_data.get("calendar", [])
-    if calendar:
-        lines.append("📅 <b>UPCOMING ASSIGNMENTS:</b>")
-        for item in calendar[:8]:
-            lines.append(f"• <b>{escape_html(item.get('title'))}</b>")
-            lines.append(f"  └ {escape_html(item.get('course'))} — <code>{escape_html(item.get('due', 'TBD'))}</code>")
-        lines.append("")
-
-    # 3. Course Specific Highlights
-    courses = briefing_data.get("courses", {})
-    any_course_updates = False
-    if courses:
-        lines.append("📚 <b>COURSE UPDATES:</b>")
-        for cid, cdata in courses.items():
-            if not isinstance(cdata, dict):
-                continue
-            cname = cdata.get("course_name", cid)
-            announcements = cdata.get("announcements", [])
-            unread_ann = [a for a in announcements if a.get("unread")]
-            grades = cdata.get("grades", [])
-            recent_grades = [g for g in grades if g.get("grade") and g["grade"] not in ("Not graded", "-- %", "")]
-
-            if unread_ann or recent_grades:
-                any_course_updates = True
-                lines.append(f"\n▶ <b>{escape_html(cname)}</b>")
-                if unread_ann:
-                    lines.append(f"  📢 <i>{len(unread_ann)} new announcement(s)</i>")
-                    for ann in unread_ann[:2]:
-                        lines.append(f"    • {escape_html(ann.get('title'))}")
-                if recent_grades:
-                    lines.append(f"  📊 Graded items: <code>{len(recent_grades)}</code>")
-
-    if not any_course_updates and not urgent and not calendar:
-        lines.append("<i>(No urgent deadlines, unread announcements, or new grades across courses)</i>")
-
+    from scrapers.briefing import briefing_rows, briefing_item_text
+    lines = ["<b>📋 Blackboard Daily Briefing</b>"]
+    for heading, items in briefing_rows(briefing_data):
+        lines.append(f"\n<b>{escape_html(heading)}</b>")
+        lines.extend("• " + escape_html(briefing_item_text(item)) for item in items)
+    if len(lines) == 1:
+        lines.append("<i>No actionable updates.</i>")
     return chunk_message("\n".join(lines))
 
 

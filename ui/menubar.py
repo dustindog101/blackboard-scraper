@@ -225,7 +225,10 @@ class BlackboardMenuBarApp(_BaseApp):
                 self.item_bot_status.title = "🤖 Telegram Bot: 🔴 STOPPED"
 
             # 4. Update Status Bar Title / Icon
-            if self.session_valid and self.bot_status["running"]:
+            if self.session_valid and getattr(self, "briefing_bundle", None) is not None:
+                from scrapers.briefing import briefing_icon
+                self.title = "🎓 BB " + briefing_icon(self.briefing_bundle)
+            elif self.session_valid and self.bot_status["running"]:
                 self.title = "🎓 BB 🟢"
             elif self.session_valid:
                 self.title = "🎓 BB 🟡"
@@ -366,8 +369,9 @@ class BlackboardMenuBarApp(_BaseApp):
                 from scrapers.briefing import run_briefing_async
                 bundle = asyncio.run(run_briefing_async(headless=True, write_markdown=False, concurrency=4))
 
-                urgent_count = len(bundle.get("urgent", []))
-                upcoming_count = len(bundle.get("calendar", []))
+                self.briefing_bundle = bundle
+                urgent_count = len(bundle.get("overdue", [])) + len(bundle.get("due_soon", []))
+                upcoming_count = len(bundle.get("this_week", []))
                 rumps.notification(
                     title="Daily Briefing Completed",
                     subtitle=f"{urgent_count} Urgent • {upcoming_count} Upcoming Deadlines",

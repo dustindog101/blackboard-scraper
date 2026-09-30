@@ -494,3 +494,8 @@ Course total columns are excluded. The briefing's recent grades include only pos
 `--include-completed` to inspect finished past-due work. `--exclude-completed`
 works in every Window Filter. `bb due all` groups undated items as not tracked by
 Blackboard. Calendar and gradebook rows are joined within each course.
+
+The briefing uses one status builder for CLI text, Telegram cards and menubar urgency:
+Overdue, Due within 48 h, This week, Submitted awaiting grade, Newly graded, Unread
+announcements, and Not tracked by Blackboard. Empty sections are omitted. Activity
+stream titles never establish urgency; incomplete in-progress items sort first.

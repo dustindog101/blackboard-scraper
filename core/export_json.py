@@ -165,6 +165,8 @@ def build_composite_schema(
         },
     }
 
+    for key in ("overdue", "due_soon", "this_week", "awaiting_grade", "newly_graded", "unread_announcements", "untracked"):
+        doc[key] = bundle.get(key, [])
     if pretty:
         return json.dumps(doc, indent=2, ensure_ascii=False)
     return json.dumps(doc, separators=(",", ":"), ensure_ascii=False)
