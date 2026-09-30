@@ -298,3 +298,11 @@ first within urgency sections (related #4). CLI, Telegram formatting and menubar
 urgency use the same builder; raw activity is retained in JSON but does not set urgency.
 Undated items appear once in the neutral untracked section. The menubar computes
 urgency from the last fetched briefing while checking session health separately.
+
+### Machine output contract
+
+stdout is JSON, stderr is progress. `--json`, `--raw`, and `--compact` select machine
+output; `--out FILE` writes the JSON file with progress on stderr and no stdout.
+Machine modes strip ANSI escapes. `bb terms` exports an array of
+`{term, active, courses: [{id, name}]}`; `bb discover --json` emits the saved course
+map. Discovery updates configured courses; terms is read-only.

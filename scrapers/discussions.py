@@ -1,3 +1,4 @@
+from core.output import status as print
 from datetime import datetime
 from pathlib import Path
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
