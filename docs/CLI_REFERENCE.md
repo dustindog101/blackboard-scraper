@@ -267,3 +267,14 @@ All prior `--flag` invocations remain 100% operational:
 | `bb --bot-stop` | `bb bot stop` | Stop daemon |
 | `bb --bot-restart` | `bb bot restart` | Restart daemon |
 | `bb --bot-status` | `bb bot status` | Inspect daemon |
+
+### Gradebook status and privacy
+
+`bb grades [COURSE] --json` retains `name`, `dueDate`, `status`, `grade`, and
+`points_possible`, and adds `submission_status`, `score`, `display_grade`, `feedback`,
+`column_id`, `content_id`, `posted`, and `completed`. Scores and feedback are returned
+only for posted grades. Display status is Graded, Submitted, Not attempted, or In progress;
+unposted grades and unverified discussion submissions are explicitly labelled.
+The raw `submission_status` remains Blackboard's value. For discussions, `completed`
+requires confirmed current-user posts (#22); raw NEEDS_GRADING alone is insufficient.
+Newly graded means a posted score that Blackboard explicitly marks unseen by the student.

@@ -484,3 +484,8 @@ All commands support natural subcommands. Legacy `--flags` (e.g. `bb --briefing`
 ## 📜 License
 
 MIT License. Designed for UMBC students and educational research.
+
+`bb grades` reads each Gradable Item's student grade record through the REST Fast-Path.
+Posted grades include earned/possible points, display grade and instructor feedback in JSON;
+unposted scores stay hidden. Discussion status remains unverified until current-user posts confirm submission.
+Course total columns are excluded. The briefing's recent grades include only posted scores explicitly unseen by the student.
