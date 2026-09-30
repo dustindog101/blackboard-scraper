@@ -315,3 +315,14 @@ formatter, including the local abbreviation (EDT/EST for America/New_York).
 `BB_TZ` overrides config `timezone`; the default is America/New_York. Naive legacy
 browser dates are interpreted in that zone; dates with an explicit offset retain
 it before UTC normalization. Date-only fallback values have midnight precision.
+
+### Announcement filters
+
+`bb announcements [COURSE] [--all] [--unread] [--since 14d|2w|YYYY-MM-DD] [--limit N]`
+sorts newest first; limits apply per course after filtering. Text shows relative
+age, verified unread prefixes, and `(older term)` for posts before the term metadata
+start returned by the same endpoint used for `bb terms`. Unavailable term metadata
+omits the older-term marker. Read state absent from public REST is null; --unread
+and briefing request the read-only Playwright fallback. Unknown states are excluded
+with a warning; age is never used as proof of unread. Duplicate titles are not
+joined ambiguously. Course targeting is unchanged.

@@ -89,8 +89,6 @@ def scrape_announcements_api(course_id: str) -> Optional[List[Dict[str, Any]]]:
     raw_items = data.get("results", [])
     extracted: List[Dict[str, Any]] = []
 
-    now = datetime.now(timezone.utc)
-
     for item in raw_items:
         title = item.get("title", "Untitled").strip()
         raw_body = item.get("body", "")
@@ -98,15 +96,7 @@ def scrape_announcements_api(course_id: str) -> Optional[List[Dict[str, Any]]]:
         created_str = item.get("created") or item.get("modified") or ""
         meta = _format_created_meta(created_str)
 
-        # Check if unread / recent (e.g. posted in last 7 days)
-        is_unread = True
-        if created_str:
-            try:
-                dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-                days_old = (now - dt).total_seconds() / 86400
-                is_unread = days_old < 14
-            except Exception:
-                is_unread = True
+        is_unread = item.get("unread") if isinstance(item.get("unread"), bool) else None
 
         extracted.append({
             "title": title,
@@ -117,7 +107,7 @@ def scrape_announcements_api(course_id: str) -> Optional[List[Dict[str, Any]]]:
             "modified": item.get("modified"),
         })
 
-    return extracted
+    return filter_announcements(extracted)
 
 
 async def scrape_announcements_playwright_async(course_id: str, page: Any) -> List[Dict[str, Any]]:
@@ -202,7 +192,7 @@ async def scrape_announcements_playwright_async(course_id: str, page: Any) -> Li
     return announcements_data
 
 
-async def scrape_announcements_async(course_id: str, page: Optional[Any] = None) -> List[Dict[str, Any]]:
+async def scrape_announcements_async(course_id: str, page: Optional[Any] = None, verify_unread: bool = False) -> List[Dict[str, Any]]:
     """
     Unified announcements scraper.
     Primary: Fast HTTP REST API endpoint (<150ms).
@@ -211,24 +201,40 @@ async def scrape_announcements_async(course_id: str, page: Optional[Any] = None)
     courses = load_courses()
     name = courses.get(course_id, course_id)
 
+    api_results = None
     try:
         api_results = await asyncio.to_thread(scrape_announcements_api, course_id)
-        if api_results is not None:
+        if api_results is not None and not verify_unread:
             return api_results
+        if api_results is not None and verify_unread and not api_results:
+            return []
     except Exception as e:
         logger.debug(f"Announcements HTTP API exception for {name}: {e}")
 
     # Fallback path: Playwright browser scraper
-    print(f"⚠️ HTTP Announcements API unavailable for {name}; falling back to Playwright browser scraper...", file=sys.stderr)
+    print(f"⚠️ Announcement API data or read state unavailable for {name}; falling back to Playwright browser scraper...", file=sys.stderr)
+    def reconcile(browser_rows):
+        if api_results is None:
+            return filter_announcements(browser_rows)
+        title_counts = {r["title"]: sum(b["title"] == r["title"] for b in browser_rows) for r in browser_rows}
+        for row in api_results:
+            matches = [b for b in browser_rows if b["title"] == row["title"]]
+            if len(matches) == 1 and title_counts[row["title"]] == 1 and sum(
+                    a["title"] == row["title"] for a in api_results) == 1:
+                row["unread"] = matches[0].get("unread")
+        if any(r.get("unread") is None for r in api_results) and verify_unread:
+            print("⚠️ Some announcement read states could not be verified; --unread excludes unknown states.", file=sys.stderr)
+        return filter_announcements(api_results)
+
     if page:
-        return await scrape_announcements_playwright_async(course_id, page)
+        return reconcile(await scrape_announcements_playwright_async(course_id, page))
     else:
         from core.async_engine import AsyncSessionManager, EngineConfig
         session_manager = AsyncSessionManager(EngineConfig(headless=True))
         await session_manager.initialize()
         try:
             async with session_manager.acquire_page() as p:
-                return await scrape_announcements_playwright_async(course_id, p)
+                return reconcile(await scrape_announcements_playwright_async(course_id, p))
         finally:
             await session_manager.close()
 
@@ -281,3 +287,43 @@ def save_announcements(data: list[dict], course_id: str):
             lines.append("\n---")
 
     filepath.write_text("\n".join(lines))
+
+
+def filter_announcements(items, unread=False, since=None, limit=None, now=None):
+    from core.time import parse_datetime
+    from datetime import timedelta
+    now = now or datetime.now(timezone.utc)
+    threshold = None
+    if since:
+        match = re.fullmatch(r'(\d+)(d|w)', since)
+        if match:
+            threshold = now - timedelta(days=int(match[1]) * (7 if match[2] == 'w' else 1))
+        elif re.fullmatch(r'\d{4}-\d{2}-\d{2}', since):
+            threshold = parse_datetime(since)
+        if threshold is None:
+            raise ValueError('--since must be Nd, Nw, or YYYY-MM-DD')
+    if limit is not None and limit < 0:
+        raise ValueError('--limit must be nonnegative')
+    rows = [dict(item) for item in items if not unread or item.get('unread') is True]
+    if threshold:
+        rows = [r for r in rows if parse_datetime(r.get('created') or r.get('meta')) and
+                parse_datetime(r.get('created') or r.get('meta')) >= threshold]
+    rows.sort(key=lambda r: parse_datetime(r.get('created') or r.get('meta')) or
+              datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    return rows[:limit] if limit is not None else rows
+
+
+def announcement_label(item, now=None, term_start=None):
+    from core.time import parse_datetime
+    now = now or datetime.now(timezone.utc)
+    created = parse_datetime(item.get('created') or item.get('meta'))
+    if created:
+        seconds = max(0, (now - created).total_seconds())
+        age = f'{int(seconds // 86400)}d ago' if seconds >= 86400 else \
+            f'{int(seconds // 3600)}h ago' if seconds >= 3600 else 'just now'
+    else:
+        age = 'date unknown'
+    older = ' (older term)' if created and term_start and created < term_start else ''
+    prefix = '🆕 [UNREAD] ' if item.get('unread') is True else ''
+    unknown = ' [read state unknown]' if item.get('unread') is None else ''
+    return f"{prefix}{item['title']} ({age}){older}{unknown}"
