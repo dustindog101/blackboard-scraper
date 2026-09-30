@@ -489,3 +489,8 @@ MIT License. Designed for UMBC students and educational research.
 Posted grades include earned/possible points, display grade and instructor feedback in JSON;
 unposted scores stay hidden. Discussion status remains unverified until current-user posts confirm submission.
 Course total columns are excluded. The briefing's recent grades include only posted scores explicitly unseen by the student.
+
+`bb due overdue` includes only past-due, incomplete Gradable Items; use
+`--include-completed` to inspect finished past-due work. `--exclude-completed`
+works in every Window Filter. `bb due all` groups undated items as not tracked by
+Blackboard. Calendar and gradebook rows are joined within each course.

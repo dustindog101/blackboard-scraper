@@ -278,3 +278,12 @@ unposted grades and unverified discussion submissions are explicitly labelled.
 The raw `submission_status` remains Blackboard's value. For discussions, `completed`
 requires confirmed current-user posts (#22); raw NEEDS_GRADING alone is insufficient.
 Newly graded means a posted score that Blackboard explicitly marks unseen by the student.
+
+### Due Window Filters
+
+Overdue means a dated item before now whose reconciled `completed` flag is false.
+`--include-completed` restores finished past-due rows; `--exclude-completed` takes
+precedence and applies to all windows. Relative windows include timestamps from
+now through exactly N days. Undated items (`tracked: false`) appear only in `all`,
+under “Not tracked by Blackboard”, never overdue. Cross-Source Aggregator matching
+uses content/column identity, then an unambiguous normalized title within a course.
