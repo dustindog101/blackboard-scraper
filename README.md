@@ -112,7 +112,7 @@ bb outline IS410
 
 ### How It Works:
 - **Session Persistence**: Session cookies and local storage are saved in `.session/cookies.json` and `.session/`.
-- **Long-Lived Tokens**: Sessions remain valid for **weeks to months**.
+- **Session lifetime**: Typically a few hours; run `bb check` before scripted use. `bb login` is automated; consult `bb session stats` for measured guidance.
 - **100% Fully Headless**: All ongoing scrapers, cron jobs, background watchers, and Telegram bot interactions run headlessly with zero browser popups or prompts.
 
 ```bash
@@ -159,8 +159,8 @@ By default, **no Markdown files are saved to disk**. Commands print directly to 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Course                    | Assignment                          | Due Date             | Status
 --------------------------+-------------------------------------+----------------------+-----------
-IS 410 Database Design    | Homework 1: ER Diagrams             | Sep 15, 2026 11:59PM | Upcoming
-MATH 215 Finite Math      | Problem Set 1                       | Sep 16, 2026 11:59PM | Upcoming
+IS 410 Database Design    | Homework 1: ER Diagrams             | Sep 15, 2026 11:59 PM EDT | Upcoming
+MATH 215 Finite Math      | Problem Set 1                       | Sep 16, 2026 11:59 PM EDT | Upcoming
 ```
 
 ---
@@ -178,61 +178,27 @@ When you need machine-readable structured data for LLM agents, dashboards, or ex
 {
   "version": "2.0",
   "source": "blackboard-scraper",
-  "generated_at": 1786938000,
-  "generated_at_human": "2026-08-16T23:40:00Z",
+  "generated_at": 0,
+  "generated_at_human": "2026-01-01T00:00:00",
   "summary": {
-    "total_courses": 5,
-    "upcoming_deadlines_count": 2,
-    "total_announcements_count": 8,
-    "unread_announcements_count": 1
+    "total_courses": 0,
+    "upcoming_deadlines_count": 0,
+    "total_announcements_count": 0,
+    "unread_announcements_count": 0
   },
-  "user": {
-    "username": "BH69617",
-    "name": "Amanuel Hailie"
-  },
-  "courses": [
-    {
-      "course_id": "_105737_1",
-      "course_name": "IS 410 Introduction to Database Design",
-      "syllabus": {
-        "title": "IS 410 Syllabus",
-        "attachments": [
-          { "filename": "Syllabus.pdf", "url": "https://blackboard.umbc.edu/..." }
-        ]
-      },
-      "outline": [
-        {
-          "content_id": "node_1",
-          "title": "Week 1: Relational Data Models",
-          "content_type": "folder",
-          "depth": 0,
-          "links": [{ "text": "Slides.pdf", "url": "https://..." }]
-        }
-      ],
-      "assignments": [
-        {
-          "title": "Project Milestone 1",
-          "due_date": "2026-09-15 23:59",
-          "points_possible": 100.0,
-          "submission_status": "Unattempted",
-          "is_timed_test": false,
-          "instructions": "Design the ER diagram...",
-          "rubric": [{ "criterion": "ER Diagram Completeness", "points": 50 }],
-          "attachments": [{ "filename": "Spec.pdf", "url": "https://..." }]
-        }
-      ],
-      "grades": [
-        { "name": "Quiz 1", "grade": "95 / 100", "dueDate": "2026-09-10" }
-      ],
-      "announcements": [
-        { "title": "Welcome", "unread": true, "meta": "Aug 15", "body": "Welcome everyone!" }
-      ]
-    }
-  ],
+  "user": {},
+  "courses": [],
   "global": {
     "activity_stream": [],
     "calendar_due_dates": []
-  }
+  },
+  "overdue": [],
+  "due_soon": [],
+  "this_week": [],
+  "awaiting_grade": [],
+  "newly_graded": [],
+  "unread_announcements": [],
+  "untracked": []
 }
 ```
 
@@ -514,3 +480,9 @@ Announcements sort newest first. Use `bb announcements --unread`, `--since 14d`
 marks posts before the current term's actual start. The public REST endpoint has
 no read state: `--unread` and briefing verify it with the browser fallback; other
 REST results use `unread: null` rather than guessing from age.
+
+Clean outline JSON uses `type` (for example `folder`), with optional keys omitted
+when empty. Search emits the same canonical `type` and retains `content_type` as
+a compatibility alias. `bb guide schema` contains valid synthetic examples checked
+against fixture output keys; see CLI_REFERENCE's Data reliability section for
+sources and limits, including discussion completion (#22) and unread fallback (#38).

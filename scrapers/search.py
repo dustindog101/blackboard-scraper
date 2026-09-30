@@ -33,7 +33,7 @@ async def find_items_async(
         for item in outline:
             title = item.get("title", "")
             desc = item.get("description", "")
-            ctype = item.get("content_type", "")
+            ctype = item.get("type") or item.get("content_type", "")
             parent_path_str = " / ".join(item.get("parent_path", []))
 
             if type_filter and type_filter.lower() not in ctype.lower():
@@ -42,6 +42,7 @@ async def find_items_async(
             searchable_text = f"{title} {desc} {parent_path_str}".lower()
             if query_lower in searchable_text or query == item.get("content_id"):
                 match_record = dict(item)
+                match_record["type"] = ctype
                 match_record["course_id"] = cid
                 match_record["course_name"] = cname
                 c_matches.append(match_record)
@@ -129,7 +130,7 @@ async def grab_item_async(
     content_id = target_item["content_id"]
     item_title = target_item["title"]
 
-    print(f"   ✅ Found: {item_title} [{target_item.get('content_type', 'item')}] in {cname}")
+    print(f"   ✅ Found: {item_title} [{target_item.get('type') or target_item.get('content_type', 'item')}] in {cname}")
 
     downloaded_files = []
     if download_dir:
@@ -155,6 +156,7 @@ async def grab_item_async(
         "course_name": cname,
         "content_id": content_id,
         "title": item_title,
-        "content_type": target_item.get("content_type", "item"),
+        "type": target_item.get("type") or target_item.get("content_type", "item"),
+        "content_type": target_item.get("type") or target_item.get("content_type", "item"),
         "downloaded_files": downloaded_files,
     }
