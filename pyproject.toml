@@ -40,6 +40,8 @@ line-length = 120
 target-version = "py310"
 exclude = [
     ".venv",
+    ".worktrees",
+    ".scratch",
     ".session",
     "scratch",
     "output",

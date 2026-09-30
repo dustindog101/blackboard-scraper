@@ -220,6 +220,9 @@ You can target courses in multiple flexible ways:
 
 • Target by -c / --course Option:
   $ bb outline -c IS410
+  Posted scores show earned / possible points; unposted scores stay hidden.
+  Discussion completion requires confirmed current-user posts.
+
   $ bb grades -c MATH215
 
 • Target Multiple Courses (Comma-Separated):
