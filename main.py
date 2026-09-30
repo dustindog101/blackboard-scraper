@@ -33,7 +33,7 @@ from core.async_engine import AsyncSessionManager, AsyncCourseWorkerPool, Engine
 
 # Scrapers
 from scrapers.activity import save_activity, scrape_activity_async
-from scrapers.announcements import save_announcements, scrape_announcements_async
+from scrapers.announcements import save_announcements, scrape_announcements_async, filter_announcements, announcement_label
 from scrapers.calendar import save_calendar, scrape_calendar_async
 from scrapers.discussions import save_discussions, scrape_discussions
 from scrapers.grades import save_grades, scrape_grades_async
@@ -235,6 +235,9 @@ You can target courses in multiple flexible ways:
 
 • Target by Fuzzy Title Keyword:
   $ bb outline Database
+  Announcements sort newest first; filter with --unread, --since 14d|2w|YYYY-MM-DD,
+  and --limit N. Unread requires browser verification when REST has no read state.
+
   $ bb grades Accounting
 
 • Target All Configured Courses:
@@ -791,7 +794,7 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
         description="Scrape a course gradebook.",
         epilog="Examples:\n  bb grades IS410\n  bb grades -c IS410 --json\n  bb grades --all",
     )
-    subparsers.add_parser(
+    announcements_p = subparsers.add_parser(
         "announcements",
         aliases=["announce", "news"],
         parents=[course_parent, output_parent, engine_parent],
@@ -801,6 +804,11 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
     )
 
     # --- course content ---
+    announcements_p.add_argument("--unread", action="store_true", help="Only verified unread announcements (browser read-state check)")
+    announcements_p.add_argument("--since", help="Age window or date: 14d, 2w, YYYY-MM-DD")
+    announcements_p.add_argument("--limit", type=int, help="Maximum announcements per course")
+
+
     outline_p = subparsers.add_parser(
         "outline",
         parents=[course_parent, output_parent, engine_parent],
@@ -1354,6 +1362,7 @@ async def _main_async(args: argparse.Namespace) -> None:
             print(format_due_dates_table(items, window_filter=window))
         return
 
+
     # --- outline ---
     if subcmd == "outline" or getattr(args, "outline", False):
         if not target_cids:
@@ -1575,7 +1584,9 @@ async def _main_async(args: argparse.Namespace) -> None:
         try:
             pool = AsyncCourseWorkerPool(session_manager, task_profile=TaskProfile.LIGHT)
             async def _worker(cid, cname, page):
-                data = await scrape_announcements_async(cid, page)
+                data = await scrape_announcements_async(cid, page, verify_unread=getattr(args, "unread", False))
+                data = filter_announcements(data, unread=getattr(args, "unread", False),
+                                            since=getattr(args, "since", None), limit=getattr(args, "limit", None))
                 if getattr(args, "md", False):
                     save_announcements(data, cid)
                 return data
@@ -1596,6 +1607,8 @@ async def _main_async(args: argparse.Namespace) -> None:
             ]
             _emit_json(args, formatted_json)
         else:
+            from core.course_discovery import current_term_start
+            term_start = await asyncio.to_thread(current_term_start)
             for cid, data in raw_ann.items():
                 cname = courses.get(cid, cid)
                 print(f"\n📢 Announcements: {cname}")
@@ -1603,8 +1616,7 @@ async def _main_async(args: argparse.Namespace) -> None:
                 if not data:
                     print("  (No announcements found)")
                 for ann in data:
-                    unread = "[UNREAD] " if ann.get("unread") else ""
-                    print(f"• {unread}{ann['title']} ({ann.get('meta','')})")
+                    print("• " + announcement_label(ann, term_start=term_start))
                     if ann.get("body"):
                         print(f"  > {ann['body'][:140]}")
         return

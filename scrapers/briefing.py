@@ -136,7 +136,7 @@ async def run_briefing_async(
         worker_pool = AsyncCourseWorkerPool(session_manager)
 
         async def _scrape_course(cid: str, cname: str, page: Any) -> Dict[str, Any]:
-            ann_data = await scrape_announcements_async(cid, page)
+            ann_data = await scrape_announcements_async(cid, page, verify_unread=True)
             grade_data = await scrape_grades_async(cid, page)
 
             if write_markdown:

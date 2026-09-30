@@ -234,3 +234,17 @@ def handle_discover_courses_cli(term_filter: Optional[str] = None, list_only: bo
         print("   All briefings, due dates, grade lookups, and Telegram alerts are now focused on your active term.\n")
 
     return selected_courses
+
+
+def current_term_start():
+    """Use the same term metadata endpoint as bb terms; never guess a start date."""
+    from scrapers.quiz import _api_get
+    from core.time import parse_datetime
+    cookie = get_cookie_header()
+    if not cookie:
+        return None
+    data = _api_get('/learn/api/public/v1/terms', cookie) or {}
+    terms = data.get('results', [])
+    current = get_current_term_name({t.get('name', ''): {'term': 'metadata'} for t in terms})
+    term = next((t for t in terms if t.get('name') == current), {})
+    return parse_datetime(term.get('availability', {}).get('duration', {}).get('start'))

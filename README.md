@@ -508,3 +508,9 @@ Every dated item includes `due_at` as ISO-8601 UTC (`Z`) in JSON; legacy date fi
 remain available. Text shows local time and its timezone abbreviation. The default
 is America/New_York; set `BB_TZ=America/Chicago` or config `timezone` to an IANA zone
 (`BB_TZ` takes precedence). DST is evaluated at the deadline, not the current date.
+
+Announcements sort newest first. Use `bb announcements --unread`, `--since 14d`
+(or `2w` / an ISO date), and `--limit 3` per course. Text shows relative age and
+marks posts before the current term's actual start. The public REST endpoint has
+no read state: `--unread` and briefing verify it with the browser fallback; other
+REST results use `unread: null` rather than guessing from age.
