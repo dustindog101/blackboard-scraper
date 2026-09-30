@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from playwright.async_api import Page
 
+from core.time import parse_datetime, due_at, format_local
 from core.output import ensure_output_dir
 from scrapers.calendar import scrape_calendar_async
 from scrapers.grades import scrape_grades_async
@@ -22,27 +23,7 @@ def _normalize_title(title: str) -> str:
 
 def _parse_due_datetime(due_str: str) -> Optional[datetime]:
     """Parse date string or ISO timestamp into datetime object."""
-    if not due_str or due_str.strip().upper() in ("TBD", "UNKNOWN DATE"):
-        return None
-    try:
-        return datetime.fromisoformat(due_str.replace("Z", "+00:00")).astimezone()
-    except Exception:
-        pass
-    cleaned = re.sub(r"\s*\([A-Z0-9_-]+\)\s*$", "", due_str).strip()
-    for fmt in [
-        "%-m/%-d/%y, %-I:%M %p",
-        "%m/%d/%y, %I:%M %p",
-        "%-m/%-d/%Y, %-I:%M %p",
-        "%m/%d/%Y, %I:%M %p",
-        "%-m/%-d/%y",
-        "%m/%d/%y",
-        "%Y-%m-%d",
-    ]:
-        try:
-            return datetime.strptime(cleaned, fmt).astimezone()
-        except Exception:
-            continue
-    return None
+    return parse_datetime(due_str)
 
 
 def merge_due_items(calendar_items, gradebooks, courses, window_filter="all", exclude_completed=False,
@@ -93,6 +74,7 @@ def merge_due_items(calendar_items, gradebooks, courses, window_filter="all", ex
         seen.add(identity)
         dt = _parse_due_datetime(item.get("raw_due") or item.get("due_date", ""))
         item["tracked"] = dt is not None
+        item["due_at"] = due_at(item.get("raw_due") or item.get("due_date"))
         completed = item["completed"]
         if exclude_completed and completed:
             continue
@@ -136,7 +118,7 @@ def format_due_dates_table(items: List[Dict[str, Any]], window_filter: str = "7d
         else:
             c = c_raw[:24]
         t = (it.get("title") or "Untitled")[:33]
-        d = (it.get("due_date") or it.get("due") or "TBD")[:24]
+        d = format_local(it.get("due_at") or it.get("due_date") or it.get("due") or "TBD")
         s = it.get("status") or "Upcoming"
         lines.append(f"{c:<25} | {t:<34} | {d:<24} | {s}")
 

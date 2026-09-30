@@ -5,6 +5,7 @@ from scrapers.due_dates import merge_due_items, _parse_due_datetime
 from typing import Any, Dict, Optional
 
 from core.config import load_courses
+from core.time import format_local
 from core.gradebook import newly_graded
 from core.output import OUTPUT_BASE
 from core.async_engine import AsyncSessionManager, AsyncCourseWorkerPool, EngineConfig
@@ -70,7 +71,7 @@ def briefing_item_text(item):
     if newly_graded(item):
         text += f" — {item.get('grade', '')}"
     elif item.get("due_date"):
-        text += f" — Due: {item['due_date']}"
+        text += f" — Due: {format_local(item.get('due_at') or item['due_date'])}"
     if item.get("status"):
         text += f" [{item['status']}]"
     return text

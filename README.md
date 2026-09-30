@@ -503,3 +503,8 @@ stream titles never establish urgency; incomplete in-progress items sort first.
 Machine output (`--json`, `--raw`, `--compact`, `--out`) is JSON only: stdout is
 JSON, stderr is progress, with ANSI colors disabled. `bb terms --out FILE` exports
 term records; `bb discover --json` returns the selected course map after saving it.
+
+Every dated item includes `due_at` as ISO-8601 UTC (`Z`) in JSON; legacy date fields
+remain available. Text shows local time and its timezone abbreviation. The default
+is America/New_York; set `BB_TZ=America/Chicago` or config `timezone` to an IANA zone
+(`BB_TZ` takes precedence). DST is evaluated at the deadline, not the current date.

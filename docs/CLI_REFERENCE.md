@@ -306,3 +306,12 @@ output; `--out FILE` writes the JSON file with progress on stderr and no stdout.
 Machine modes strip ANSI escapes. `bb terms` exports an array of
 `{term, active, courses: [{id, name}]}`; `bb discover --json` emits the saved course
 map. Discovery updates configured courses; terms is read-only.
+
+### Time fields
+
+`due_at` is an ISO-8601 UTC timestamp ending in `Z`, or null for an undated item.
+Compatibility keys (`due_date`, `dueDate`, `raw_due`) remain. Text uses the shared
+formatter, including the local abbreviation (EDT/EST for America/New_York).
+`BB_TZ` overrides config `timezone`; the default is America/New_York. Naive legacy
+browser dates are interpreted in that zone; dates with an explicit offset retain
+it before UTC normalization. Date-only fallback values have midnight precision.

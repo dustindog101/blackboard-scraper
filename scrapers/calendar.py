@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from core.config import BLACKBOARD_BASE, SESSION_DIR, load_courses
 from core.output import ensure_output_dir
+from core.time import due_at, format_local
 from core.async_engine import AdaptiveDOM
 
 logger = logging.getLogger("blackboard.scrapers.calendar")
@@ -33,13 +34,7 @@ def get_cookie_header() -> Optional[str]:
 
 def _format_iso_datetime(iso_str: str) -> str:
     """Convert ISO UTC timestamp into clean readable local format (e.g. 8/30/26, 11:59 PM (EDT))."""
-    if not iso_str:
-        return "TBD"
-    try:
-        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00")).astimezone()
-        return dt.strftime("%-m/%-d/%y, %-I:%M %p (%Z)")
-    except Exception:
-        return iso_str
+    return format_local(iso_str)
 
 
 def scrape_calendar_api(course_id: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
@@ -94,6 +89,7 @@ def scrape_calendar_api(course_id: Optional[str] = None) -> Optional[List[Dict[s
             "due": human_due,
             "due_date": human_due,
             "raw_due": iso_due,
+            "due_at": due_at(iso_due),
             "id": item.get("id"),
             "type": item.get("type", "CalendarItem"),
         })

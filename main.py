@@ -3,6 +3,7 @@ import asyncio
 import difflib
 import builtins
 from core.output import status as print, output_mode
+from core.time import add_due_fields
 import json
 import os
 import re
@@ -70,6 +71,7 @@ def _safe_relpath(path: Path) -> str:
 
 def _emit_json(args: argparse.Namespace, data: Any, source: str = "blackboard-scraper") -> None:
     """Print structured JSON to stdout or save to file if --out is provided."""
+    data = add_due_fields(data)
     pretty = not args.compact
     if isinstance(data, dict) and "courses" in data and isinstance(data.get("courses"), dict):
         # Full briefing bundle -> composite document
@@ -246,6 +248,8 @@ You can target courses in multiple flexible ways:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Output clean JSON to stdout (--json) or export to file (--out <path>):
 stdout is JSON, stderr is progress. Machine modes omit ANSI colors.
+Dated items include ISO-8601 UTC due_at; text uses local time with a timezone
+abbreviation. Set BB_TZ or config timezone to an IANA zone; default America/New_York.
 
 • Full Composite Document (bb briefing --json):
   {

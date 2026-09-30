@@ -8,6 +8,7 @@ from playwright.async_api import Page
 from core.config import BLACKBOARD_BASE, load_courses
 from core.output import ensure_output_dir
 from core.async_engine import AdaptiveDOM
+from core.time import due_at, format_local
 from core.gradebook import fetch_user_grades, TOTAL_NAMES
 from scrapers.quiz import _api_get, _get_cookie_header, _clean_html_text
 
@@ -42,7 +43,7 @@ def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, An
         content_id = c.get("contentId")
         possible = c.get("score", {}).get("possible")
         handler = c.get("scoreProviderHandle", "")
-        due_raw = c.get("dueDate")
+        due_raw = c.get("dueDate") or c.get("grading", {}).get("due")
 
         item_type = "Assignment"
         if "forum" in handler or "discussion" in handler:
@@ -52,11 +53,7 @@ def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, An
 
         due_formatted = ""
         if due_raw:
-            try:
-                dt = datetime.fromisoformat(due_raw.replace("Z", "+00:00"))
-                due_formatted = dt.strftime("%Y-%m-%d %H:%M UTC")
-            except Exception:
-                due_formatted = due_raw
+            due_formatted = format_local(due_raw)
 
         instructions = ""
         is_timed = False
@@ -101,11 +98,8 @@ def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, An
                 if not due_formatted:
                     raw_c_due = c_info.get("genericReadOnlyData", {}).get("dueDate")
                     if raw_c_due:
-                        try:
-                            dt = datetime.fromisoformat(raw_c_due.replace("Z", "+00:00"))
-                            due_formatted = dt.strftime("%Y-%m-%d %H:%M UTC")
-                        except Exception:
-                            due_formatted = raw_c_due
+                        due_raw = raw_c_due
+                        due_formatted = format_local(raw_c_due)
 
         record = records[col_id]
         status = record["submission_status"]
@@ -117,6 +111,7 @@ def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, An
             "title": name,
             "item_type": item_type,
             "due_date": due_formatted,
+            "due_at": due_at(due_raw),
             "points_possible": f"{possible} points" if possible is not None else "",
             "submission_status": status,
             "status": record["status"],
@@ -354,7 +349,7 @@ def format_assignments_summary(assignments: List[Dict[str, Any]], course_name: s
         if item_id:
             lines.append(f"   ├ 🆔 Unique ID: {item_id}")
         if a.get("due_date"):
-            lines.append(f"   ├ ⏰ Due Date:  {a['due_date']}")
+            lines.append(f"   ├ ⏰ Due Date:  {format_local(a.get('due_at') or a['due_date'])}")
         if a.get("points_possible"):
             lines.append(f"   ├ 🎯 Points:    {a['points_possible']}")
         if a.get("submission_status"):
@@ -400,7 +395,7 @@ def save_assignments(assignments: List[Dict[str, Any]], course_id: str) -> Path:
             if item_id:
                 lines.append(f"**ID:** `{item_id}`")
             if a.get("due_date"):
-                lines.append(f"**Due Date:** `{a['due_date']}`")
+                lines.append(f"**Due Date:** `{format_local(a.get('due_at') or a['due_date'])}`")
             if a.get("points_possible"):
                 lines.append(f"**Points:** {a['points_possible']}")
             if a.get("attempts"):
