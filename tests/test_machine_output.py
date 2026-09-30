@@ -86,3 +86,12 @@ class MachineOutputTests(unittest.IsolatedAsyncioTestCase):
             with open(path) as f:
                 data = json.load(f)
             self.assertEqual(set(data[0]), {'term', 'active', 'courses'})
+
+    async def test_empty_profile_is_still_json(self):
+        with patch.object(main, 'scrape_profile_async', AsyncMock(return_value={})), \
+                patch.object(main, '_require_session_async', AsyncMock(return_value=True)), \
+                patch.object(main, 'load_courses', return_value={'synthetic': 'SYN101'}):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                await main.main_async(main._build_parser().parse_args(['profile', '--json']))
+            self.assertEqual(json.loads(out.getvalue()), {})
