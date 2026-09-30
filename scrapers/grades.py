@@ -1,3 +1,4 @@
+from core.output import status as print
 import asyncio
 import json
 import logging

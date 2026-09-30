@@ -1,6 +1,8 @@
 import argparse
 import asyncio
 import difflib
+import builtins
+from core.output import status as print, output_mode
 import json
 import os
 import re
@@ -72,7 +74,7 @@ def _emit_json(args: argparse.Namespace, data: Any, source: str = "blackboard-sc
     if isinstance(data, dict) and "courses" in data and isinstance(data.get("courses"), dict):
         # Full briefing bundle -> composite document
         payload = build_composite_schema(data, source=source, pretty=pretty)
-    elif isinstance(data, list) and (not data or "kind" in data[0]):
+    elif isinstance(data, list) and (not data or "kind" in data[0]) and getattr(args, "subcommand", None) != "terms" and getattr(args, "action", None) != "terms":
         payload = build_export_doc(data, source=source, pretty=pretty)
     else:
         if pretty:
@@ -86,7 +88,7 @@ def _emit_json(args: argparse.Namespace, data: Any, source: str = "blackboard-sc
         out_path.write_text(payload)
         print(f"💾 JSON exported to: {_safe_relpath(out_path)}", file=sys.stderr)
     else:
-        print(payload)
+        builtins.print(payload)
 
 
 def _print_profile(data: dict) -> None:
@@ -243,6 +245,7 @@ You can target courses in multiple flexible ways:
 📦 Standardized v2 JSON Schemas:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Output clean JSON to stdout (--json) or export to file (--out <path>):
+stdout is JSON, stderr is progress. Machine modes omit ANSI colors.
 
 • Full Composite Document (bb briefing --json):
   {
@@ -1028,6 +1031,8 @@ def _handle_discover_courses(term_filter: str | None = None, list_only: bool = F
             else:
                 print("   ❌ No courses found.", file=sys.stderr)
             ctx.close()
+            return discovered or {}
+    return res
 
 
 def _run_discussions_sync(
@@ -1064,6 +1069,14 @@ def _run_discussions_sync(
 # ---------------------------------------------------------------------------
 
 async def main_async(args: argparse.Namespace) -> None:
+    machine = any(getattr(args, key, False) for key in ("json", "out", "compact", "raw"))
+    if machine:
+        args.json = True
+    with output_mode(machine):
+        await _main_async(args)
+
+
+async def _main_async(args: argparse.Namespace) -> None:
     subcmd = getattr(args, "subcommand", None)
 
     # --- help dispatcher (`bb help [command|topic]`) ---
@@ -1167,10 +1180,14 @@ async def main_async(args: argparse.Namespace) -> None:
     if subcmd in ("courses", "discover", "terms") or getattr(args, "courses", False) or getattr(args, "discover", False) or getattr(args, "list_terms", False):
         c_action = getattr(args, "action", "list") if subcmd == "courses" else ("discover" if subcmd == "discover" or getattr(args, "discover", False) else ("terms" if subcmd == "terms" or getattr(args, "list_terms", False) else "list"))
         if c_action == "discover":
-            await asyncio.to_thread(_handle_discover_courses, term_filter=getattr(args, "term", None), list_only=False, headless=headless, cdp=cdp)
+            result = await asyncio.to_thread(_handle_discover_courses, term_filter=getattr(args, "term", None), list_only=False, headless=headless, cdp=cdp)
+            if getattr(args, "json", False):
+                _emit_json(args, result or {})
             return
         if c_action == "terms":
-            await asyncio.to_thread(_handle_discover_courses, term_filter=None, list_only=True, headless=headless, cdp=cdp)
+            result = await asyncio.to_thread(_handle_discover_courses, term_filter=None, list_only=True, headless=headless, cdp=cdp)
+            if getattr(args, "json", False):
+                _emit_json(args, result or [])
             return
         # list courses
         if getattr(args, "json", False) or getattr(args, "out", None):

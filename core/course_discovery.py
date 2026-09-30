@@ -1,3 +1,4 @@
+from core.output import status as print
 import json
 import logging
 import re
@@ -195,7 +196,9 @@ def handle_discover_courses_cli(term_filter: Optional[str] = None, list_only: bo
         print("")
 
     if list_only:
-        return courses_by_term.get(current_term, {})
+        return [{"term": term, "active": term == current_term,
+                 "courses": [{"id": cid, "name": name} for cid, name in items.items()]}
+                for term, items in courses_by_term.items()]
 
     # Determine which courses to save
     selected_courses: Dict[str, str] = {}

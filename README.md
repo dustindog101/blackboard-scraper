@@ -499,3 +499,7 @@ The briefing uses one status builder for CLI text, Telegram cards and menubar ur
 Overdue, Due within 48 h, This week, Submitted awaiting grade, Newly graded, Unread
 announcements, and Not tracked by Blackboard. Empty sections are omitted. Activity
 stream titles never establish urgency; incomplete in-progress items sort first.
+
+Machine output (`--json`, `--raw`, `--compact`, `--out`) is JSON only: stdout is
+JSON, stderr is progress, with ANSI colors disabled. `bb terms --out FILE` exports
+term records; `bb discover --json` returns the selected course map after saving it.
