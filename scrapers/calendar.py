@@ -87,6 +87,9 @@ def scrape_calendar_api(course_id: Optional[str] = None) -> Optional[List[Dict[s
         extracted.append({
             "title": title,
             "course": course_name,
+            "course_id": item.get("courseId") or cal_id,
+            "content_id": item.get("contentId"),
+            "column_id": item.get("gradebookColumnId"),
             "due": human_due,
             "due_date": human_due,
             "raw_due": iso_due,

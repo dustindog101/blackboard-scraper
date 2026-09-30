@@ -253,6 +253,9 @@ Output clean JSON to stdout (--json) or export to file (--out <path>):
     "global": { "activity_stream": [...], "calendar_due_dates": [...] }
   }
 
+• Overdue excludes completed work; --include-completed restores it for debugging.
+  Undated items appear under Not tracked by Blackboard in bb due all.
+
 • Targeted Deadline Items (bb due 7d --json):
   { "version": "2.0", "total_items": 3, "items": [ { "title": "...", "course": "...", "due_date": "..." } ] }
 
@@ -769,6 +772,7 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
         epilog="Examples:\n  bb due\n  bb due 7d\n  bb due 14d --exclude-completed\n  bb due overdue",
     )
     due_p.add_argument("window", nargs="?", default="7d", metavar="WINDOW", help="Relative date window (e.g. 7d, 14d, overdue, all; default: 7d)")
+    due_p.add_argument("--include-completed", action="store_true", help="Include finished past-due items for debugging")
     due_p.add_argument("--exclude-completed", action="store_true", help="Exclude submitted/graded items")
 
     subparsers.add_parser(
@@ -1314,6 +1318,7 @@ async def main_async(args: argparse.Namespace) -> None:
                     courses,
                     window_filter=window,
                     exclude_completed=getattr(args, "exclude_completed", False),
+                    include_completed=getattr(args, "include_completed", False),
                 )
                 if getattr(args, "md", False):
                     save_due_dates(items, window_filter=window)

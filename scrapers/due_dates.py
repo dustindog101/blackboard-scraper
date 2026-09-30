@@ -45,107 +45,76 @@ def _parse_due_datetime(due_str: str) -> Optional[datetime]:
     return None
 
 
-async def aggregate_due_dates_async(
-    page: Optional[Page] = None,
-    courses: Optional[Dict[str, str]] = None,
-    window_filter: str = "7d",
-    exclude_completed: bool = False,
-) -> List[Dict[str, Any]]:
-    """
-    Aggregates deadlines across global calendar and course gradebooks.
-    Deduplicates records and applies window filters (e.g. 7d, 14d, 30d, overdue, all).
-    """
-    # 1. Scrape Global Calendar (HTTP fast-path with Playwright fallback)
-    calendar_task = scrape_calendar_async(page)
-
-    # 2. Concurrently fetch gradebook items from open courses
-    gradebook_tasks = []
-    course_list = list(courses.items()) if courses else []
-    for cid, cname in course_list:
-        gradebook_tasks.append(scrape_grades_async(cid))
-
-    results_tuple = await asyncio.gather(calendar_task, *gradebook_tasks, return_exceptions=True)
-    calendar_items = results_tuple[0] if isinstance(results_tuple[0], list) else []
-
-    combined: Dict[str, Dict[str, Any]] = {}
-
+def merge_due_items(calendar_items, gradebooks, courses, window_filter="all", exclude_completed=False,
+                    include_completed=False, now=None):
+    """Reconcile sources within a course before applying the Window Filter."""
+    now = now or datetime.now().astimezone()
+    combined = []
+    course_ids = {name: cid for cid, name in courses.items()}
+    for cid, rows in gradebooks.items():
+        for g in rows:
+            title = g.get("name", "").strip()
+            if not title:
+                continue
+            due = g.get("raw_due") or g.get("dueDate") or ""
+            combined.append({**g, "title": title, "course_id": cid, "course": courses.get(cid, cid),
+                             "due_date": g.get("dueDate") or due, "raw_due": due, "source": "gradebook",
+                             "completed": bool(g.get("completed")),
+                             "submission_status": g.get("submission_status", "NOT_ATTEMPTED")})
     for c in calendar_items:
+        cid = c.get("course_id") or course_ids.get(c.get("course"))
         title = c.get("title", "").strip()
-        course = c.get("course", "General")
-        due = c.get("due_date") or c.get("due") or ""
-        key = f"{_normalize_title(title)}"
-
-        combined[key] = {
-            "title": title,
-            "course": course,
-            "due_date": due,
-            "raw_due": c.get("raw_due", ""),
-            "source": "calendar",
-            "status": "Upcoming",
-            "grade": None,
-        }
-
-    # Add gradebook items
-    for idx, (cid, cname) in enumerate(course_list):
-        grade_res = results_tuple[idx + 1]
-        if isinstance(grade_res, list):
-            for g in grade_res:
-                due = g.get("dueDate") or ""
-                if not due or due.strip() == "--":
-                    continue
-                title = g.get("name", "").strip()
-                if not title or title.lower() in ("overall grade", "total"):
-                    continue
-                key = f"{_normalize_title(title)}"
-                if key not in combined:
-                    combined[key] = {
-                        "title": title,
-                        "course": cname,
-                        "due_date": due,
-                        "raw_due": due,
-                        "source": "gradebook",
-                        "status": g.get("status", "Upcoming"),
-                        "grade": g.get("grade"),
-                    }
-                else:
-                    if g.get("status") and g.get("status") != "Unopened":
-                        combined[key]["status"] = g.get("status")
-                    if g.get("grade") and g.get("grade") != "--":
-                        combined[key]["grade"] = g.get("grade")
-
-    # 3. Filter items by window (e.g. 7d, 14d, overdue, all)
-    now = datetime.now().astimezone()
-    window_lower = str(window_filter or "all").lower().strip()
-
-    days_limit: Optional[float] = None
-    is_overdue_only = "overdue" in window_lower
-
-    if not is_overdue_only and window_lower not in ("all", "calendar", "global"):
-        m = re.match(r"^(\d+)\s*d?$", window_lower)
-        if m:
-            days_limit = float(m.group(1))
-
-    results: List[Dict[str, Any]] = []
-    for item in combined.values():
-        if exclude_completed and item.get("status", "").lower() in ("graded", "submitted", "completed"):
+        candidates = [g for g in combined if g.get("course_id") == cid and cid is not None]
+        match = next((g for g in candidates if
+                      (c.get("column_id") and c["column_id"] == g.get("column_id")) or
+                      (c.get("content_id") and c["content_id"] == g.get("content_id"))), None)
+        if match is None:
+            matches = [g for g in candidates if _normalize_title(g["title"]) == _normalize_title(title)]
+            match = matches[0] if len(matches) == 1 else None
+        if match is not None:
+            match.update({"due_date": c.get("due_date") or c.get("due") or match["due_date"],
+                          "raw_due": c.get("raw_due") or match["raw_due"], "source": "calendar+gradebook"})
+        else:
+            combined.append({**c, "title": title, "course_id": cid, "course": c.get("course", "General"),
+                             "due_date": c.get("due_date") or c.get("due") or "",
+                             "status": "Upcoming", "submission_status": None, "completed": False,
+                             "source": "calendar", "grade": None})
+    window = str(window_filter).lower().strip()
+    overdue = window == "overdue"
+    m = re.fullmatch(r"(\d+)d?", window)
+    limit = int(m.group(1)) if m else None
+    results = []
+    seen = set()
+    for item in combined:
+        identity = (item.get("course_id") or item.get("course"),
+                    item.get("column_id") or item.get("content_id") or _normalize_title(item["title"]))
+        if identity in seen:
             continue
-
-        due_text = item.get("raw_due") or item.get("due_date", "")
-        dt = _parse_due_datetime(due_text)
-
-        if dt is not None:
-            diff_days = (dt - now).total_seconds() / 86400
-            if is_overdue_only:
-                if diff_days >= 0:
-                    continue
-            elif days_limit is not None:
-                # Include upcoming items within the limit (diff_days between -0.1 and days_limit + 0.99)
-                if diff_days < -0.5 or diff_days > (days_limit + 0.99):
-                    continue
-
+        seen.add(identity)
+        dt = _parse_due_datetime(item.get("raw_due") or item.get("due_date", ""))
+        item["tracked"] = dt is not None
+        completed = item["completed"]
+        if exclude_completed and completed:
+            continue
+        if overdue and (dt is None or dt >= now or (completed and not include_completed)):
+            continue
+        if limit is not None and (dt is None or not 0 <= (dt - now).total_seconds() <= limit * 86400):
+            continue
+        if not completed and item.get("status") not in ("Submission unverified", "Not attempted (0 posts)"):
+            item["status"] = "Overdue" if dt and dt < now else item.get("status", "Upcoming")
         results.append(item)
-
     return results
+
+
+async def aggregate_due_dates_async(page: Optional[Page] = None, courses: Optional[Dict[str, str]] = None,
+                                    window_filter: str = "7d", exclude_completed: bool = False,
+                                    include_completed: bool = False) -> List[Dict[str, Any]]:
+    courses = courses or {}
+    results = await asyncio.gather(scrape_calendar_async(page),
+                                   *(scrape_grades_async(cid) for cid in courses), return_exceptions=True)
+    calendar = results[0] if isinstance(results[0], list) else []
+    grades = {cid: rows for cid, rows in zip(courses, results[1:]) if isinstance(rows, list)}
+    return merge_due_items(calendar, grades, courses, window_filter, exclude_completed, include_completed)
 
 
 def format_due_dates_table(items: List[Dict[str, Any]], window_filter: str = "7d") -> str:
@@ -160,7 +129,7 @@ def format_due_dates_table(items: List[Dict[str, Any]], window_filter: str = "7d
 
     lines.append(f"{'Course':<25} | {'Assignment':<34} | {'Due Date':<24} | {'Status'}")
     lines.append("-" * 25 + "-+-" + "-" * 34 + "-+-" + "-" * 24 + "-+-" + "-" * 10)
-    for it in items:
+    for it in [i for i in items if i.get("tracked", True)]:
         c_raw = (it.get("course") or "Unknown").strip()
         if ": " in c_raw:
             c = c_raw.split(": ", 1)[1][:24]
@@ -171,6 +140,10 @@ def format_due_dates_table(items: List[Dict[str, Any]], window_filter: str = "7d
         s = it.get("status") or "Upcoming"
         lines.append(f"{c:<25} | {t:<34} | {d:<24} | {s}")
 
+    untracked = [i for i in items if not i.get("tracked", True)]
+    if untracked:
+        lines.append("\nNot tracked by Blackboard (no due date):")
+        lines.extend(f"  • {i['course']}: {i['title']} [{i.get('status', 'Unknown')}]" for i in untracked)
     return "\n".join(lines)
 
 
