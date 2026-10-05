@@ -1,10 +1,149 @@
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
 
 from core.config import BLACKBOARD_BASE, load_courses
 from core.output import ensure_output_dir
 from scrapers.base import _navigate_and_check_page
+from scrapers.quiz import (
+    _api_get,
+    _clean_html_text,
+    _extract_links,
+    _format_local_datetime,
+    _get_cookie_header,
+)
+
+
+def _status(message: str) -> None:
+    # Progress goes to stderr so `bb discussions --json` stdout stays valid JSON.
+    print(message, file=sys.stderr)
+
+
+def _api_pages(path: str, cookie_header: str, max_pages: int = 10) -> Optional[list[dict]]:
+    """Collects `results` across Blackboard's paging.nextPage links. None if the first page fails."""
+    results: list[dict] = []
+    next_path: Optional[str] = path
+    for _ in range(max_pages):
+        if not next_path:
+            break
+        data = _api_get(next_path, cookie_header)
+        if not data or "_http_status" in data or "results" not in data:
+            return None if not results else results
+        results.extend(data["results"])
+        next_path = (data.get("paging") or {}).get("nextPage")
+    return results
+
+
+def _post_record(message: dict, is_reply: bool) -> dict:
+    author = f"{message.get('givenName') or ''} {message.get('familyName') or ''}".strip()
+    return {
+        "id": message.get("id"),
+        "author": author or message.get("userId") or "Unknown",
+        "date": _format_local_datetime(message.get("postDate") or message.get("createdDate")),
+        "text": _clean_html_text(message.get("body")),
+        "parent_id": message.get("parentId"),
+        "is_reply": is_reply,
+    }
+
+
+def _participants_from_posts(posts: list[dict]) -> list[dict]:
+    counts: dict[str, list[int]] = {}
+    for post in posts:
+        tally = counts.setdefault(post["author"], [0, 0])
+        tally[1 if post["is_reply"] else 0] += 1
+    return [
+        {"name": name, "stats": f"{responses} responses, {replies} replies"}
+        for name, (responses, replies) in counts.items()
+    ]
+
+
+def _fetch_thread_posts(course_id: str, discussion_id: str, cookie_header: str) -> Optional[list[dict]]:
+    """Top-level responses plus their replies. None if the messages endpoint fails."""
+    base = f"/learn/api/public/v1/courses/{course_id}/discussions/{discussion_id}/messages"
+    responses = _api_pages(f"{base}?limit=100", cookie_header)
+    if responses is None:
+        return None
+
+    def replies_for(message: dict) -> list[dict]:
+        return _api_pages(f"{base}/{message['id']}/replies?limit=100", cookie_header) or []
+
+    # Replies live behind one request per response; fetch them in parallel.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        reply_lists = list(pool.map(replies_for, responses))
+
+    posts: list[dict] = []
+    for response, replies in zip(responses, reply_lists):
+        posts.append(_post_record(response, is_reply=False))
+        posts.extend(_post_record(reply, is_reply=True) for reply in replies)
+    return posts
+
+
+def scrape_discussions_http(
+    course_id: str,
+    include_posts: bool = False,
+    posts_only: bool = False,
+    participants_only: bool = False,
+) -> Optional[list[dict]]:
+    """
+    REST Fast-Path for discussions: titles, due dates, full prompt text and prompt links,
+    plus thread posts and participant counts when include_posts is set.
+
+    Returns None when the session or API is unavailable so callers can fall back
+    to the browser scraper. A thread whose posts fail to load keeps its prompt and
+    gets a `posts_error` flag instead of failing the whole course.
+    """
+    cookie_header = _get_cookie_header()
+    if not cookie_header:
+        return None
+
+    topics = _api_pages(f"/learn/api/public/v1/courses/{course_id}/discussions", cookie_header)
+    if topics is None:
+        return None
+
+    due_by_column: dict[str, str] = {}
+    columns = _api_pages(f"/learn/api/public/v2/courses/{course_id}/gradebook/columns", cookie_header) or []
+    for col in columns:
+        # Ultra stores discussion due dates under grading.due; dueDate is often null.
+        due = col.get("dueDate") or (col.get("grading") or {}).get("due")
+        if col.get("id") and due:
+            due_by_column[col["id"]] = _format_local_datetime(due)
+
+    results = []
+    for topic in topics:
+        body = (topic.get("topic") or {}).get("body") or ""
+        prompt = _clean_html_text(body)
+        results.append({
+            "id": topic.get("id"),
+            "title": topic.get("title") or "",
+            "url": f"{BLACKBOARD_BASE}/ultra/courses/{course_id}/outline",
+            "due_date": due_by_column.get(topic.get("gradebookColumnId"), ""),
+            "preview_text": prompt[:200],
+            "prompt": prompt,
+            "links": _extract_links(body),
+            "group_discussion": bool(topic.get("groupDiscussion")),
+            "posts": [],
+            "participants": [],
+        })
+
+    if include_posts:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            thread_posts = list(pool.map(
+                lambda disc: _fetch_thread_posts(course_id, disc["id"], cookie_header) if disc["id"] else None,
+                results,
+            ))
+        for disc, posts in zip(results, thread_posts):
+            if posts is None:
+                disc["posts_error"] = "Could not load posts for this thread."
+                continue
+            if not participants_only:
+                disc["posts"] = posts
+            if not posts_only:
+                disc["participants"] = _participants_from_posts(posts)
+    return results
+
 
 def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, max_participant_clicks: int = None,
                        posts_only: bool = False, participants_only: bool = False,
@@ -16,7 +155,7 @@ def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, 
     outline_url = f"{BLACKBOARD_BASE}/ultra/courses/{course_id}/outline"
     courses = load_courses()
     name = courses.get(course_id, course_id)
-    print(f"💬 Scraping discussions for {name}...")
+    _status(f"💬 Scraping discussions for {name}...")
 
     results = []
 
@@ -31,7 +170,7 @@ def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, 
         page.wait_for_selector(".js-course-discussion-tool", timeout=15_000)
         page.locator(".js-course-discussion-tool").first.click()
     except PlaywrightTimeout:
-        print("   ⚠️  Timed out finding discussion tool link.")
+        _status("   ⚠️  Timed out finding discussion tool link.")
         return []
 
     # Wait for either discussions or the 'No discussions' message to appear
@@ -42,11 +181,11 @@ def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, 
             timeout=15_000
         )
     except PlaywrightTimeout:
-        print("   ⚠️  Timed out waiting for discussions list.")
+        _status("   ⚠️  Timed out waiting for discussions list.")
         return []
 
     if page.locator("h1:has-text('Participate in a discussion')").count() > 0:
-        print("   No discussions found for course (Empty State detected).")
+        _status("   No discussions found for course (Empty State detected).")
         return []
 
     # 1. Grab all discussion topic titles and metadata
@@ -83,17 +222,17 @@ def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, 
     }""")
 
     if not discussion_links:
-        print("   No discussions found for course.")
+        _status("   No discussions found for course.")
         return []
 
-    print(f"   Found {len(discussion_links)} discussion topics. Inspecting threads...")
+    _status(f"   Found {len(discussion_links)} discussion topics. Inspecting threads...")
 
     if titles_only:
         return discussion_links
 
     # 2. Iterate and scrape individual discussions
     for disc in discussion_links:
-        print(f"   ↳ Thread: {disc['title'][:40]}...")
+        _status(f"   ↳ Thread: {disc['title'][:40]}...")
 
         # Navigate back to outline and click engagement again, because direct nav fails
         page.goto(outline_url, wait_until="domcontentloaded")
@@ -107,7 +246,7 @@ def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, 
             page.wait_for_selector(f'h3 a:has-text("{escaped_title}")', timeout=10_000)
             page.locator("h3 a").filter(has_text=disc['title']).first.click()
         except PlaywrightTimeout:
-            print(f"   ⚠️  Could not click link for {disc['title'][:20]}")
+            _status(f"   ⚠️  Could not click link for {disc['title'][:20]}")
             continue
 
         try:
@@ -116,7 +255,7 @@ def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, 
             # Let animations and async fetches settle
             page.wait_for_timeout(3000)
         except PlaywrightTimeout:
-            print(f"   ⚠️  Timed out waiting for thread {disc['title'][:20]}")
+            _status(f"   ⚠️  Timed out waiting for thread {disc['title'][:20]}")
             pass
 
         # Wait briefly for thread cards to become fully interactive
@@ -224,7 +363,7 @@ def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, 
         disc["participants"] = thread_data.get("participants", [])
         results.append(disc)
 
-    print(f"   ✅ Extracted {len(results)} fully scraped discussions")
+    _status(f"   ✅ Extracted {len(results)} fully scraped discussions")
     return results
 
 def save_discussions(discussions: list[dict], course_id: str, titles_only: bool = False):
@@ -251,8 +390,17 @@ def save_discussions(discussions: list[dict], course_id: str, titles_only: bool 
 
             if "due_date" in disc and disc["due_date"]:
                 lines.append(f"**Due:** {disc['due_date']}")
-            if "preview_text" in disc and disc["preview_text"] and titles_only:
+            if disc.get("prompt"):
+                lines.append("### Prompt")
+                lines.append("> " + disc["prompt"].replace("\n", "\n> "))
+                lines.append("")
+            elif "preview_text" in disc and disc["preview_text"] and titles_only:
                 lines.append(f"> {disc['preview_text']}")
+                lines.append("")
+            if disc.get("links"):
+                lines.append("### Links")
+                for link in disc["links"]:
+                    lines.append(f"- [{link['text']}]({link['url']})")
                 lines.append("")
 
             if disc.get("participants"):
@@ -279,4 +427,4 @@ def save_discussions(discussions: list[dict], course_id: str, titles_only: bool 
             lines.append("")
 
     filepath.write_text("\n".join(lines))
-    print(f"   💾 Saved to: {filepath.relative_to(Path.cwd()) if filepath.is_absolute() else filepath}")
+    _status(f"   💾 Saved to: {filepath.relative_to(Path.cwd()) if filepath.is_absolute() else filepath}")

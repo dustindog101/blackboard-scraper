@@ -95,11 +95,57 @@ def parse_assessment_target(target: str, default_course_id: Optional[str] = None
     return result
 
 
+_ANCHOR_RE = re.compile(
+    r"<a\b[^>]*?\bhref\s*=\s*([\"'])(.*?)\1[^>]*>(.*?)</a\s*>",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+
+
+def _resolve_href(href: str) -> Optional[str]:
+    """Returns an absolute URL for a usable href, or None for anchors/javascript."""
+    href = html.unescape(href or "").strip()
+    if not href or href.startswith("#") or href.lower().startswith("javascript:"):
+        return None
+    if href.startswith("/"):
+        return f"{BLACKBOARD_BASE}{href}"
+    return href
+
+
+def _extract_links(raw_html: Optional[str]) -> List[Dict[str, str]]:
+    """Lists the links in an HTML body as [{"text", "url"}], deduplicated by URL."""
+    if not raw_html:
+        return []
+    links: List[Dict[str, str]] = []
+    seen = set()
+    for match in _ANCHOR_RE.finditer(raw_html):
+        url = _resolve_href(match.group(2))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        text = html.unescape(re.sub(r"<[^>]+>", "", match.group(3))).strip()
+        links.append({"text": text or url, "url": url})
+    return links
+
+
+def _inline_link(match: "re.Match[str]") -> str:
+    # Keep the destination next to the link text, e.g. "video clip (https://...)".
+    # Prompts like "watch the application video clip" are useless without it.
+    url = _resolve_href(match.group(2))
+    text = match.group(3)
+    if not url:
+        return text
+    plain = html.unescape(re.sub(r"<[^>]+>", "", text)).strip()
+    if not plain or plain == url:
+        return url
+    return f"{text} ({url})"
+
+
 def _clean_html_text(raw_html: Optional[str]) -> str:
-    """Strips HTML tags, decodes HTML entities, and normalizes whitespace."""
+    """Strips HTML tags, decodes HTML entities, and normalizes whitespace. Link URLs are kept inline."""
     if not raw_html:
         return ""
     text = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", raw_html, flags=re.DOTALL | re.IGNORECASE)
+    text = _ANCHOR_RE.sub(_inline_link, text)
     text = re.sub(r"<(p|br|div|li|tr|h[1-6])[^>]*>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
     text = html.unescape(text)
@@ -299,6 +345,7 @@ def _scrape_assessment_http(
         if matching_disc:
             topic = matching_disc.get("topic", {})
             prompt_text = _clean_html_text(topic.get("body", ""))
+            prompt_links = _extract_links(topic.get("body", ""))
             due_date = ""
             raw_due = None
             if matching_col and matching_col.get("dueDate"):
@@ -372,6 +419,7 @@ def _scrape_assessment_http(
                 "attempts_allowed": "Unlimited",
                 "time_limit": "No time limit",
                 "instructions": prompt_text,
+                "links": prompt_links,
                 "question_count": 0,
                 "questions": [],
                 "discussion_id": discussion_id,
@@ -389,6 +437,7 @@ def _scrape_assessment_http(
     max_points = ""
     attempts_allowed = "Unlimited"
     instructions_text = ""
+    instructions_links: List[Dict[str, str]] = []
     item_type = "Assessment"
     is_timed = False
     question_count = 0
@@ -421,6 +470,7 @@ def _scrape_assessment_http(
                 or ""
             )
             instructions_text = _clean_html_text(raw_inst)
+            instructions_links = _extract_links(raw_inst)
 
             question_count = assessment_meta.get("questionCount", 0)
 
@@ -489,6 +539,7 @@ def _scrape_assessment_http(
             "attempts_allowed": attempts_allowed,
             "time_limit": time_limit,
             "instructions": instructions_text,
+            "links": instructions_links,
             "question_count": question_count,
             "questions": [],
             "is_timed_test": is_timed,
@@ -517,6 +568,7 @@ def _scrape_assessment_http(
             "attempts_allowed": attempts_allowed,
             "time_limit": time_limit,
             "instructions": instructions_text,
+            "links": instructions_links,
             "question_count": question_count,
             "questions": [],
             "is_timed_test": is_timed,
@@ -662,6 +714,7 @@ def _scrape_assessment_http(
         "attempts_allowed": attempts_allowed,
         "time_limit": time_limit,
         "instructions": instructions_text,
+        "links": instructions_links,
         "question_count": len(parsed_questions) or question_count,
         "questions": parsed_questions,
         "is_timed_test": is_timed,
@@ -1116,6 +1169,13 @@ def format_assessment_attempt_cli(data: Dict[str, Any]) -> str:
             lines.append(f"  > {line}")
         lines.append("")
 
+    links = data.get("links") or []
+    if links:
+        lines.append("🔗 Links:")
+        for link in links:
+            lines.append(f"  • {link['text']}: {link['url']}")
+        lines.append("")
+
     questions = data.get("questions", [])
     if questions:
         lines.append("📋 Questions & Choices:")
@@ -1197,6 +1257,10 @@ def save_assessment_attempt(data: Dict[str, Any], filepath: Optional[Path] = Non
         lines.append("## Instructions / Prompt")
         lines.append(f"> {instructions.replace(chr(10), chr(10) + '> ')}")
         lines.append("")
+        for link in data.get("links") or []:
+            lines.append(f"- [{link['text']}]({link['url']})")
+        if data.get("links"):
+            lines.append("")
         lines.append("---")
         lines.append("")
 

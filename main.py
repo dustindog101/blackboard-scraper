@@ -32,7 +32,11 @@ from core.async_engine import AsyncSessionManager, AsyncCourseWorkerPool, Engine
 from scrapers.activity import save_activity, scrape_activity_async
 from scrapers.announcements import save_announcements, scrape_announcements_async
 from scrapers.calendar import save_calendar, scrape_calendar_async
-from scrapers.discussions import save_discussions, scrape_discussions
+from scrapers.discussions import (
+    save_discussions,
+    scrape_discussions,
+    scrape_discussions_http,
+)
 from scrapers.grades import save_grades, scrape_grades_async
 from scrapers.profile import save_profile, scrape_profile_async
 from scrapers.briefing import run_briefing_async, format_briefing_cli
@@ -1030,22 +1034,48 @@ def _run_discussions_sync(
     md: bool,
     titles_only: bool,
 ) -> list[dict]:
+    # 1. REST Fast-Path: topics, prompts, links and (unless --titles-only) posts. No browser.
+    data_by_cid: dict[str, list[dict]] = {}
+    for cid in target_cids:
+        rest = scrape_discussions_http(
+            cid,
+            include_posts=not titles_only,
+            posts_only=kwargs.get("posts_only", False),
+            participants_only=kwargs.get("participants_only", False),
+        )
+        if rest is not None:
+            post_count = sum(len(d["posts"]) for d in rest)
+            print(f"💬 {courses.get(cid, cid)}: {len(rest)} discussion topics, {post_count} posts (REST Fast-Path)", file=sys.stderr)
+            data_by_cid[cid] = rest
+
+    # 2. Playwright Fallback for courses where the REST API was unavailable.
+    browser_cids = [cid for cid in target_cids if cid not in data_by_cid]
+    if browser_cids:
+        print("   ↳ REST unavailable, falling back to browser scraping.", file=sys.stderr)
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            ctx, _ = _launch_context(p, headless, cdp)
+            for course_id in browser_cids:
+                page = ctx.new_page()
+                try:
+                    data_by_cid[course_id] = scrape_discussions(course_id, page, **kwargs)
+                except Exception as exc:
+                    print(f"   ⚠️  Browser scrape failed: {exc}", file=sys.stderr)
+                    data_by_cid[course_id] = []
+                finally:
+                    page.close()
+            ctx.close()
+
     raw_all_disc: list[dict] = []
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as p:
-        ctx, _ = _launch_context(p, headless, cdp)
-        for course_id in target_cids:
-            page = ctx.new_page()
-            data = scrape_discussions(course_id, page, **kwargs)
-            if md:
-                save_discussions(data, course_id, titles_only=titles_only)
-            raw_all_disc.append({
-                "course_id": course_id,
-                "course_name": courses.get(course_id, course_id),
-                "discussions": data,
-            })
-            page.close()
-        ctx.close()
+    for course_id in target_cids:
+        data = data_by_cid.get(course_id, [])
+        if md:
+            save_discussions(data, course_id, titles_only=titles_only)
+        raw_all_disc.append({
+            "course_id": course_id,
+            "course_name": courses.get(course_id, course_id),
+            "discussions": data,
+        })
     return raw_all_disc
 
 
@@ -1710,6 +1740,13 @@ async def main_async(args: argparse.Namespace) -> None:
         if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
             _emit_json(args, raw_all_disc)
             return
+        for course in raw_all_disc:
+            for disc in course["discussions"]:
+                due_str = f" (Due: {disc['due_date']})" if disc.get("due_date") else ""
+                posts_str = f" [{len(disc['posts'])} posts]" if disc.get("posts") else ""
+                print(f"• {disc.get('title', '')}{due_str}{posts_str}")
+                for link in disc.get("links") or []:
+                    print(f"  └ 🔗 {link['text']}: {link['url']}")
         print(f"Scraped discussions for {len(target_cids)} courses.")
         return
 

@@ -4,12 +4,66 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from playwright.async_api import Page
 
+from scrapers.discussions import scrape_discussions_http
 from scrapers.outline import (
     download_content_item_files,
     scrape_course_outline_async,
 )
 
 logger = logging.getLogger("blackboard.scrapers.search")
+
+
+def _snippet(text: str, query_lower: str, width: int = 60) -> str:
+    """Returns the text around the first match so results show why they matched."""
+    flat = " ".join(text.split())
+    idx = flat.lower().find(query_lower)
+    if idx < 0:
+        return flat[: width * 2]
+    start = max(0, idx - width)
+    end = min(len(flat), idx + len(query_lower) + width)
+    return ("…" if start else "") + flat[start:end] + ("…" if end < len(flat) else "")
+
+
+def _safe_discussions(cid: str) -> Optional[List[Dict[str, Any]]]:
+    # Discussion prompts are a bonus source; never let them break outline search.
+    try:
+        return scrape_discussions_http(cid)
+    except Exception as exc:
+        logger.debug(f"Discussion prompt search skipped for {cid}: {exc}")
+        return None
+
+
+def _match_discussions(
+    discussions: List[Dict[str, Any]],
+    query_lower: str,
+    cid: str,
+    cname: str,
+    skip_titles: set,
+) -> List[Dict[str, Any]]:
+    """Matches discussion prompts and prompt links, which the outline does not include."""
+    matches = []
+    for disc in discussions:
+        title = disc.get("title", "")
+        if title.strip().lower() in skip_titles:
+            continue
+        links = disc.get("links") or []
+        link_hits = [link for link in links if query_lower in f"{link['text']} {link['url']}".lower()]
+        prompt = disc.get("prompt", "")
+        if query_lower not in f"{title} {prompt}".lower() and not link_hits:
+            continue
+        matches.append({
+            "title": title,
+            "content_id": disc.get("id"),
+            "content_type": "discussion",
+            "description": _snippet(prompt, query_lower) if query_lower in prompt.lower() else "",
+            "due_date": disc.get("due_date", ""),
+            "external_url": link_hits[0]["url"] if link_hits else "",
+            "links": links,
+            "parent_path": [],
+            "course_id": cid,
+            "course_name": cname,
+        })
+    return matches
 
 
 async def find_items_async(
@@ -27,7 +81,10 @@ async def find_items_async(
     matches: List[Dict[str, Any]] = []
 
     async def _search_course(cid: str, cname: str):
-        outline = await scrape_course_outline_async(cid, page=page, max_depth=6)
+        outline, discussions = await asyncio.gather(
+            scrape_course_outline_async(cid, page=page, max_depth=6),
+            asyncio.to_thread(_safe_discussions, cid),
+        )
         c_matches = []
         for item in outline:
             title = item.get("title", "")
@@ -44,6 +101,10 @@ async def find_items_async(
                 match_record["course_id"] = cid
                 match_record["course_name"] = cname
                 c_matches.append(match_record)
+
+        if discussions and (not type_filter or type_filter.lower() in "discussion"):
+            already = {m.get("title", "").strip().lower() for m in c_matches}
+            c_matches.extend(_match_discussions(discussions, query_lower, cid, cname, already))
         return c_matches
 
     results = await asyncio.gather(*[_search_course(cid, cname) for cid, cname in courses.items()])
