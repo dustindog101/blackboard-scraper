@@ -282,6 +282,7 @@ def _scrape_assessment_http(
     attempt_id: Optional[str] = None,
     target_query: Optional[str] = None,
     allow_start: bool = False,
+    include_work: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """
     Executes high-speed REST queries to retrieve full assessment metadata & question payload.
@@ -387,7 +388,7 @@ def _scrape_assessment_http(
                 messages = _api_get(
                     f"/learn/api/public/v1/courses/{course_id}/discussions/{discussion_id}/messages?limit=100",
                     cookie_header,
-                )
+                ) if include_work else None
                 if messages and "results" in messages:
                     for message in messages["results"]:
                         if message.get("userId") != user_id:
@@ -438,7 +439,7 @@ def _scrape_assessment_http(
     attempts_allowed = "Unlimited"
     instructions_text = ""
     instructions_links: List[Dict[str, str]] = []
-    item_type = "Assessment"
+    item_type = "External tool" if "blti" in (col_handler or "") else "Assessment"
     is_timed = False
     question_count = 0
 
@@ -522,7 +523,7 @@ def _scrape_assessment_http(
     # ------------------------------------------------------------------------
     # C. Non-Destructive Return (if no attempt started and it's an assignment or info mode)
     # ------------------------------------------------------------------------
-    if not attempt_id:
+    if not attempt_id or not include_work:
         # We can successfully return the complete assignment / quiz metadata & instructions!
         return {
             "engine": "http_rest",
@@ -532,7 +533,7 @@ def _scrape_assessment_http(
             "course_id": course_id,
             "assessment_id": assessment_id,
             "column_id": col_id,
-            "attempt_id": None,
+            "attempt_id": attempt_id,
             "status": user_attempt_status,
             "due_date": due_date,
             "max_points": max_points,
@@ -696,6 +697,16 @@ def _scrape_assessment_http(
             "question_id": qa.get("questionId", ""),
         })
 
+    student_submission = attempt_data.get("studentSubmission") or {}
+    submission = {}
+    if student_submission or attempt_data.get("studentSubmissionFiles"):
+        submission = {
+            "text": _clean_html_text(student_submission.get("rawText") or student_submission.get("displayText") or ""),
+            "submitted_at": (attempt_data.get("attemptReceipt") or {}).get("submissionDate"),
+            "files": [{"name": (file.get("file") or {}).get("fileName") or file.get("fileName") or "Attachment"}
+                      for file in attempt_data.get("studentSubmissionFiles", []) if isinstance(file, dict)],
+        }
+
     if not max_points and total_calculated_points > 0:
         max_points = f"{int(total_calculated_points) if total_calculated_points.is_integer() else total_calculated_points} points"
 
@@ -715,6 +726,7 @@ def _scrape_assessment_http(
         "time_limit": time_limit,
         "instructions": instructions_text,
         "links": instructions_links,
+        **({"submission": submission} if submission else {}),
         "question_count": len(parsed_questions) or question_count,
         "questions": parsed_questions,
         "is_timed_test": is_timed,
@@ -927,6 +939,7 @@ async def scrape_assessment_attempt_async(
     force_browser: bool = False,
     allow_start: bool = False,
     force_start: bool = False,
+    include_work: bool = True,
 ) -> Dict[str, Any]:
     """
     Main asynchronous entrypoint to inspect any assessment, assignment, quiz, or discussion.
@@ -939,6 +952,7 @@ async def scrape_assessment_attempt_async(
         force_browser: If True, bypasses HTTP fast-path and uses Playwright directly.
         allow_start: If True, allows beginning a new attempt when none exists.
         force_start: If True, permits starting timed tests.
+        include_work: Read existing question/answer and post bodies (False for lean CLI views).
 
     Returns:
         Dict with keys:
@@ -1015,6 +1029,7 @@ async def scrape_assessment_attempt_async(
                 attempt_id=att_id,
                 target_query=target if not asmt_id else None,
                 allow_start=allow_start,
+                include_work=include_work,
             )
             if http_result:
                 # REVIEW (spec fix): an explicit --start-attempt must never
@@ -1073,6 +1088,7 @@ def scrape_assessment_attempt(
     force_browser: bool = False,
     allow_start: bool = False,
     force_start: bool = False,
+    include_work: bool = True,
 ) -> Dict[str, Any]:
     """Synchronous wrapper for scrape_assessment_attempt_async."""
     try:
@@ -1080,7 +1096,7 @@ def scrape_assessment_attempt(
         if loop.is_running():
             return asyncio.run_coroutine_threadsafe(
                 scrape_assessment_attempt_async(
-                    target, course_id, headless=headless, force_browser=force_browser, allow_start=allow_start, force_start=force_start
+                    target, course_id, headless=headless, force_browser=force_browser, allow_start=allow_start, force_start=force_start, include_work=include_work
                 ),
                 loop
             ).result()
@@ -1088,7 +1104,7 @@ def scrape_assessment_attempt(
         pass
     return asyncio.run(
         scrape_assessment_attempt_async(
-            target, course_id, headless=headless, force_browser=force_browser, allow_start=allow_start, force_start=force_start
+            target, course_id, headless=headless, force_browser=force_browser, allow_start=allow_start, force_start=force_start, include_work=include_work
         )
     )
 
@@ -1229,6 +1245,11 @@ def save_assessment_attempt(data: Dict[str, Any], filepath: Optional[Path] = Non
         clean_title = re.sub(r"[^\w\-_\.]", "_", data.get("title", asmt_id))
         filename = f"{cid}_{clean_title}.md".replace("/", "_")
         filepath = out_dir / filename
+
+    if data.get("view"):
+        from scrapers.assignment_view import format_assignment_view
+        filepath.write_text("# " + format_assignment_view(data) + "\n")
+        return filepath
 
     title = data.get("title", "Assessment")
     item_type = data.get("item_type", "Assessment")

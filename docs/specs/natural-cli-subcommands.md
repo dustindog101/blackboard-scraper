@@ -72,7 +72,7 @@ bb [GLOBAL_FLAGS] <SUBCOMMAND> [SUB_ACTION] [POSITIONAL_ARGS] [OPTIONS]
 - `bb outline [course]`: Course outline tree and modules. Requires a course (fails fast before session probe).
   - Example: `bb outline IS410`, `bb outline IS410 -f "Homework"`.
   - Flags: `-f <folder>`, `--expand-all` / `--deep`, `--depth <N>`, `-i` / `--interactive`, `--type <type>`, `--filter <kw>`, `--json`, `--out <file>`, `--md`.
-- `bb assignments [course]` (alias: `assign`): Deep assignment drawer and rubric inspector. **Must keep HTTP REST fast-path first** (`scrape_course_assignments_http`), Playwright browser fallback second.
+- `bb assignments [course]` (alias: `assign`): Assignment discovery list. **Must keep HTTP REST fast-path first** (`scrape_course_assignments_http`), Playwright browser fallback second.
   - Flags: `-c <course>`, `--all`, `--filter <kw>`, `--json`, `--out <file>`, `--md`.
 - `bb assignment <target> [-c course]` (aliases: `quiz`, `asmt`, `assessment`): Single gradable-item inspector. **Must keep non-destructive info mode default + attempt guards** (`scrape_assessment_attempt_async`).
   - Example: `bb assignment "Homework 1" -c IS410`, `bb assignment _8954640_1 --json`.
@@ -170,3 +170,9 @@ Existing automation, cron tasks, and agents will continue executing without fail
 5. **Attempt safety is inviolable**: `bb assignment` MUST NOT start attempts or timers unless `--start-attempt` is passed, and MUST NOT start timed exams without `--force-start`. Any refactor touching this path requires re-verification against ADR-0003.
 6. **Engine preservation checklist** (run on every CLI refactor): assignments HTTP fast-path hit returns data in <2s; `bb assignment "Homework 1" -c IS410` returns `[REST Fast-Path]`; `ruff check main.py` clean (the v1 `Tuple` import bug broke Python 3.10–3.13); full unit suite green.
 7. **Adding a future command**: add (a) subparser, (b) dispatcher branch, (c) interceptor set entry + legacy mapping if replacing flags, (d) README + CLI_REFERENCE + skill docs, (e) spec row above, (f) interceptor + parse tests. Missing (c) or (f) blocks the release.
+
+## Assignment view contract
+
+`bb assignment` defaults to instructions and brief metadata plus rubric/work discovery hints. Mutually exclusive `--instructions`, `--rubric`, and `--full` select focused or complete output, consistently for text, JSON, raw JSON, and Markdown. Lean views skip previous question/answer and discussion-post body requests. Existing scripts requiring those bodies use `--full`; internal Python functions retain full defaults.
+
+Rubric descriptions are returned only for associations with `displayBefore: true`. API failure means unknown availability, not no rubric. Linked prompt/rubric documents are a separate source, discovered conservatively within matching assignment folders. Supported documents are bounded and parsed without launching external assessment providers. `--start-attempt` implies full output and is rejected with focused views; attempt initiation and timed-exam guards remain intact. See ADR-0005.
