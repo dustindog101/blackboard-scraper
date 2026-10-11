@@ -745,6 +745,7 @@ async def _scrape_assessment_playwright(
     attempt_id: Optional[str] = None,
     allow_start: bool = False,
     force_start: bool = False,
+    include_work: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """
     Playwright DOM inspector fallback for live assessment, assignment, and attempt pages.
@@ -773,7 +774,7 @@ async def _scrape_assessment_playwright(
                 await start_btn.click(timeout=3000)
                 await asyncio.sleep(2.5)
 
-    extracted = await page.evaluate("""() => {
+    extracted = await page.evaluate("""({includeWork}) => {
         const pageTitle = document.querySelector('h1, h2.assessment-title, [class*="assessment-title"], [data-analytics-id*="assessment-title"]')?.innerText.trim() || document.title;
         const courseTitle = document.querySelector('header [class*="course-title"], .course-title-element, [data-analytics-id*="course-title"]')?.innerText.trim() || "";
 
@@ -784,7 +785,7 @@ async def _scrape_assessment_playwright(
         let timeLimit = "";
         let instructions = "";
 
-        const detailsText = document.querySelector('.panel-content-info, [class*="assessment-summary"], [class*="assessment-details"], [role="complementary"]')?.innerText || document.body.innerText;
+        const detailsText = document.querySelector('.panel-content-info, [class*="assessment-summary"], [class*="assessment-details"], [role="complementary"]')?.innerText || (includeWork ? document.body.innerText : "");
 
         const dueMatch = detailsText.match(/due\\s*date[:\\s]*([^\\n]+)/i);
         if (dueMatch) dueDate = dueMatch[1].trim();
@@ -799,10 +800,10 @@ async def _scrape_assessment_playwright(
         if (timeMatch) timeLimit = timeMatch[1].trim();
 
         const instEl = document.querySelector('bb-rich-text-viewer, div.details-instructions, [class*="assessmentDescription"], div[class*="instructions"]');
-        if (instEl) instructions = instEl.innerText.trim();
+        if (instEl && (includeWork || !instEl.closest('div.assessment-question, form[name="questionForm"]'))) instructions = instEl.innerText.trim();
 
         // Extract Questions if inside attempt
-        const questionNodes = Array.from(document.querySelectorAll('div.assessment-question, form[name="questionForm"]'));
+        const questionNodes = includeWork ? Array.from(document.querySelectorAll('div.assessment-question, form[name="questionForm"]')) : [];
         const uniqueQuestions = [];
         const seenForms = new Set();
 
@@ -902,20 +903,20 @@ async def _scrape_assessment_playwright(
             max_points: maxPoints,
             time_limit: timeLimit,
             instructions: instructions,
-            question_count: uniqueQuestions.length,
+            question_count: includeWork ? uniqueQuestions.length : document.querySelectorAll('div.assessment-question, form[name="questionForm"]').length,
             questions: uniqueQuestions
         };
-    }""")
+    }""", {"includeWork": include_work})
 
     return {
         "engine": "playwright_browser",
-        "item_type": "Quiz / Test" if len(extracted.get("questions", [])) > 0 else "Assignment",
+        "item_type": "Quiz / Test" if extracted.get("question_count", 0) > 0 else "Assignment",
         "title": extracted.get("title") or "Assessment",
         "course_name": extracted.get("course_name") or course_name,
         "course_id": course_id,
         "assessment_id": assessment_id,
         "attempt_id": attempt_id,
-        "status": "IN_PROGRESS" if len(extracted.get("questions", [])) > 0 else "NOT_ATTEMPTED",
+        "status": ("IN_PROGRESS" if len(extracted.get("questions", [])) > 0 else "NOT_ATTEMPTED") if include_work else "UNKNOWN",
         "due_date": extracted.get("due_date", ""),
         "max_points": extracted.get("max_points", ""),
         "attempts_allowed": extracted.get("attempts", "Unlimited"),
@@ -1051,6 +1052,9 @@ async def scrape_assessment_attempt_async(
             logger.debug(f"HTTP REST assessment fast-path failed: {e}")
 
     # 2. Playwright Browser Fallback Engine
+    if not include_work and not allow_start and cid and asmt_id:
+        # Preview URLs do not open an existing attempt just to read instructions.
+        full_url = f"{BLACKBOARD_BASE}/ultra/course/assessment/{asmt_id}/open?courseId={cid}"
     if not full_url:
         if cid and asmt_id and att_id:
             full_url = f"{BLACKBOARD_BASE}/ultra/courses/{cid}/assessment/{asmt_id}/attempt/{att_id}?courseId={cid}"
@@ -1061,7 +1065,7 @@ async def scrape_assessment_attempt_async(
 
     if page is not None:
         result = await _scrape_assessment_playwright(
-            full_url, page, course_id=cid, assessment_id=asmt_id, attempt_id=att_id, allow_start=allow_start, force_start=force_start
+            full_url, page, course_id=cid, assessment_id=asmt_id, attempt_id=att_id, allow_start=allow_start, force_start=force_start, include_work=include_work
         )
         if result:
             return result
@@ -1074,7 +1078,7 @@ async def scrape_assessment_attempt_async(
     try:
         async with session_mgr.acquire_page() as p:
             result = await _scrape_assessment_playwright(
-                full_url, p, course_id=cid, assessment_id=asmt_id, attempt_id=att_id, allow_start=allow_start, force_start=force_start
+                full_url, p, course_id=cid, assessment_id=asmt_id, attempt_id=att_id, allow_start=allow_start, force_start=force_start, include_work=include_work
             )
             return result or {}
     finally:

@@ -13,3 +13,5 @@ Native rubric previews strictly require `displayBefore: true`. Failures remain u
 ## Consequences
 
 The default is useful to humans and agents without unrelated previous-work payloads. Full output is an explicit request for accessible detail, not an attempt-start request or a course-wide crawl. This changes the CLI output default described in ADR-0003 while retaining all its attempt initiation and timed-exam guards. Starting an attempt still requires explicit flags and implies full output.
+
+Lean browser fallback uses the preview route and omits question/answer DOM extraction. Null rubric collections are tolerated, and preview-visible rubrics with missing definitions report unavailable scoring details. The default explicitly lists instruction documents beyond its two-document read limit; focused/full views read every identified document within the documented limits.

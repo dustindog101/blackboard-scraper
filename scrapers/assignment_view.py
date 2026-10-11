@@ -98,19 +98,29 @@ def _related_resources(course_id, content, cookie):
     folder = _api_get(f"/learn/api/v1/courses/{course_id}/contents/{parent}", cookie) or {}
     generic = {"assignment", "assignments", "essay", "final", "submit", "submission", "journal", "folder"}
     def words(text):
-        return {w for w in re.findall(r"[a-z]+", text.lower()) if len(w) > 3 and w not in generic}
+        return {w for w in re.findall(r"[a-z]+", (text or "").lower()) if len(w) > 3 and w not in generic}
     if not (words(content.get("title", "")) & words(folder.get("title", ""))):
         return []
-    siblings = _api_get(f"/learn/api/public/v1/courses/{course_id}/contents/{parent}/children", cookie) or {}
+    path = f"/learn/api/public/v1/courses/{course_id}/contents/{parent}/children"
+    siblings = []
+    visited = set()
+    while path and path not in visited:
+        visited.add(path)
+        response = _api_get(path, cookie) or {}
+        siblings.extend(_records(response.get("results")))
+        next_page = (response.get("paging") or {}).get("nextPage")
+        if next_page and urllib.parse.urlsplit(next_page).hostname not in (None, urllib.parse.urlsplit(BLACKBOARD_BASE).hostname):
+            break
+        path = next_page
     resources = []
-    for item in siblings.get("results", []):
-        if item.get("availability", {}).get("available", "Yes").lower() == "no":
+    for item in siblings:
+        if ((item.get("availability") or {}).get("available") or "Yes").lower() == "no":
             continue
-        title = item.get("title", "")
+        title = item.get("title") or ""
         kind = "rubric" if re.search(r"\brubric\b", title, re.I) else (
             "instructions" if re.search(r"\b(prompt|instructions)\b", title, re.I) else None
         )
-        handler = item.get("contentHandler", {})
+        handler = item.get("contentHandler") or {}
         url = handler.get("url")
         if not url and "file" in handler.get("id", "").lower():
             title = handler.get("file", {}).get("fileName") or title
@@ -120,32 +130,54 @@ def _related_resources(course_id, content, cookie):
     return resources
 
 
+def _records(value):
+    """Blackboard optional collections may be missing, null, or malformed."""
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
 def _rubric_summary(column):
     if not column or column.get("_http_status"):
         return {"status": "unknown", "message": "Could not check rubric availability."}, []
-    associations = column.get("rubricAssociations", [])
+    associations = _records(column.get("rubricAssociations"))
     visible = [a for a in associations if a.get("displayBefore") is True]
     if not visible:
         return {"status": "hidden" if associations else "none"}, []
     definitions = []
+    incomplete = False
     for association in visible:
-        raw = association.get("rubricDefinition") or {}
-        levels = {c.get("id"): c.get("header", "") for c in raw.get("columnHeaders", [])}
+        raw = association.get("rubricDefinition")
+        if not isinstance(raw, dict):
+            incomplete = True
+            continue
+        headers = _records(raw.get("columnHeaders"))
+        levels = {c.get("id"): c.get("header") or "Level" for c in headers}
         criteria = []
-        for row in sorted(raw.get("rows", []), key=lambda x: x.get("position", 0)):
-            criterion = {"name": row.get("header", ""), "weight_percent": row.get("percentage"), "levels": []}
-            for cell in sorted(row.get("cells", []), key=lambda x: x.get("position", 0)):
-                level = {"name": levels.get(cell.get("rubricColumnId"), ""),
-                         "description": _clean_html_text(cell.get("description", ""))}
+        for row in sorted(_records(raw.get("rows")), key=lambda x: x.get("position") or 0):
+            criterion = {"name": row.get("header") or "Criterion", "levels": []}
+            if isinstance(row.get("percentage"), (int, float)):
+                criterion["weight_percent"] = row["percentage"]
+            cells = _records(row.get("cells"))
+            if not cells:
+                incomplete = True
+            for cell in sorted(cells, key=lambda x: x.get("position") or 0):
+                level = {"name": levels.get(cell.get("rubricColumnId"), "Level"),
+                         "description": _clean_html_text(cell.get("description") or "")}
                 for source, target in [("percentageMin", "min_percent"), ("percentageMax", "max_percent"),
                                        ("points", "points"), ("pointsMin", "min_points"), ("pointsMax", "max_points")]:
-                    if cell.get(source) is not None:
+                    if isinstance(cell.get(source), (int, float)):
                         level[target] = cell[source]
                 criterion["levels"].append(level)
             criteria.append(criterion)
-        definitions.append({"title": raw.get("title", "Rubric"), "criteria": criteria})
-    return {"status": "available", "source": "blackboard", "display_before": True,
-            "criteria_count": sum(len(d["criteria"]) for d in definitions)}, definitions
+        if criteria:
+            definitions.append({"title": raw.get("title") or "Rubric", "criteria": criteria})
+        else:
+            incomplete = True
+    summary = {"status": "available" if definitions else "unknown", "source": "blackboard", "display_before": True}
+    if definitions:
+        summary["criteria_count"] = sum(len(d["criteria"]) for d in definitions)
+    if incomplete:
+        summary["message"] = "A rubric is visible before starting, but some scoring details could not be retrieved."
+    return summary, definitions
 
 
 def prepare_assignment_view(data, mode="default"):
@@ -162,8 +194,11 @@ def prepare_assignment_view(data, mode="default"):
     if column:
         result["due_date"] = column.get("dueDate") or result.get("due_date", "")
         if column.get("possible") is not None:
-            points = float(column["possible"])
-            result["max_points"] = f"{points:g} {'point' if points == 1 else 'points'}"
+            try:
+                points = float(column["possible"])
+                result["max_points"] = f"{points:g} {'point' if points == 1 else 'points'}"
+            except (ValueError, TypeError):
+                pass
     content = {}
     resources = []
     item_id = result.get("assessment_id")
@@ -191,7 +226,7 @@ def prepare_assignment_view(data, mode="default"):
     elif content and result.get("item_type") == "Assignment":
         resources = _related_resources(cid, content, cookie)
     resources += [{"kind": "rubric", "title": r["text"], "url": r["url"]}
-                  for r in result.get("links", []) if re.search(r"\brubric\b", r["text"], re.I)]
+                  for r in (result.get("links") or []) if re.search(r"\brubric\b", r["text"], re.I)]
     rubric_links = [r for r in resources if r["kind"] == "rubric"]
     if rubric["status"] == "none" and rubric_links:
         result["rubric"] = {"status": "linked", "source": "course_resource", "resources": rubric_links}
@@ -200,20 +235,25 @@ def prepare_assignment_view(data, mode="default"):
         instruction_links = [r for r in resources if r["kind"] == "instructions"] if not result.get("instructions") else []
         # Only explicit instructional documents, not videos, articles, or every course reading.
         inline_remainder = result.get("instructions", "")
-        for link in result.get("links", []):
+        for link in (result.get("links") or []):
             inline_remainder = inline_remainder.replace(f"{link['text']} ({link['url']})", "")
         linked_only = bool(result.get("links")) and not inline_remainder.strip()
         if result.get("instructions") and (linked_only or re.search(r"\b(download|attach\w*|instructions|homework)\b", result["instructions"], re.I)):
             instruction_links += [{"kind": "instructions", "title": r["text"], "url": r["url"]}
-                                  for r in result.get("links", []) if r["text"].lower().endswith((".pdf", ".docx")) and not re.search(r"\brubric\b", r["text"], re.I)]
+                                  for r in (result.get("links") or []) if r["text"].lower().endswith((".pdf", ".docx")) and not re.search(r"\brubric\b", r["text"], re.I)]
         sources = []
-        for resource in instruction_links[:2]:
+        instruction_links = list({r["url"]: r for r in instruction_links}.values())
+        selected = instruction_links[:2] if mode == "default" else instruction_links
+        for resource in selected:
             document = _read_document(resource, cookie, limit)
             sources.append({**resource, **{k: v for k, v in document.items() if k != "text"}})
             if document.get("text"):
                 existing = result.get("instructions", "").replace(f" ({resource['url']})", "")
                 result["instructions"] = (existing + "\n\n" + document["text"]).strip()
-                result["links"] = [link for link in result.get("links", []) if link["url"] != resource["url"]]
+                result["links"] = [link for link in (result.get("links") or []) if link["url"] != resource["url"]]
+        if len(selected) < len(instruction_links):
+            sources += [{**r, "status": "linked", "message": "Additional instruction document; use --instructions or --full to read it."}
+                        for r in instruction_links[len(selected):]]
         if sources:
             result["instruction_sources"] = sources
         instructions = result.get("instructions", "")
@@ -227,7 +267,7 @@ def prepare_assignment_view(data, mode="default"):
             result["rubric"]["definitions"] = definitions
         elif rubric_links and result["rubric"]["status"] == "linked":
             documents = []
-            for resource in rubric_links[:2]:
+            for resource in {r["url"]: r for r in rubric_links}.values():
                 documents.append({**resource, **_read_document(resource, cookie, FULL_TEXT_LIMIT)})
             result["rubric"]["documents"] = documents
             if any(d.get("status") == "available" for d in documents):
@@ -259,7 +299,7 @@ def _rubric_lines(rubric, include_details=False):
         if status == "linked":
             return ["Rubric: linked course document — use --rubric or --full."]
         if status == "unknown":
-            return ["Rubric: availability could not be checked."]
+            return [rubric.get("message") or "Rubric: availability could not be checked."]
         if status == "hidden":
             return ["Rubric: not available before starting."]
         return []
@@ -270,8 +310,8 @@ def _rubric_lines(rubric, include_details=False):
     if status == "hidden":
         return ["The rubric is not available before starting."]
     if status == "unknown":
-        return ["Could not check rubric availability. Try again when the session is active."]
-    lines = []
+        return [rubric.get("message") or "Could not check rubric availability. Try again when the session is active."]
+    lines = [rubric["message"]] if rubric.get("message") else []
     for definition in rubric.get("definitions", []):
         lines += ["", f"Rubric: {definition['title']}"]
         for criterion in definition["criteria"]:
@@ -338,6 +378,11 @@ def format_assignment_view(data):
             lines.append(f"Instruction document: {source['title']} — {source['url']}")
             if source.get("message"):
                 lines.append(source["message"])
+        source_urls = {source["url"] for source in data.get("instruction_sources", [])}
+        extra_links = [link for link in data.get("links", [])
+                       if link["url"] not in source_urls and link["url"] not in data.get("instructions", "")]
+        if extra_links:
+            lines += ["", "Links:"] + [f"{link['text']} — {link['url']}" for link in extra_links]
         if data.get("instructions_truncated"):
             lines.append("Instructions truncated; use --instructions or open the source for more." if mode == "default" else "Instructions truncated; open the source for the complete text.")
     if mode in ("rubric", "full"):
