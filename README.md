@@ -126,6 +126,30 @@ bb session stats
 bb logout
 ```
 
+### Move a session from Mac to Windows
+
+After logging in normally on the Mac, export its saved Blackboard cookies:
+
+```bash
+bb session export ~/Downloads/bb-session.json
+```
+
+Copy that plain JSON file to Windows, stop the scraper's background jobs/browser
+windows, then import it:
+
+```powershell
+bb session import "$HOME\Downloads\bb-session.json"
+bb check
+bb due 7d
+```
+
+Import verifies the session over HTTP and in the managed browser before installing
+it. Rejected files or failed writes preserve the previous cookies. Export works
+offline and leaves the Mac session intact; it does not extend Blackboard's session
+lifetime. Keep the exported cookie file private. No password, OTP, or encryption
+setup is required. Use `--overwrite` to replace an existing export file. On a new
+Windows setup, run `bb discover` if your courses are not configured.
+
 ---
 
 ## 🖥️ Beautiful CLI Output by Default

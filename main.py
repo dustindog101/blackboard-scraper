@@ -211,6 +211,13 @@ HELP_GUIDES: Dict[str, str] = {
 4. Session Health & Telemetry:
    $ bb check            (or `bb session check`)
    $ bb session stats    (displays rolling lifespan metrics)
+
+5. Move a Session Between Computers:
+   $ bb session export bb-session.json
+   $ bb session import bb-session.json
+   - Copy the plain JSON file from Mac to Windows; import checks it before replacing cookies.
+   - Keep the cookie file private. No password or OTP is included.
+   - Stop background jobs before importing. Run `bb discover` if courses are not configured.
 """,
     "courses": """
 🔀 Smart Course Selection Syntax:
@@ -735,11 +742,13 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
     session_p = subparsers.add_parser(
         "session",
         parents=[engine_parent],
-        help="Check session health and telemetry",
-        description="Session probes, metadata, and lifespan telemetry.",
-        epilog="Examples:\n  bb session check\n  bb session stats\n  bb session info",
+        help="Check or transfer a saved session",
+        description="Session probes, telemetry, and plain JSON cookie export/import.",
+        epilog="Examples:\n  bb session check\n  bb session stats\n  bb session info\n  bb session export bb-session.json\n  bb session import bb-session.json",
     )
-    session_p.add_argument("action", nargs="?", choices=["check", "stats", "info", "telemetry"], default="check", help="Session action ('check', 'stats', 'info')")
+    session_p.add_argument("action", nargs="?", choices=["check", "stats", "info", "telemetry", "export", "import"], default="check", help="Session action")
+    session_p.add_argument("file", nargs="?", metavar="FILE", help="JSON cookie file for export/import")
+    session_p.add_argument("--overwrite", action="store_true", help="Replace an existing export file")
     session_p.add_argument("--debug", action="store_true", help="Print debug output with check")
 
     check_p = subparsers.add_parser(
@@ -972,7 +981,18 @@ def _parse_args(args_list: Optional[List[str]] = None) -> argparse.Namespace:
         print(f"💡 Tip: You can run 'bb {legacy_hint}' directly without '--'.", file=sys.stderr)
 
     parser = _build_parser()
-    return parser.parse_args(translated_args)
+    args = parser.parse_args(translated_args)
+    if args.subcommand == "session":
+        transfer = args.action in ("export", "import")
+        if transfer and not args.file:
+            parser.error(f"session {args.action} requires FILE")
+        if not transfer and args.file:
+            parser.error("FILE is only supported for session export/import")
+        if args.overwrite and args.action != "export":
+            parser.error("--overwrite is only supported for session export")
+        if transfer and args.cdp:
+            parser.error("session export/import uses the saved session; --cdp is not supported")
+    return args
 
 
 
@@ -1234,6 +1254,20 @@ async def main_async(args: argparse.Namespace) -> None:
     # --- session probes & stats ---
     if subcmd in ("session", "check") or getattr(args, "check_session", False) or getattr(args, "session_stats", False) or getattr(args, "session_info", False):
         sess_action = "check" if subcmd == "check" or getattr(args, "check_session", False) else (getattr(args, "action", "check") if subcmd == "session" else ("stats" if getattr(args, "session_stats", False) else "info"))
+        if sess_action in ("export", "import"):
+            from core.session_transfer import SessionTransferError, export_session, import_session
+            try:
+                if sess_action == "export":
+                    count = await asyncio.to_thread(export_session, args.file, overwrite=args.overwrite)
+                    print(f"Exported {count} Blackboard cookies to {Path(args.file).expanduser()}")
+                else:
+                    count, user = await asyncio.to_thread(import_session, args.file)
+                    account = user.get("userName") or user.get("studentId") or user.get("id")
+                    print(f"Imported {count} Blackboard cookies. Verified account: {account}")
+            except SessionTransferError as error:
+                print(f"Session {sess_action} failed: {error}", file=sys.stderr)
+                raise SystemExit(1) from None
+            return
         if sess_action in ("check",):
             fast_only = not getattr(args, "visible", False)
             ok = await check_session_async(debug=getattr(args, "debug", False), headless=headless, fast_only=fast_only)
