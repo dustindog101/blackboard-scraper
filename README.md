@@ -289,27 +289,40 @@ bb outline --all --type document     # Lecture docs only
 bb outline --all --filter "Homework" # Search keyword
 ```
 
-### 3. Deep Assignment & Rubric Inspector (`bb assignments`)
-Safely inspects assessment slideover drawers without triggering timed tests (HTTP REST fast-path first, browser fallback):
+### 3. Assignment Discovery (`bb assignments`)
+List gradable items and their status, then inspect one by title or ID:
 ```bash
-bb assignments --all
-bb assignments IS410 --json
+bb assignments AGNG
+bb assignments ECON --filter "M3"
 ```
 
-### 3b. Single Assignment / Submission Inspector (`bb assignment`)
-Non-destructive info mode by default — inspects prompts, questions, rubrics, prior attempt answers, and your own submitted discussion posts without starting an attempt or triggering exam timers. Human-readable output is the default; `jq` is not required:
+### 3b. Assignment Inspector (`bb assignment`)
+The default shows instructions, brief assignment details, and a one-line rubric/work availability hint. It does not fetch previous question/answer payloads or discussion posts. Human-readable output is the default; JSON and Markdown honor the same selected view.
+
+| Mode | Output |
+| --- | --- |
+| Default | Instructions, due date/points/status, relevant test settings, and availability hints |
+| `--instructions` | Instructions plus a rubric availability hint; no previous work or grade summary |
+| `--rubric` | Only the rubric visible before starting; no instructions or previous work |
+| `--full` | Instructions, visible rubric, accessible existing questions/answers or your discussion posts, and submission file/receipt details |
+
+The three flags are mutually exclusive. Existing scripts reading `questions` or `submissions` should add `--full`. Internal Python inspector functions retain full-detail defaults for compatibility.
+
+Native rubric previews require `displayBefore: true`; hidden rubric definitions are omitted even with `--full`. A failed availability check is reported as unknown. Separately linked rubric documents follow their own access rules. Explicit prompt/rubric links are discovered only in an assignment-matching folder, not by scanning unrelated readings. Supported Google Docs, Blackboard PDFs and Word instruction documents can be read directly; other links remain links. Default instruction text is limited to 12,000 characters with an explicit truncation notice; focused/full views allow up to 60,000 per document. Files larger than 8 MiB are left as links. The default reads at most two instruction documents and explicitly lists any additional documents; `--instructions`, `--rubric`, and `--full` read all identified documents within the text/size limits. Missing rubric definitions are reported explicitly. No external learning tool is launched, and submission files are listed rather than downloaded automatically.
+
+`--full` never starts an attempt. `--start-attempt` still uses the existing guards and implies full output; it cannot be combined with `--instructions` or `--rubric`. Timed assessments still require `--force-start`.
+
 ```bash
-bb assignment "Homework 1" -c IS410          # By title (searches all courses if -c omitted)
-bb assignment _8954640_1                     # By content ID
-bb assignment "M3 Discussion" -c ECON        # Show the prompt and your submitted post
-bb assignment "Module 4" -c AGNG             # Show whether Blackboard has your submission
-bb assignments ECON --filter "M3"             # List candidates when a short title is ambiguous
-bb assignment "Midterm" -c IS410 --json      # Structured JSON output
-bb assignment "Quiz 2" -c MATH215 --start-attempt            # Allow starting an attempt if none active
-bb assignment "Final" -c IS410 --start-attempt --force-start # Confirm starting a TIMED exam
+bb assignment "Module 7 Assignment" -c AGNG              # Instructions and rubric availability
+bb assignment "Module 7 Assignment" -c AGNG --instructions
+bb assignment "Module 7 Assignment" -c AGNG --rubric      # Rubric only
+bb assignment "Module 6 Assignment" -c AGNG --full        # Existing questions and answers
+bb assignment "M3 Discussion" -c ECON --full              # Prompt and your own posts
+bb assignment "Homework 1" -c IS410 --full                # Instruction document and submission files
+bb assignment "Worksheet 5" -c MATH                       # Identifies Gradescope; no provider launch
+bb assignment "Module 7 Assignment" -c AGNG --rubric --json
 ```
-Title matching is case-insensitive. Exact titles win; a unique partial title auto-resolves. Multiple partial matches produce a candidate list instead of silently selecting the wrong assignment.
-Legacy flags still work: `bb --assignment <ID_or_Title>`, `bb --quiz <ID>`, `--begin-attempt` (= `--start-attempt`).
+Title matching is case-insensitive. Exact titles win; a unique partial title auto-resolves. Ambiguous matches return candidates rather than silently choosing an item. Legacy flags (`bb --assignment`, `--quiz`, `--asmt`, `--assessment`) accept the same view flags.
 
 ### 4. Cross-Course Deadline Aggregator (`bb due`)
 Aggregates deadlines across global calendar, course gradebooks, and outlines:
@@ -443,7 +456,7 @@ All commands support natural subcommands. Legacy `--flags` (e.g. `bb --briefing`
 | **Scrapers** | `bb briefing` | `--briefing` | High-speed concurrent school briefing |
 | | `bb due [WINDOW]` | `--due [WINDOW]` | Upcoming deadlines (`7d`, `14d`, `overdue`) |
 | | `bb outline [COURSE]` | `--outline -c <C>` | Full course outline tree, syllabi, and files |
-| | `bb assignments [COURSE]` | `--assignments -c <C>` | Assignment details, rubrics, points, starter files |
+| | `bb assignments [COURSE]` | `--assignments -c <C>` | Assignment discovery and status; use `bb assignment` for detail |
 | | `bb assignment <TARGET>` | `--assignment <T>` | Single-item inspector with existing answers and the current user's discussion submissions (aliases: `quiz`, `asmt`, `assessment`) |
 | | `bb assignment <T> --start-attempt` | `--assignment <T> --start-attempt` | Allow starting an attempt (`--begin-attempt` also accepted) |
 | | `bb assignment <T> --start-attempt --force-start` | `--force-start` | Confirm starting a timed exam |

@@ -26,7 +26,7 @@ Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** 
 | **Full Outline Tree** | `bb outline MATH215 --expand-all` | Full recursive tree with all subfolders expanded |
 | **Interactive Folder Explorer** | `bb outline MATH215 -i` | Interactive terminal menu to browse & expand folders |
 | **List Course Assignments** | `bb assignments AGNG` | Lists all assignments, tests, and discussions with unique IDs (<150ms via HTTP fast-path) |
-| **Inspect Assignment / Submission** | `bb assignment <ID_or_Title>` | Shows prompts, questions, existing answers/attempts, and your submitted discussion posts (<200ms, non-destructive) |
+| **Inspect Assignment / Submission** | `bb assignment <ID_or_Title>` | Shows instructions, brief details and rubric/work hints; use --rubric or --full for additional detail (non-destructive) |
 | **Clean Outline JSON** | `bb outline MATH215 --json` | Compact, streamlined JSON without bloated empty fields |
 | **Download File / Note** | `bb download "Worksheet_1.pdf"` | Auto-discovers course and downloads file directly to disk |
 | **Download by Item ID** | `bb download _8825690_1` | Downloads specific Blackboard item/notebook by exact ID |
@@ -81,7 +81,7 @@ Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** 
 
 ### 8. "Check / inspect / solve an assignment or view my submission"
 1. **List or search assignments**: `bb assignments <course> --filter <text>` (e.g. `bb assignments ECON --filter "M3"`). This is the discovery step when a short title could match multiple items.
-2. **Inspect one item and your existing work**: `bb assignment <ID_or_Title> -c <course>` (e.g. `bb assignment "M3 Discussion" -c ECON` or `bb assignment "Module 4" -c AGNG`). For discussion boards, the normal output includes only the current user's submitted posts. For quizzes/tests it includes existing attempt answers. Safe info mode never starts an attempt unless `--start-attempt` (+ `--force-start` for timed exams) is passed.
+2. **Inspect one item**: `bb assignment <ID_or_Title> -c <course>` shows instructions and concise details, with a hint if a rubric is available. Use `--instructions` for just instructions plus the hint, `--rubric` for only the visible rubric, or `--full` for instructions, rubric and accessible existing questions/answers, your submitted posts or file metadata. The flags are mutually exclusive and apply to JSON/Markdown too. Native rubric previews require `displayBefore: true`; linked course rubric documents have separate access rules. Lean views skip previous-work body requests. Explicit instruction documents (supported Google Docs, Blackboard PDF/DOCX files) may be read; external learning tools are identified and never launched. No mode starts an attempt unless `--start-attempt` is given; that flag implies full output and cannot be combined with focused views. Timed exams still require `--force-start`.
 3. **Use structured output when scripting**: append `--json`; human-readable output requires no `jq` or other filter.
 4. **Download required readings/syllabus**: `bb download "<file_or_id>"` (e.g. `bb download "Fall 2026 Syllabus"`).
 5. **Answer questions**: Read the downloaded course file/syllabus and cross-reference with the questions from `bb assignment`.

@@ -123,3 +123,7 @@ bb bot status
 # Run bot directly in foreground (for debugging)
 bb bot
 ```
+
+## Focused assignment views
+
+`bb assignment "Module 7 Assignment" -c AGNG` defaults to instructions and short metadata with rubric/work availability hints. Add `--instructions` for instructions only, `--rubric` for rubric only, or `--full` for both plus accessible existing work. Flags are mutually exclusive and honored by text, JSON, raw and Markdown output. Add `--full` to older workflows expecting question answers or discussion posts. Native previews require `displayBefore: true`; explicit linked prompt/rubric documents are separate sources. Unknown availability is not reported as absent. External learning tools are not launched. `--start-attempt` implies full output and is incompatible with focused views; timed starts still require `--force-start`.

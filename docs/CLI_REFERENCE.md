@@ -137,20 +137,30 @@ Every `bb <COMMAND> --help` page ends with copy-pasteable `Examples:`. Unknown c
 - `--json`: Emits clean, streamlined JSON outline.
 
 ### `bb assignments [COURSE]`
-**Description:** Deep assignment and rubric inspector. HTTP REST fast-path first (<150ms), Playwright browser fallback. Safely inspects assessment drawers, point breakdowns, and instructions without starting timed tests.
-- `COURSE`: Positional course code or keyword.
-- `-c <COURSE>`: Named course flag.
-- `--all`: Scrape all courses.
-- `--json`: Structured JSON.
+List gradable items for discovery. Use `--filter <text>` to narrow the list, then `bb assignment` to inspect one. Supports `-c`, `--all` and `--json`.
 
 ### `bb assignment <TARGET> [-c COURSE]`
-**Description:** Single gradable-item inspector (aliases: `quiz`, `asmt`, `assessment`). Non-destructive info mode by default: shows prompts, questions, rubrics, due dates, and attempt status over REST (<200ms) without starting an attempt or triggering exam timers.
-- `TARGET`: Positional assignment ID or title (e.g. `bb assignment _8954640_1`, `bb assignment "Homework 1" -c IS410`).
-- `-c <COURSE>`: Scope the title search to a course (searches all courses if omitted).
-- `--start-attempt` (`--begin-attempt` accepted): allow starting a new attempt if none is active.
-- `--force-start`: with `--start-attempt`, confirm starting a TIMED exam.
-- `--json` / `--md`: structured JSON / saved Markdown report.
-- Legacy: `bb --assignment <T>`, `bb --quiz <T>`, `bb --asmt <T>`, `bb --assessment <T>` (all map here, attempt flags preserved).
+Aliases: `quiz`, `asmt`, `assessment`. `TARGET` accepts a title, content ID or Blackboard URL. Exact matches win; ambiguous title matches return candidates.
+
+The default shows instructions, brief assignment details, and a one-line rubric/work availability hint. It does not fetch previous question/answer payloads or discussion posts. Human-readable output is the default; JSON and Markdown honor the same selected view.
+
+| Mode | Output |
+| --- | --- |
+| Default | Instructions, due date/points/status, relevant test settings, and availability hints |
+| `--instructions` | Instructions plus a rubric availability hint; no previous work or grade summary |
+| `--rubric` | Only the rubric visible before starting; no instructions or previous work |
+| `--full` | Instructions, visible rubric, accessible existing questions/answers or your discussion posts, and submission file/receipt details |
+
+The three flags are mutually exclusive. Existing scripts reading `questions` or `submissions` should add `--full`. Internal Python inspector functions retain full-detail defaults for compatibility.
+
+Native rubric previews require `displayBefore: true`; hidden rubric definitions are omitted even with `--full`. A failed availability check is reported as unknown. Separately linked rubric documents follow their own access rules. Explicit prompt/rubric links are discovered only in an assignment-matching folder, not by scanning unrelated readings. Supported Google Docs, Blackboard PDFs and Word instruction documents can be read directly; other links remain links. Default instruction text is limited to 12,000 characters with an explicit truncation notice; focused/full views allow up to 60,000 per document. Files larger than 8 MiB are left as links. The default reads at most two instruction documents and explicitly lists any additional documents; `--instructions`, `--rubric`, and `--full` read all identified documents within the text/size limits. Missing rubric definitions are reported explicitly. No external learning tool is launched, and submission files are listed rather than downloaded automatically.
+
+`--full` never starts an attempt. `--start-attempt` still uses the existing guards and implies full output; it cannot be combined with `--instructions` or `--rubric`. Timed assessments still require `--force-start`.
+
+- `-c <COURSE>` scopes discovery; omitted searches configured courses.
+- `--json`, `--raw`, `--out`, and `--md` all respect the selected view.
+- Native submission assignments, tests, discussions, external-tool links and grade-only entries are identified separately. External provider visibility/submission state is not inferred from missing Blackboard attempt data.
+- `--start-attempt` (`--begin-attempt`) permits starting a new attempt; `--force-start` additionally confirms a timed assessment.
 
 ### `bb search <QUERY>`
 **Description:** Omnisearch across all courses for files, assignments, and documents matching keyword query.
