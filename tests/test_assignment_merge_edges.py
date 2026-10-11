@@ -10,6 +10,15 @@ from scrapers.assignment_view import prepare_assignment_view, format_assignment_
 from scrapers.quiz import scrape_assessment_attempt_async, _scrape_assessment_playwright
 
 
+class TestTimezoneFallback(unittest.TestCase):
+    def test_missing_timezone_data_keeps_original_date_without_crashing(self):
+        from zoneinfo import ZoneInfoNotFoundError
+        from scrapers.quiz import _format_local_datetime
+        value = "2026-10-12T03:59:00Z"
+        with patch("scrapers.quiz.ZoneInfo", side_effect=ZoneInfoNotFoundError("America/New_York")):
+            self.assertEqual(_format_local_datetime(value), value)
+
+
 class TestRubricEdgeCases(unittest.TestCase):
     prepare = fixtures.TestViews.prepare
     def test_null_optional_rubric_collections_do_not_crash(self):

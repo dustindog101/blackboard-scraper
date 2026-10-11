@@ -26,7 +26,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from playwright.async_api import Page
 
@@ -232,7 +232,7 @@ def _format_local_datetime(value: Optional[str]) -> str:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         local = parsed.astimezone(ZoneInfo("America/New_York"))
         return local.strftime("%b %d, %Y at %I:%M %p %Z").replace(" 0", " ")
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, ZoneInfoNotFoundError):
         return value
 
 
