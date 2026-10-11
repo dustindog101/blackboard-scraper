@@ -73,9 +73,12 @@ def _cookies_from_bytes(data: bytes) -> list[dict]:
 
 def _serialize(cookies: list[dict]) -> bytes:
     try:
-        return (json.dumps(cookies, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+        data = (json.dumps(cookies, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
     except (ValueError, UnicodeError, RecursionError):
         raise SessionTransferError("Cookie file contains unsupported JSON values.") from None
+    if len(data) > MAX_FILE_BYTES:
+        raise SessionTransferError("Serialized cookie file is too large (maximum 1 MiB).")
+    return data
 
 
 def _atomic_write(path: Path, data: bytes) -> None:

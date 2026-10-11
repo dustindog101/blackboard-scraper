@@ -146,6 +146,11 @@ class TestTransfer(unittest.TestCase):
         self.http.assert_not_called()
         self.assert_preserved()
 
+    def test_serialized_output_must_fit_the_import_limit(self):
+        with patch.object(transfer, "MAX_FILE_BYTES", 10):
+            with self.assertRaisesRegex(transfer.SessionTransferError, "too large"):
+                transfer._serialize([cookie()])
+
     def test_domain_matching_keeps_only_applicable_cookies(self):
         candidates = [cookie(), dict(cookie(), domain=".umbc.edu"),
                       dict(cookie(), domain=".blackboard.umbc.edu"),

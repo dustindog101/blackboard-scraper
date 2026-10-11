@@ -23,7 +23,8 @@ bb due 7d
 ```
 
 There is no encryption, passphrase, cloud service, account setup, or new
-third-party dependency. The file contains login cookies, so keep it private.
+transfer dependency. Windows installations include `tzdata` for the scraper's
+existing date formatting. The file contains login cookies, so keep it private.
 Export copies the session; it does not log the Mac out.
 
 ## Keep the change small

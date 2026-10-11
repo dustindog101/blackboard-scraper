@@ -4,12 +4,14 @@
 
 Minimal plain JSON export/import, implemented on `feat/session-sharing` in an
 isolated worktree. Existing login, OTP handling, session paths, scraper engines,
-and course configuration are unchanged. No new dependency is required.
+and course configuration are unchanged. The transfer itself adds no dependency.
+Full Windows CI exposed an existing missing timezone database; `tzdata` is now
+declared only for Windows in both installation dependency lists.
 
 ## Local verification on October 11, 2026
 
-- 150 automated tests passed; one optional native macOS menubar UI test was
-  skipped under the base dependency configuration used by CI (151 total).
+- 152 automated tests passed; one optional native macOS menubar UI test was
+  skipped under the base dependency configuration used by CI (153 total).
 - All Ruff checks passed and `git diff --check` was clean.
 - The installed optional menubar UI test aborts the process when run in this
   terminal environment. It is outside the transfer change and is not claimed
@@ -26,6 +28,10 @@ and course configuration are unchanged. No new dependency is required.
 - Unit tests additionally cover stale browser cookie replacement, cookie refresh,
   identity mismatch, failed writes, browser shutdown failure, rollback, file
   paths with spaces/non-ASCII characters, and existing CLI/legacy actions.
+- A real-browser integration test uses a local synthetic authentication service
+  and exercises export/import, stale-cookie cleanup, synchronous/asynchronous
+  browser restart, a Unicode file path, and rejected-import preservation.
+  This test runs on every CI OS without real student cookies.
 
 Live tests use only read-only account/deadline/browser navigation requests.
 No assessment attempts or submissions are initiated. Exported live cookies and
