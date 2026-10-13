@@ -59,7 +59,7 @@ jobs:
 
       - name: Run Unit Tests
         run: |
-          python -m unittest tests.test_v2_features tests.test_outline_explorer tests.test_cli_subcommands tests.test_quiz_discussion_submissions tests.test_links_discussions_search tests.test_assignment_views tests.test_assignment_merge_edges
+          python -m unittest discover -s tests -p "test_*.py"
 
       - name: Test CLI Smoke Test & Console Encodings
         run: |

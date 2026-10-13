@@ -66,6 +66,26 @@ Every `bb <COMMAND> --help` page ends with copy-pasteable `Examples:`. Unknown c
 ### `bb session stats` / `bb session telemetry`
 **Description:** Displays deep session telemetry, total lifespan analytics, rolling averages, and auto-refresh timing.
 
+### `bb session export <FILE>` / `bb session import <FILE>`
+**Description:** Move saved Blackboard cookies between computers as plain UTF-8 JSON.
+
+```bash
+bb session export bb-session.json
+bb session export bb-session.json --overwrite
+bb session import bb-session.json
+```
+
+Export works offline and does not alter the source session. `--overwrite` permits
+replacing an existing export file. Import tests the candidate account over HTTP
+and in the tool's managed browser before atomically replacing saved cookies; it
+never launches a login/OTP flow. Validation or write failures preserve prior
+cookies. Stop background jobs and close managed browser windows before importing.
+An external `--cdp` browser is not supported for transfers. Missing/malformed
+files and unsuccessful imports exit with status 1; invalid CLI usage exits with
+status 2. Keep the file private because it contains login cookies. If a copied
+session expires, log in on Mac and export again. Course configuration is separate;
+run `bb discover` on a fresh installation when needed.
+
 ### `bb logout`
 **Description:** Clears cached cookies, session metadata, and saved authentication tokens.
 
