@@ -19,7 +19,7 @@ if (-not (Test-Path $VenvPython)) {
     Write-Host "   Please create it first:"
     Write-Host "   python -m venv .venv"
     Write-Host "   .\.venv\Scripts\pip install -r requirements.txt"
-    Write-Host "   .\.venv\Scripts\playwright install chromium"
+    Write-Host "   Browser download is optional: use installed Edge/Chrome, or .\.venv\Scripts\playwright install chromium --no-shell"
     exit 1
 }
 

@@ -29,6 +29,7 @@ from playwright.async_api import (
     async_playwright,
 )
 
+from core.browser import browser_unavailable_message, get_browser_launch_candidates
 from core.config import SESSION_DIR
 
 logger = logging.getLogger("blackboard.async_engine")
@@ -286,7 +287,6 @@ class AsyncSessionManager:
                 browser = await self._pw.chromium.connect_over_cdp(self.config.cdp_url)
                 self._context = browser.contexts[0] if browser.contexts else await browser.new_context()
             else:
-                from core.session import get_browser_launch_candidates
                 candidates = get_browser_launch_candidates()
                 user_data_dir = str(SESSION_DIR)
                 last_error = None
@@ -305,6 +305,7 @@ class AsyncSessionManager:
 
                     try:
                         self._context = await self._pw.chromium.launch_persistent_context(**kwargs)
+                        logger.info("Using %s for Blackboard", spec["name"])
                         break
                     except Exception as e:
                         last_error = e
@@ -313,9 +314,7 @@ class AsyncSessionManager:
                         continue
 
                 if not self._context:
-                    if last_error:
-                        raise last_error
-                    raise RuntimeError("No compatible Chromium browser found.")
+                    raise RuntimeError(browser_unavailable_message()) from last_error
 
                 cookie_file = Path(SESSION_DIR) / "cookies.json"
                 if cookie_file.exists():

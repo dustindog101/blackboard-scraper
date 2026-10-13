@@ -158,7 +158,7 @@ def _managed_browser():
     from core.session import _launch_context, sync_playwright
 
     if sync_playwright is None:
-        raise SessionTransferError("Browser unavailable. Install Playwright and run: playwright install chromium")
+        raise SessionTransferError("Playwright unavailable. Install the Python dependencies with: python -m pip install -r requirements.txt")
     try:
         with sync_playwright() as playwright:
             try:
@@ -166,7 +166,7 @@ def _managed_browser():
             except (Exception, SystemExit):
                 raise SessionTransferError(
                     "Cannot open the managed browser. Close its windows/background jobs and retry; "
-                    "if no browser is installed, run: playwright install chromium"
+                    "use installed Chrome/Edge or run: python -m playwright install chromium --no-shell"
                 ) from None
             try:
                 yield context
