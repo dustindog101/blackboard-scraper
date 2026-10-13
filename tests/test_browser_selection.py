@@ -88,6 +88,17 @@ class TestBrowserSelection(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "install chromium --no-shell"):
                 session._launch_context(pw)
 
+    def test_async_bad_override_does_not_start_driver(self):
+        async def check():
+            with patch.dict(os.environ, {"BLACKBOARD_BROWSER": "invalid"}), \
+                 patch("core.async_engine.async_playwright") as starter:
+                manager = async_engine.AsyncSessionManager()
+                with self.assertRaisesRegex(ValueError, "BLACKBOARD_BROWSER must"):
+                    await manager.initialize()
+                starter.assert_not_called()
+                self.assertIsNone(manager._pw)
+        asyncio.run(check())
+
     def test_async_uses_same_selection_and_preserves_launch_options(self):
         async def check():
             pw = MagicMock()

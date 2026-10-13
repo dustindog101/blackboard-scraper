@@ -44,7 +44,7 @@ Existing caches are not deleted by this change because other projects may use th
 
 ## Validation
 
-Local macOS: Ruff passed; 206 tests passed (one opt-in smoke test skipped in the
+Local macOS: Ruff passed; 207 tests ran successfully (one opt-in smoke test skipped in the
 normal suite). A separate real Chrome fixture passed with an empty
 `PLAYWRIGHT_BROWSERS_PATH`: form entry, redirect, cookie capture, async restart,
 and visible restart, all in temporary profiles. No school credentials or live
@@ -56,8 +56,12 @@ including visible login. Linux verifies the minimal full-Chromium fallback with
 `--no-shell`. The existing Python 3.10/3.11/3.12 matrix on all three OSes also uses
 `--no-shell` and explicitly exercises bundled Chromium session transfer.
 
-CI results are pending. These fixtures verify browser launch, DOM automation,
-and cookie persistence; they do not prove a fresh live UMBC/Duo authentication.
+CI is configured but has not run. Automatic approval review blocked the branch
+push and draft PR because GitHub publication was beyond the local worktree request;
+publication approval has been requested. Windows path tests passed locally, but
+a real Windows browser check still requires CI. These fixtures verify browser
+launch, DOM automation, and cookie persistence; they do not prove a fresh live
+UMBC/Duo authentication.
 
 ## Sources
 

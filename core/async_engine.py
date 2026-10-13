@@ -280,6 +280,9 @@ class AsyncSessionManager:
             if self._initialized:
                 return
 
+            # Validate overrides before starting the driver so a configuration
+            # error cannot leave a Playwright process running.
+            candidates = get_browser_launch_candidates() if not self.config.cdp_url else []
             self._pw = await async_playwright().start()
 
             if self.config.cdp_url:
@@ -287,7 +290,6 @@ class AsyncSessionManager:
                 browser = await self._pw.chromium.connect_over_cdp(self.config.cdp_url)
                 self._context = browser.contexts[0] if browser.contexts else await browser.new_context()
             else:
-                candidates = get_browser_launch_candidates()
                 user_data_dir = str(SESSION_DIR)
                 last_error = None
 
