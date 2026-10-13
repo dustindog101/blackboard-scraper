@@ -82,7 +82,7 @@ jobs:
     env:
       BB_BROWSER_SMOKE: '1'
       # Windows/macOS start with an empty cache and perform NO browser install.
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/bb-browser-smoke-cache
+      PLAYWRIGHT_BROWSERS_PATH: .pw-browser-smoke-cache
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
