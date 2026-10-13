@@ -23,6 +23,8 @@ reduces disk use and setup downloads; it does not promise lower browser RAM use.
 No browser is downloaded automatically during login. Browser downloads, when
 requested by the user, are cached by Playwright and are not repeated every login.
 Existing caches are not deleted by this change because other projects may use them.
+For scale, this Mac currently has about 330 MB of full Chromium and 187 MB of
+headless shell (allocated size reported by `du -sh`; versions/platforms vary).
 
 ## Draft behavior
 
@@ -56,8 +58,9 @@ including visible login. Linux verifies the minimal full-Chromium fallback with
 `--no-shell`. The existing Python 3.10/3.11/3.12 matrix on all three OSes also uses
 `--no-shell` and explicitly exercises bundled Chromium session transfer.
 
-CI results are pending. These fixtures verify browser launch, DOM automation,
-and cookie persistence; they do not prove a fresh live UMBC/Duo authentication.
+Current CI results are recorded on [draft PR #49](https://github.com/dustindog101/blackboard-scraper/pull/49).
+These fixtures verify browser launch, DOM automation, and cookie persistence;
+they do not prove a fresh live UMBC/Duo authentication.
 
 ## Sources
 
