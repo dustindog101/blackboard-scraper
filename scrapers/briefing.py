@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 from core.config import load_courses
+from core.gradebook import newly_graded
 from core.output import OUTPUT_BASE
 from core.async_engine import AsyncSessionManager, AsyncCourseWorkerPool, EngineConfig
 from scrapers.activity import scrape_activity_async, save_activity
@@ -48,7 +49,7 @@ def format_briefing_cli(bundle: Dict[str, Any]) -> str:
         announcements = course_data.get("announcements", [])
         unread_ann = [a for a in announcements if a.get("unread")]
         grades = course_data.get("grades", [])
-        graded = [g for g in grades if g.get("grade") and g["grade"] not in ("Not graded", "-- %", "")]
+        graded = [g for g in grades if newly_graded(g)]
 
         if unread_ann or graded:
             any_course_updates = True
@@ -170,7 +171,7 @@ async def run_briefing_async(
                     lines.append("")
 
             grades = course_data.get("grades", [])
-            graded = [g for g in grades if g.get("grade") and g["grade"] not in ("Not graded", "-- %", "")]
+            graded = [g for g in grades if newly_graded(g)]
             if graded:
                 lines.append("#### 📊 Recent Grades")
                 lines.append("| Assignment | Due | Grade |")
