@@ -56,12 +56,8 @@ including visible login. Linux verifies the minimal full-Chromium fallback with
 `--no-shell`. The existing Python 3.10/3.11/3.12 matrix on all three OSes also uses
 `--no-shell` and explicitly exercises bundled Chromium session transfer.
 
-CI is configured but has not run. Automatic approval review blocked the branch
-push and draft PR because GitHub publication was beyond the local worktree request;
-publication approval has been requested. Windows path tests passed locally, but
-a real Windows browser check still requires CI. These fixtures verify browser
-launch, DOM automation, and cookie persistence; they do not prove a fresh live
-UMBC/Duo authentication.
+CI results are pending. These fixtures verify browser launch, DOM automation,
+and cookie persistence; they do not prove a fresh live UMBC/Duo authentication.
 
 ## Sources
 
