@@ -45,7 +45,7 @@ An automated, high-performance headless scraper and academic intelligence engine
 
 ## 🚀 Quick Start (Lightweight CLI-First)
 
-The base scraper is 100% lightweight and cross-platform (Windows, macOS, Linux). It requires only `playwright` and `beautifulsoup4`.
+The base scraper runs on Windows, macOS, and Linux. Install the Python dependencies below; an additional browser download is optional.
 
 ### 1. Installation
 
@@ -60,7 +60,6 @@ cd blackboard-scraper
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-playwright install chromium
 ./install-cli.sh   # Registers global 'bb', 'blackboard', and 'bbscraper' commands
 ```
 
@@ -69,9 +68,48 @@ playwright install chromium
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
-playwright install chromium
 .\install-cli.ps1   # Registers global 'bb', 'blackboard', and 'bbscraper' commands
 ```
+
+The scraper automatically uses installed Chromium browsers: Edge first on Windows,
+Chrome first on macOS/Linux, then other compatible installations (including Brave).
+It launches a separate Blackboard profile in `.session/`; your everyday browser
+profile is not used. Login and scraping never download browser binaries.
+
+If no compatible browser is installed, or browser policies prevent automation,
+install one shared Chromium binary for both headless and visible login:
+
+```bash
+python -m playwright install chromium --no-shell
+```
+
+`--no-shell` skips the separate headless shell. Playwright itself is still required
+for SSO/Duo automation. Safari and stock Firefox cannot be reused by Playwright.
+
+Optional overrides apply to login, session import, and browser scraping:
+
+```bash
+# macOS / Linux: pin an installed browser, or bundled Chromium
+BLACKBOARD_BROWSER=chrome bb login --manual
+BLACKBOARD_BROWSER=chromium bb login
+# A nonstandard Chromium executable (absolute path)
+BLACKBOARD_BROWSER_PATH="/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" bb login
+```
+
+```powershell
+# Windows PowerShell
+$env:BLACKBOARD_BROWSER = "msedge"
+bb login --manual
+# Restore automatic selection
+Remove-Item Env:BLACKBOARD_BROWSER
+# A portable/custom install
+$env:BLACKBOARD_BROWSER_PATH = "C:\Browsers\chrome.exe"
+```
+
+Supported `BLACKBOARD_BROWSER` values: `auto` (default), `chrome`, `msedge`,
+`brave`, `chromium`. `BLACKBOARD_BROWSER_PATH` takes precedence. Explicit choices
+fail with an actionable error instead of silently switching browsers. Existing
+Playwright installations with a headless shell remain supported as a last fallback.
 
 ---
 
