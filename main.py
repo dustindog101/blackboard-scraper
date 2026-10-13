@@ -55,6 +55,7 @@ from scrapers.assignments import (
     format_assignments_summary,
 )
 from scrapers.quiz import scrape_assessment_attempt_async, save_assessment_attempt, format_assessment_attempt_cli
+from scrapers.assignment_view import prepare_assignment_view, format_assignment_view
 from scrapers.due_dates import aggregate_due_dates_async, save_due_dates, format_due_dates_table
 from scrapers.search import find_items_async, grab_item_async
 
@@ -816,8 +817,8 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
         "assignments",
         aliases=["assign"],
         parents=[course_parent, output_parent, engine_parent],
-        help="List assignments with rubrics",
-        description="Deep scrape of Gradable Items with prompts, rubrics, and files (REST Fast-Path).",
+        help="List assignments and their status",
+        description="List Gradable Items for discovery; inspect one with bb assignment.",
         epilog="Examples:\n  bb assignments IS410\n  bb assignments IS410 --json\n  bb assignments --all",
     )
     assign_p.add_argument("--filter", dest="keyword_filter", help="Filter assignments by keyword")
@@ -827,11 +828,12 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
         aliases=["quiz", "asmt", "assessment"],
         parents=[output_parent, engine_parent],
         help="Inspect an assignment and your submission",
-        description="Safely inspect one assignment, including prompts, questions, answers, attempts, and your submitted discussion posts.",
+        description="Show assignment instructions and brief details by default. Use --rubric for the rubric or --full for existing work and all accessible details. Never starts an attempt unless requested.",
         epilog=(
             "Examples:\n"
             '  bb assignment "M3 Discussion" -c ECON\n'
-            '  bb assignment "Module 4" -c AGNG\n'
+            '  bb assignment "Module 7" -c AGNG --rubric\n'
+            '  bb assignment "Module 4" -c AGNG --full\n'
             '  bb assignments ECON --filter "M3"   # Find the exact title first\n'
             "  bb assignment _8954640_1 --json\n"
             '  bb assignment "Final" -c IS410 --start-attempt --force-start'
@@ -840,6 +842,11 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
     single_p.add_argument("target", nargs="?", metavar="TARGET", help="Assignment ID or title (e.g. _8954640_1 or 'Homework 1')")
     single_p.add_argument("--course", "-c", help="Scope the title search to course ID(s) or code(s)")
     single_p.add_argument("--all", action="store_true", help="Search across all configured courses")
+    view_group = single_p.add_mutually_exclusive_group()
+    view_group.add_argument("--instructions", dest="assignment_view", action="store_const", const="instructions", help="Only instructions and a rubric availability hint")
+    view_group.add_argument("--rubric", dest="assignment_view", action="store_const", const="rubric", help="Only the rubric visible before starting (no instructions or previous answers)")
+    view_group.add_argument("--full", dest="assignment_view", action="store_const", const="full", help="Instructions, visible rubric, existing questions/answers or posts, and submission file details")
+    single_p.set_defaults(assignment_view="default")
     single_p.add_argument("--start-attempt", "--begin-attempt", dest="start_attempt", action="store_true", help="Allow beginning a new attempt if none is active (guarded)")
     single_p.add_argument("--force-start", dest="force_start", action="store_true", help="With --start-attempt: confirm starting timed assessments/exams")
 
@@ -992,6 +999,8 @@ def _parse_args(args_list: Optional[List[str]] = None) -> argparse.Namespace:
             parser.error("--overwrite is only supported for session export")
         if transfer and args.cdp:
             parser.error("session export/import uses the saved session; --cdp is not supported")
+    if getattr(args, "start_attempt", False) and getattr(args, "assignment_view", "default") in ("instructions", "rubric"):
+        parser.error("--start-attempt cannot be combined with --instructions or --rubric; use --full")
     return args
 
 
@@ -1527,6 +1536,9 @@ async def main_async(args: argparse.Namespace) -> None:
         force_browser = getattr(args, "visible", False)
         allow_start = getattr(args, "start_attempt", False)
         force_start = getattr(args, "force_start", False)
+        view = getattr(args, "assignment_view", "default")
+        if allow_start and view == "default":
+            view = "full"
         data = await scrape_assessment_attempt_async(
             target=assignment_target,
             course_id=target_cid,
@@ -1534,7 +1546,9 @@ async def main_async(args: argparse.Namespace) -> None:
             force_browser=force_browser,
             allow_start=allow_start,
             force_start=force_start,
+            include_work=view == "full",
         )
+        data = await asyncio.to_thread(prepare_assignment_view, data, view)
 
         if data.get("error"):
             if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
@@ -1550,7 +1564,7 @@ async def main_async(args: argparse.Namespace) -> None:
         if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
             _emit_json(args, data)
         else:
-            print(format_assessment_attempt_cli(data))
+            print(format_assignment_view(data))
         return
 
     # --- search / find ---
