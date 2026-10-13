@@ -43,15 +43,35 @@ The primary checkout's session is only read to seed the isolated test session.
 The CI workflow runs the full base-dependency test suite on Mac, Linux, and
 Windows with Python 3.10, 3.11, and 3.12.
 
-Real Windows SSH acceptance is pending: the configured LAN route is unavailable,
-and the Windows Tailscale peer reports offline. The Mac client was reconnected
-with its existing settings to try the authorized SSH connection. No Windows
-session was replaced, and no live cookies have been uploaded to CI.
+All ten checks in CI run `38125143813` passed for feature commit `b02a991`:
+lint and Mac/Linux/Windows tests on Python 3.10, 3.11, and 3.12, including the
+real-browser integration test with synthetic authentication.
 
-Before claiming complete real-device acceptance, run the finished export/import
-commands on the user's reachable Windows host in an isolated checkout, verify
-HTTP and browser fallback after restart, and confirm rejected imports preserve
-the destination session. Windows CI does not replace this live-device check.
+Real Windows SSH acceptance passed on October 12, 2026:
+
+- Fetched feature commit `b02a991` into a separate Windows Git worktree. Created
+  a working Python 3.12.10 environment with the declared dependencies; no
+  changes were needed to the session-transfer implementation.
+- Ran all 153 tests on the actual Windows machine: 152 passed, one optional
+  Mac-only native UI test skipped.
+- Exported the current Mac session with the implemented CLI and copied the
+  plain JSON file over SSH. Windows import exited 0 with the verified account,
+  without a campus password configured or OTP interaction.
+- New CLI processes passed `bb check` repeatedly; `due 7d --json` returned
+  valid JSON with exit status 0.
+- Restarted both existing synchronous and asynchronous managed browsers.
+  Each verified the same account and displayed authenticated Blackboard UI.
+- Malformed and expired imports exited 1 and left the working destination
+  cookie file byte-for-byte unchanged. The following session check stayed active.
+- Windows export exited 0 and did not modify its source cookie file.
+- The original Windows checkout's saved session stayed unchanged. No grades,
+  cookie values, credentials, or user identifiers appear in the test report.
+
+The optional bundled Chromium download timed out on this host. The tool's
+existing system-browser fallback successfully ran all browser tests, so the
+download was unnecessary. SSH over LAN was intermittent; completed checks are
+reported from their final successful process results, not inferred from transport
+timeouts. No live cookies were uploaded to CI or committed.
 
 ## Usage
 
