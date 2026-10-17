@@ -223,8 +223,7 @@ def wait_for_duo_sms_passcode(
         if res:
             code, ts, sender, raw_text = res
             elapsed = round(time.time() - start_time, 1)
-            print(f"\n📩 \033[1;32m[SMS Auto-Detected] Passcode: [{code}]\033[0m from '{sender}' (received in {elapsed}s)!")
-            print(f"   ↳ Text: \"{raw_text.strip()}\"")
+            print(f"\n📩 Duo SMS passcode detected (received in {elapsed}s).")
             return code
 
         # 2. imsg CLI fallback
@@ -232,8 +231,7 @@ def wait_for_duo_sms_passcode(
         if res_imsg:
             code, ts, sender, raw_text = res_imsg
             elapsed = round(time.time() - start_time, 1)
-            print(f"\n📩 \033[1;32m[SMS Auto-Detected via imsg] Passcode: [{code}]\033[0m from '{sender}' (received in {elapsed}s)!")
-            print(f"   ↳ Text: \"{raw_text.strip()}\"")
+            print(f"\n📩 Duo SMS passcode detected via imsg (received in {elapsed}s).")
             return code
 
         # Periodic status ping every 10 seconds
