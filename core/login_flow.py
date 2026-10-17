@@ -5,6 +5,16 @@ import time
 from urllib.parse import urlsplit
 
 from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+# wait_for_sso outcomes.
+DUO = 'duo'
+AUTHENTICATED = 'authenticated'
+
+# A trusted Duo device redirects back without any prompt; give it this long
+# before handing over to the passcode workflow when no prompt has rendered.
+DUO_GRACE_SECONDS = 8
+_DUO_PROMPT_LABELS = ('Other options', 'Text message passcode', 'Enter a passcode', 'Send a passcode', 'Duo Push')
 
 
 class LoginFlowError(Exception):
@@ -35,6 +45,14 @@ def verify_session(context, base, timeout=2000):
         response.dispose()
 
 
+def is_verified(context, base, timeout=2000):
+    """verify_session that treats transport errors as 'not verified'."""
+    try:
+        return verify_session(context, base, timeout=timeout)
+    except (PlaywrightError, ValueError):
+        return False
+
+
 def _visible(frame, selector):
     elements = frame.locator(selector + ':visible')
     return elements.first if elements.count() else None
@@ -51,8 +69,43 @@ def _click(frame, labels, timeout):
     return False
 
 
+def _duo_needs_user(page):
+    """True once Duo renders a control the passcode workflow can act on."""
+    names = re.compile(r'^\s*(?:' + '|'.join(re.escape(label) for label in _DUO_PROMPT_LABELS) + r')', re.I)
+    for frame in page.frames:
+        if not is_duo(frame.url):
+            continue
+        if _visible(frame, "input[name='passcode'], input[id*='passcode']") is not None:
+            return True
+        for locator in (frame.get_by_role('button', name=names), frame.get_by_role('link', name=names)):
+            if any(locator.nth(index).is_visible() for index in range(locator.count())):
+                return True
+    return False
+
+
+def wait_for_blackboard(context, page, base, cancel_event=None, timeout=60_000):
+    """After Duo, wait until the browser holds an HTTP-verified Blackboard session."""
+    deadline = time.monotonic() + timeout / 1000
+    bb_host = urlsplit(base).hostname
+    while time.monotonic() < deadline:
+        if cancelled(cancel_event):
+            raise LoginFlowError('Login cancelled.')
+        if page.is_closed():
+            raise LoginFlowError('Login browser was closed. Run bb login again.')
+        if urlsplit(page.url).hostname == bb_host and urlsplit(page.url).path.startswith('/ultra'):
+            remaining = max(1, min(2000, int((deadline - time.monotonic()) * 1000)))
+            if is_verified(context, base, timeout=remaining):
+                return
+        page.wait_for_timeout(250)
+    raise LoginFlowError('Timed out waiting for Blackboard after Duo. No verified session saved. Run bb login --manual.')
+
+
 def wait_for_sso(context, page, username, password, base, detect_error, cancel_event=None, timeout=30_000):
     """Follow portal -> form (optional) -> Duo or HTTP-verified Blackboard.
+
+    Returns DUO only when Duo shows a prompt (or stays silent past its grace
+    period); a trusted device that Duo passes straight through returns
+    AUTHENTICATED like an existing SSO session.
 
     Submit each credential step once. Navigation may remove a form entirely;
     each poll reclassifies the destination instead of waiting on that form.
@@ -61,6 +114,7 @@ def wait_for_sso(context, page, username, password, base, detect_error, cancel_e
     username_sent = password_sent = portal_clicked = False
     last_state = 'redirect'
     last_verification = 0.0
+    duo_since = None
     bb_host = urlsplit(base).hostname
     while time.monotonic() < deadline:
         if cancelled(cancel_event):
@@ -71,19 +125,22 @@ def wait_for_sso(context, page, username, password, base, detect_error, cancel_e
         remaining = max(1, min(1000, int((deadline - time.monotonic()) * 1000)))
         try:
             if is_duo(page.url):
-                return 'duo'
-            if host == bb_host:
+                duo_since = duo_since or time.monotonic()
+                last_state = 'Duo'
+                now = time.monotonic()
+                # Never time out on Duo: past grace or near the deadline, hand
+                # over to the passcode workflow, which has its own checks.
+                if now - duo_since >= DUO_GRACE_SECONDS or deadline - now < 1 or _duo_needs_user(page):
+                    return DUO
+            elif host == bb_host:
                 if urlsplit(page.url).path.startswith('/ultra/'):
                     last_state = 'Blackboard session verification'
                     if time.monotonic() - last_verification >= 0.5:
                         last_verification = time.monotonic()
-                        try:
-                            if verify_session(context, base, timeout=remaining):
-                                if cancelled(cancel_event):
-                                    raise LoginFlowError('Login cancelled.')
-                                return 'authenticated'
-                        except (PlaywrightError, ValueError):
-                            pass
+                        if is_verified(context, base, timeout=remaining):
+                            if cancelled(cancel_event):
+                                raise LoginFlowError('Login cancelled.')
+                            return AUTHENTICATED
                 elif not portal_clicked:
                     portal_clicked = _click(page, ('Log into Blackboard via myUMBC', 'UMBC Login', 'Sign in'), remaining)
             elif host == 'webauth.umbc.edu':
@@ -125,11 +182,13 @@ def wait_for_sso(context, page, username, password, base, detect_error, cancel_e
             elif page.url.startswith(('chrome-error:', 'edge-error:')):
                 raise LoginFlowError('Browser navigation failed. Check your network and run bb login again.')
         except PlaywrightError as exc:
-            # Only transient document/frame replacement is safe to re-observe.
+            # Only transient document/frame replacement or a bounded action
+            # timeout is safe to re-observe.
             text = str(exc).lower()
-            if not any(marker in text for marker in ('execution context was destroyed', 'frame was detached', 'cannot find context', 'timeout')):
+            transient = ('execution context was destroyed', 'frame was detached', 'cannot find context')
+            if not isinstance(exc, PlaywrightTimeoutError) and not any(marker in text for marker in transient):
                 raise LoginFlowError('Browser failed during SSO. Check your connection and run bb login --manual.') from None
-        if password_sent:
+        if password_sent and duo_since is None:
             last_state = 'UMBC authentication response'
         page.wait_for_timeout(min(100, max(1, (deadline - time.monotonic()) * 1000)))
     raise LoginFlowError(f'Timed out waiting for {last_state}. No verified session saved. Run bb login --manual to inspect the page.')

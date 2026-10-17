@@ -18,6 +18,8 @@ FORM = '''<form action="https://fixture.duosecurity.com/auth">
     <input name="j_username" type="text"><input name="j_password" type="password">
     <button>Log In</button></form>'''
 
+DUO_PROMPT = '<a href="#">Other options</a>'
+
 
 class TestSSOBrowser(unittest.TestCase):
     @classmethod
@@ -41,7 +43,7 @@ class TestSSOBrowser(unittest.TestCase):
     def setUp(self):
         self.page = self.context.new_page()
         self.addCleanup(self.page.close)
-        self.documents = {}
+        self.documents = {DUO: DUO_PROMPT}
         self.submissions = []
 
         def route(request_route):
@@ -148,3 +150,20 @@ class TestSSOBrowser(unittest.TestCase):
         self.page.close()
         with self.assertRaisesRegex(login_flow.LoginFlowError, 'closed'):
             login_flow.wait_for_sso(self.context, self.page, '', '', BB, session.detect_sso_error)
+
+    def test_trusted_duo_device_redirect_is_authenticated(self):
+        # Duo without a prompt that returns to Blackboard is a remembered device.
+        silent = '<script>setTimeout(()=>location.href="' + BB + '/ultra/course",300)</script>'
+        self.assertEqual(self.run_flow(DUO, {DUO: silent}, verified=True), 'authenticated')
+
+    def test_silent_duo_hands_over_after_grace(self):
+        with patch.object(login_flow, 'DUO_GRACE_SECONDS', 0.3):
+            self.assertEqual(self.run_flow(DUO, {DUO: '<html>Loading</html>'}), 'duo')
+
+    def test_wait_for_blackboard_requires_http_verification(self):
+        self.page.goto(BB + '/ultra/course')
+        with patch.object(login_flow, 'verify_session', return_value=False):
+            with self.assertRaises(login_flow.LoginFlowError):
+                login_flow.wait_for_blackboard(self.context, self.page, BB, timeout=600)
+        with patch.object(login_flow, 'verify_session', return_value=True):
+            login_flow.wait_for_blackboard(self.context, self.page, BB, timeout=600)

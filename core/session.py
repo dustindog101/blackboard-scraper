@@ -20,7 +20,14 @@ except ImportError:
     class PlaywrightError(Exception):
         pass
 
-from core.login_flow import LoginFlowError, cancelled, verify_session, wait_for_sso
+from core.login_flow import (
+    AUTHENTICATED,
+    LoginFlowError,
+    cancelled,
+    is_verified,
+    wait_for_blackboard,
+    wait_for_sso,
+)
 
 from core.config import (
     BLACKBOARD_BASE,
@@ -1015,32 +1022,11 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 context, page, usr, pwd, BLACKBOARD_BASE, detect_sso_error,
                 cancel_event=cancel_event,
             )
-            def persist_verified():
-                if cancelled(cancel_event):
-                    return False
-                if state != "authenticated" and not verify_session(context, BLACKBOARD_BASE):
-                    print("   ❌ Blackboard session could not be verified; saved cache preserved.")
-                    return False
-                return not cancelled(cancel_event) and _save_session(context)
+            if state == AUTHENTICATED:
+                return _persist_login(context, cancel_event, "✨ Auto-Login Successful! (Verified UMBC SSO / trusted Duo device; no passcode needed.)")
 
-            if state == "authenticated":
-                if not persist_verified():
-                    return False
-                track_session_usage("login")
-                print("✨ Auto-Login Successful! (Verified existing UMBC SSO session; Duo skipped.)")
-                return True
-
-            # --- 4. REACHED DUO ---
-            print("   ↳ Checking Duo 2FA state...")
-            page.wait_for_timeout(1500)
-
-            if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
-                print("   ✅ Already authenticated (active session detected). Skipping Duo.")
-                if not persist_verified():
-                    return False
-                track_session_usage("login")
-                print("✨ Auto-Login Successful!")
-                return True
+            # --- 4. REACHED DUO PROMPT ---
+            print("   ↳ Duo is asking for verification...")
 
             # --- 5. CLICK "OTHER OPTIONS" ---
             login_stage = "clicking Duo Other options"
@@ -1057,13 +1043,8 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 finally:
                     page.wait_for_timeout(1000)
 
-            if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
-                print("   ✅ Already authenticated (active session detected). Skipping Duo.")
-                if not persist_verified():
-                    return False
-                track_session_usage("login")
-                print("✨ Auto-Login Successful!")
-                return True
+            if _returned_to_blackboard(context, page):
+                return _persist_login(context, cancel_event, "✨ Auto-Login Successful! (Duo passed this device.)")
 
             # --- 6. SELECT "TEXT MESSAGE PASSCODE" SPECIFICALLY ---
             login_stage = "selecting Duo text message passcode"
@@ -1073,26 +1054,16 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                     passcode_input_check = page.locator("input[name='passcode'], input[id='passcode'], input[type='text'][autocomplete], input[id*='passcode']").first
                     if not passcode_input_check.is_visible(timeout=1000):
                         if not _click_exact_text_in_any_frame(page, "Text message passcode", timeout=6000):
-                            if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
-                                print("   ✅ Already authenticated (active session detected). Skipping Duo.")
-                                if not persist_verified():
-                                    return False
-                                track_session_usage("login")
-                                print("✨ Auto-Login Successful!")
-                                return True
+                            if _returned_to_blackboard(context, page):
+                                return _persist_login(context, cancel_event, "✨ Auto-Login Successful! (Duo passed this device.)")
                             raise PlaywrightTimeout("Text message passcode control not found")
                         page.wait_for_timeout(2000)
                         print("   ↳ Clicked 'Text message passcode'. Passcode is being sent...")
                     else:
                         print("   ↳ Passcode input already active.")
                 except PlaywrightTimeout:
-                    if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
-                        print("   ✅ Already authenticated (active session detected). Skipping Duo.")
-                        if not persist_verified():
-                            return False
-                        track_session_usage("login")
-                        print("✨ Auto-Login Successful!")
-                        return True
+                    if _returned_to_blackboard(context, page):
+                        return _persist_login(context, cancel_event, "✨ Auto-Login Successful! (Duo passed this device.)")
                     duo_body = page.locator("body").inner_text()
                     if "limit" in duo_body.lower() or "attempts" in duo_body.lower() or "denied" in duo_body.lower():
                         print("   ❌ Duo denied the request or reported a limit. Use bb login --manual.")
@@ -1101,13 +1072,8 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
 
                     return False
                 except Exception:
-                    if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
-                        print("   ✅ Already authenticated (active session detected). Skipping Duo.")
-                        if not persist_verified():
-                            return False
-                        track_session_usage("login")
-                        print("✨ Auto-Login Successful!")
-                        return True
+                    if _returned_to_blackboard(context, page):
+                        return _persist_login(context, cancel_event, "✨ Auto-Login Successful! (Duo passed this device.)")
                     print("   ❌ Could not select Text message passcode. Use bb login --manual.")
 
                     return False
@@ -1121,13 +1087,8 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 try:
                     passcode_input.wait_for(state="visible", timeout=12000)
                 except PlaywrightTimeout:
-                    if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
-                        print("   ✅ Already authenticated (active session detected). Skipping Duo.")
-                        if not persist_verified():
-                            return False
-                        track_session_usage("login")
-                        print("✨ Auto-Login Successful!")
-                        return True
+                    if _returned_to_blackboard(context, page):
+                        return _persist_login(context, cancel_event, "✨ Auto-Login Successful! (Duo passed this device.)")
                     print("   ❌ Timeout waiting for passcode input. Duo layout may have changed.")
 
                     return False
@@ -1245,8 +1206,9 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 if cancelled(cancel_event):
                     return False
                 if code and (not re.fullmatch(r"[0-9]{6,8}", str(code)) or code in submitted_codes):
-                    print("   ❌ Invalid or already submitted Duo passcode. Run bb login --manual.")
-                    return False
+                    # A stale re-captured SMS or a typo uses up this attempt, not the login.
+                    print("   ⚠️  Ignoring an invalid or already submitted Duo passcode; waiting for a new one.")
+                    continue
                 if not code:
                     print("   ❌ No passcode entered. Aborting.")
 
@@ -1307,30 +1269,27 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
             except Exception:
                 pass
 
-            # --- 11. WAIT FOR BLACKBOARD DASHBOARD ---
+            # --- 11. WAIT FOR A VERIFIED BLACKBOARD SESSION ---
             login_stage = "waiting for Blackboard dashboard"
             print("   ⏳ Waiting for Blackboard to load...")
-            try:
-                page.wait_for_url("**/ultra/**", timeout=60_000)
-                print("   ✅ Successfully authenticated and reached Blackboard!")
-            except PlaywrightTimeout:
-                print("   ❌ Timeout waiting for Blackboard Dashboard. Run bb login --manual.")
+            wait_for_blackboard(context, page, BLACKBOARD_BASE, cancel_event=cancel_event)
+            if not _persist_login(context, cancel_event, "✨ Auto-Login Successful!"):
                 return False
-
-            page.wait_for_timeout(3000)  # let Blackboard fully cookie up
-            if not persist_verified():
-                return False
-            track_session_usage("login")
             if tg_notifier:
                 try:
                     tg_notifier.send_raw_message("✅ <b>Blackboard Auto-Login Successful!</b>\nYour session is cached and ready.")
                 except Exception:
                     pass
-            print("✨ Auto-Login Successful!")
             return True
 
         except LoginFlowError as e:
+            # LoginFlowError text is fixed guidance (no page text, URLs or codes).
             print(f"❌ {e}")
+            if tg_notifier and "cancelled" not in str(e).lower():
+                try:
+                    tg_notifier.send_raw_message(f"❌ <b>Blackboard Auto-Login Failed</b>: {e}")
+                except Exception:
+                    pass
             return False
         except Exception as e:
             print(f"❌ Auto-Login failed during {login_stage} ({type(e).__name__}). Check your connection or run bb login --manual.")
@@ -1342,6 +1301,31 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
             except PlaywrightError:
                 pass
 
+
+
+def _returned_to_blackboard(context, page) -> bool:
+    """True when Duo has already handed the browser back with a live session."""
+    location = urlparse(page.url)
+    if location.hostname != urlparse(BLACKBOARD_BASE).hostname or not location.path.startswith("/ultra"):
+        return False
+    return is_verified(context, BLACKBOARD_BASE)
+
+
+def _persist_login(context, cancel_event, success_message: str) -> bool:
+    """Verify the browser session over HTTP, then replace the cookie cache.
+
+    Any failure (cancel, verification, write) keeps the previous cache.
+    """
+    if cancelled(cancel_event):
+        return False
+    if not is_verified(context, BLACKBOARD_BASE):
+        print("   ❌ Blackboard session could not be verified; saved cache preserved.")
+        return False
+    if cancelled(cancel_event) or not _save_session(context):
+        return False
+    track_session_usage("login")
+    print(success_message)
+    return True
 
 
 def _save_session(context) -> bool:
