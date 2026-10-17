@@ -88,6 +88,11 @@ bb login --manual
 bb login auto
 ```
 
+Smart Login also handles an existing UMBC SSO session that skips the credential
+form or Duo. It saves cookies only after Blackboard's HTTP identity check
+succeeds. Failed automatic login exits with status 1; changed or missing SSO
+forms produce a bounded error with `bb login --manual` recovery guidance.
+
 ---
 
 ### 3. Run Commands (100% Headless)

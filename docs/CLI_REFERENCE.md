@@ -55,7 +55,19 @@ Every `bb <COMMAND> --help` page ends with copy-pasteable `Examples:`. Unknown c
   - `--visible`, `-v`: Display visible browser window.
   - `--username`, `-u <id>`: UMBC username / email (reads from `config.json` if omitted).
   - `--password`, `-p <pass>`: UMBC password.
-  - `--duo-passcode <code>`: Supply 6-digit passcode directly via CLI.
+  - `--duo-passcode <code>`: Supply a 6–8 digit passcode directly via CLI.
+
+An existing UMBC SSO session can skip the username/password form and Duo.
+Automatic login observes those transitions under a 30-second SSO deadline,
+after initial navigation (also limited to 30 seconds). It submits each credential
+step once and saves cookies only after an HTTP identity check succeeds. Unknown
+pages, authentication errors, and missing forms fail with recovery guidance;
+`bb login --manual` remains the visible-browser fallback. Failed automatic login
+returns status 1. Automatic refresh uses the same login flow and rechecks the
+saved session before continuing the read command.
+
+Authentication diagnostics omit page text, full URLs, credential values, and
+passcodes. Automatic login does not save screenshots of authentication pages.
 
 ### `bb check` / `bb session check`
 **Description:** High-speed HTTP REST API probe (<120ms) verifying session token validity without launching a browser. Returns exit code 0 if authenticated, 1 if expired.

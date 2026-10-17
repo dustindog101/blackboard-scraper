@@ -25,7 +25,7 @@ if sys.platform == "win32":
 
 from core.config import BLACKBOARD_BASE, load_courses, save_courses
 from core.export_json import build_composite_schema, build_export_doc
-from core.session import _launch_context, _require_session, _require_session_async, check_session_async, login, login_auto, quick_check_session_http
+from core.session import _launch_context, _require_session, _require_session_async, check_session_async, login, _login_auto_async, quick_check_session_http
 from core.async_engine import AsyncSessionManager, AsyncCourseWorkerPool, EngineConfig, TaskProfile, get_optimal_concurrency
 
 # Scrapers
@@ -1243,8 +1243,7 @@ async def main_async(args: argparse.Namespace) -> None:
         if is_manual:
             await asyncio.to_thread(login, force_flag, username, password, cdp)
         else:
-            await asyncio.to_thread(
-                login_auto,
+            success = await _login_auto_async(
                 username=username,
                 password=password,
                 headless=headless,
@@ -1253,6 +1252,8 @@ async def main_async(args: argparse.Namespace) -> None:
                 force=force_flag,
                 passcode=getattr(args, "duo_passcode", None),
             )
+            if not success:
+                raise SystemExit(1)
         return
 
     if subcmd == "logout" or getattr(args, "logout", False):
