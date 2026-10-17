@@ -167,3 +167,16 @@ class TestSSOBrowser(unittest.TestCase):
                 login_flow.wait_for_blackboard(self.context, self.page, BB, timeout=600)
         with patch.object(login_flow, 'verify_session', return_value=True):
             login_flow.wait_for_blackboard(self.context, self.page, BB, timeout=600)
+
+    def test_wait_for_blackboard_accepts_any_post_duo_landing_page(self):
+        # Duo sometimes returns to a non-/ultra page; the HTTP check decides.
+        self.page.goto(BB + '/webapps/portal/execute/tabs/tabAction')
+        with patch.object(login_flow, 'verify_session', return_value=True):
+            login_flow.wait_for_blackboard(self.context, self.page, BB, timeout=600)
+
+    def test_wait_for_blackboard_does_not_probe_while_on_duo(self):
+        self.page.goto(DUO)
+        with patch.object(login_flow, 'verify_session', return_value=True) as probe:
+            with self.assertRaises(login_flow.LoginFlowError):
+                login_flow.wait_for_blackboard(self.context, self.page, BB, timeout=600)
+        probe.assert_not_called()

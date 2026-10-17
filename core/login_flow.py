@@ -84,15 +84,20 @@ def _duo_needs_user(page):
 
 
 def wait_for_blackboard(context, page, base, cancel_event=None, timeout=60_000):
-    """After Duo, wait until the browser holds an HTTP-verified Blackboard session."""
+    """After Duo, wait until the browser holds an HTTP-verified Blackboard session.
+
+    The post-Duo landing page varies (/ultra, /webapps, an SSO hop), so once the
+    page leaves Duo the cookies are probed about once a second whatever the URL.
+    """
     deadline = time.monotonic() + timeout / 1000
-    bb_host = urlsplit(base).hostname
+    next_probe = 0.0
     while time.monotonic() < deadline:
         if cancelled(cancel_event):
             raise LoginFlowError('Login cancelled.')
         if page.is_closed():
             raise LoginFlowError('Login browser was closed. Run bb login again.')
-        if urlsplit(page.url).hostname == bb_host and urlsplit(page.url).path.startswith('/ultra'):
+        if not is_duo(page.url) and time.monotonic() >= next_probe:
+            next_probe = time.monotonic() + 1
             remaining = max(1, min(2000, int((deadline - time.monotonic()) * 1000)))
             if is_verified(context, base, timeout=remaining):
                 return
