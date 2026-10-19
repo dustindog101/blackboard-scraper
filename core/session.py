@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 from datetime import datetime
 from getpass import getpass
@@ -18,6 +19,8 @@ except ImportError:
         pass
     class PlaywrightError(Exception):
         pass
+
+from core.sms_listener import check_sms_access, ensure_messages_sync, get_current_max_rowid, normalize_passcode, wait_for_duo_sms_passcode
 
 from core.config import (
     BLACKBOARD_BASE,
@@ -161,7 +164,11 @@ def _launch_context(pw, headless: bool = True, cdp_url: str = None):
         except Exception as e:
             err_str = str(e)
             last_error = e
-            if "Target directory" in err_str and "is in use" in err_str:
+            if (
+                "processsingleton" in err_str.lower() or "singletonlock" in err_str.lower()
+                or ("profile" in err_str.lower() and "already in use" in err_str.lower())
+                or ("Target directory" in err_str and "is in use" in err_str)
+            ):
                 print("\n❌ [ERROR] The Browser Session is locked.")
                 print("   This means another scraper process or visible Chromium instance is currently using it.")
                 print(f"   Please close any running Chrome windows tied to {SESSION_DIR.name}/ and try again.")
@@ -243,19 +250,19 @@ def detect_sso_error(page) -> tuple[bool, str, str]:
                     for i in range(min(cnt, 3)):
                         item = loc.nth(i)
                         if item.is_visible():
-                            txt = item.inner_text().strip()
+                            txt = item.inner_text(timeout=200).strip()
                             if txt:
                                 for pattern, err_type in SSO_ERROR_PATTERNS:
                                     if pattern.search(txt):
                                         return True, err_type, txt
-                                return True, "AUTH_FAILED", txt
+                                # Informational alerts are not authentication failures.
             except Exception:
                 continue
 
         # 2. Check full body text if on a login/SSO URL
         url_lower = page.url.lower()
         if any(ind in url_lower for ind in LOGIN_INDICATORS):
-            body_txt = page.locator("body").inner_text()
+            body_txt = page.locator("body").inner_text(timeout=200)
             for pattern, err_type in SSO_ERROR_PATTERNS:
                 match = pattern.search(body_txt)
                 if match:
@@ -289,69 +296,188 @@ def _normalized_text(value: str | None) -> str:
     return " ".join((value or "").split())
 
 
-def _click_exact_text_in_any_frame(page, target_text: str, timeout: int = 10_000) -> bool:
-    """
-    Click the first visible element whose rendered text exactly matches target_text.
+PASSCODE_SELECTOR = "input[name='passcode'], input[id*='passcode'], input[autocomplete='one-time-code']"
+TRUST_LABELS = ("Yes, this is my device", "Trust browser", "Remember this device")
 
-    Duo sometimes renders these actions as buttons, links, or role=button nodes
-    inside an iframe. Matching by exact visible text keeps us from selecting the
-    wrong passcode method.
-    """
-    target_text = _normalized_text(target_text)
-    target_lower = target_text.lower().rstrip(".,:;!?)")
-    selectors = ["button", "a", "[role='button']", "input[type='submit']"]
 
-    deadline = time.time() + (timeout / 1000.0)
-    while time.time() <= deadline:
+def _click_exact_text_in_any_frame(page, target_text, timeout: int = 10_000, stop_when=None) -> bool:
+    """Search alternative labels under one deadline, stopping at the next state."""
+    targets = (target_text,) if isinstance(target_text, str) else tuple(target_text)
+    deadline = time.monotonic() + timeout / 1000.0
+    while True:
+        if stop_when is not None and stop_when():
+            return False
         for frame in page.frames:
-            try:
-                text_loc = frame.get_by_text(target_text, exact=False)
-                for idx in range(text_loc.count()):
-                    item = text_loc.nth(idx)
-                    if item.is_visible():
-                        item.click(timeout=timeout)
-                        return True
-            except Exception:
-                pass
-
-            try:
-                role_loc = frame.get_by_role("button", name=re.compile(re.escape(target_text), re.I))
-                for idx in range(role_loc.count()):
-                    item = role_loc.nth(idx)
-                    if item.is_visible():
-                        item.click(timeout=timeout)
-                        return True
-            except Exception:
-                pass
-
-            for selector in selectors:
+            for target in targets:
                 try:
-                    locator = frame.locator(selector)
-                    count = locator.count()
-                except Exception:
+                    words = r"\s+".join(re.escape(word) for word in target.split())
+                    role_name = re.compile(r"^\s*" + words + r"(?:$|[\s.,:;!?])", re.I)
+                    text_name = re.compile(r"^\s*" + words + r"[\s.,:;!?)]*$", re.I)
+                    locators = [
+                        frame.get_by_role("button", name=role_name),
+                        frame.get_by_role("link", name=role_name),
+                        frame.get_by_text(text_name),
+                    ]
+                    for locator in locators:
+                        for idx in range(locator.count()):
+                            item = locator.nth(idx)
+                            if item.is_visible():
+                                remaining = max(1, int((deadline - time.monotonic()) * 1000))
+                                item.click(timeout=min(1000, remaining), no_wait_after=True)
+                                return True
+                except PlaywrightError:
+                    # A redirect can invalidate a frame while it is inspected.
                     continue
+        if time.monotonic() >= deadline:
+            return False
+        page.wait_for_timeout(min(100, max(1, (deadline - time.monotonic()) * 1000)))
 
-                for idx in range(count):
-                    item = locator.nth(idx)
-                    try:
-                        if not item.is_visible():
-                            continue
-                        candidate = _normalized_text(item.inner_text())
-                        if not candidate:
-                            candidate = _normalized_text(item.get_attribute("aria-label"))
-                        if not candidate and selector.startswith("input"):
-                            candidate = _normalized_text(item.get_attribute("value"))
 
-                        candidate_lower = candidate.lower().rstrip(".,:;!?)")
-                        if candidate_lower == target_lower or target_lower in candidate_lower:
-                            item.click(timeout=timeout)
-                            return True
-                    except Exception:
-                        continue
+def _duo_passcode_input(page):
+    for frame in page.frames:
+        try:
+            inputs = frame.locator(PASSCODE_SELECTOR)
+            for idx in range(inputs.count()):
+                item = inputs.nth(idx)
+                if item.is_visible():
+                    return item
+        except PlaywrightError:
+            continue
+    return None
 
-        page.wait_for_timeout(250)
 
+def _visible_duo_error(page) -> bool:
+    for frame in page.frames:
+        try:
+            # Snapshot text in one DOM operation. A count/is_visible/inner_text
+            # sequence can wait 30 seconds for an error removed by navigation.
+            texts = frame.locator(
+                ".error-message:visible, [role='alert']:visible, .error:visible"
+            ).evaluate_all("elements => elements.map(element => element.innerText)")
+            if any(re.search(r"incorrect|invalid|expired|denied|too many|try again", text, re.I) for text in texts):
+                return True
+        except PlaywrightError:
+            continue
     return False
+
+
+def _trust_prompt_visible(page) -> bool:
+    for frame in page.frames:
+        try:
+            for label in TRUST_LABELS:
+                if frame.get_by_text(label, exact=True).first.is_visible():
+                    return True
+        except PlaywrightError:
+            continue
+    return False
+
+
+def _wait_for_passcode_outcome(page, timeout: int = 15_000, previous_error: bool = False) -> str:
+    """An unchanged input is pending, not proof that Duo rejected the code."""
+    deadline = time.monotonic() + timeout / 1000.0
+    error_cleared = not previous_error
+    while True:
+        if _is_clearly_authenticated_url(page.url) or _trust_prompt_visible(page):
+            return "accepted"
+        if _visible_duo_error(page):
+            if error_cleared:
+                return "rejected"
+        else:
+            error_cleared = True
+        if time.monotonic() >= deadline:
+            return "timeout"
+        page.wait_for_timeout(100)
+
+
+def _read_windows_passcodes(result_queue, stop_event, console):
+    pending = ""
+    extended_key = False
+    while not stop_event.wait(0.05):
+        if not console.kbhit():
+            continue
+        char = console.getwch()
+        if extended_key:
+            extended_key = False
+        elif char in ("\x00", "\xe0"):
+            extended_key = True
+        elif char in ("\r", "\n"):
+            print()
+            result_queue.put(("cli", pending))
+            pending = ""
+        elif char in ("\b", "\x7f"):
+            if pending:
+                pending = pending[:-1]
+                print("\b \b", end="", flush=True)
+        elif char in ("\x03", "\x1a"):
+            stop_event.set()
+        elif char.isascii() and char.isdigit():
+            pending += char
+            print("*", end="", flush=True)
+
+
+def _read_terminal_passcodes(result_queue, stop_event, automatic_capture: bool = False):
+    """One cancellable terminal reader per login, including across retries."""
+    if not sys.stdin.isatty():
+        return
+    hint = " (or wait for SMS auto-capture)" if automatic_capture else ""
+    print(f"  🔑 Enter your Duo passcode{hint}: ", end="", flush=True)
+    if sys.platform == "win32":
+        import msvcrt
+        _read_windows_passcodes(result_queue, stop_event, msvcrt)
+    else:
+        import select
+        while not stop_event.wait(0.1):
+            try:
+                readable, _, _ = select.select([sys.stdin], [], [], 0)
+                if readable:
+                    line = sys.stdin.readline()
+                    if not line:
+                        result_queue.put(("terminal-closed", None))
+                        return
+                    result_queue.put(("cli", line.strip()))
+            except (OSError, ValueError):
+                result_queue.put(("terminal-closed", None))
+                return
+
+
+def _wait_for_authenticated_session(context, page, timeout: int = 30_000) -> bool:
+    """Verify cookies directly, without waiting for the Blackboard SPA/assets."""
+    deadline = time.monotonic() + timeout / 1000.0
+    host = urlparse(BLACKBOARD_BASE).hostname
+    while time.monotonic() < deadline:
+        if urlparse(page.url).hostname == host:
+            try:
+                response = context.request.get(
+                    f"{BLACKBOARD_BASE}/learn/api/public/v1/users/me",
+                    headers={"Accept": "application/json"},
+                    timeout=max(1, min(2000, int((deadline - time.monotonic()) * 1000))),
+                    max_redirects=0,
+                )
+                try:
+                    if response.status == 200:
+                        data = response.json()
+                        if isinstance(data, dict) and any(data.get(key) for key in ("id", "studentId", "userName")):
+                            return True
+                finally:
+                    response.dispose()
+            except (PlaywrightError, ValueError):
+                pass
+            delay = 300
+        else:
+            delay = 100
+        page.wait_for_timeout(min(delay, max(0, (deadline - time.monotonic()) * 1000)))
+    return False
+
+
+def _notify_login(notifier, text: str):
+    """Optional Telegram status must not delay authentication or shutdown."""
+    import threading
+    def send():
+        try:
+            notifier.send_raw_message(text)
+        except Exception:
+            pass
+    threading.Thread(target=send, daemon=True).start()
 
 
 def _has_auth_markers(page) -> bool:
@@ -908,14 +1034,30 @@ def login(force: bool = False, username: str = None, password: str = None, cdp_u
         context.close()
 
 
-def login_auto(username: str = None, password: str = None, headless: bool = False, cdp_url: str = None, auto_exp: bool = False, force: bool = False, passcode: str = None) -> bool:
+def login_auto(username: str = None, password: str = None, headless: bool = False, cdp_url: str = None, auto_exp: bool = False, force: bool = False, passcode: str = None, cancel_event=None, code_file: str = None, code_timeout: float = 300.0) -> bool:
     """
     Automated login via SSO + Duo text passcode.
+    When code_file is set, SSO starts once and the Duo code is read from that file
+    (polled every 0.5s, deleted after reading) so an outside agent can supply it.
     When auto_exp=True, automatically listens for incoming macOS SMS/iMessage 2FA passcodes.
     When force=True, clears cookies and forces a full re-authentication.
-    When passcode is provided, submits the supplied 6-digit code directly on the first attempt.
+    When passcode is provided, submits the supplied 6–8 digit code directly on the first attempt.
     Returns True if login succeeds, False otherwise.
     """
+    import queue
+    import threading
+
+    login_stop_event = cancel_event if cancel_event is not None else threading.Event()
+
+    def _cancelled() -> bool:
+        if not login_stop_event.is_set():
+            return False
+        print("   ❌ Login cancelled.")
+        return True
+
+    if _cancelled():
+        return False
+
     if cdp_url:
         print("🔌 Ignoring 'bb login auto' since you are connected to an existing CDP browser.")
         return False
@@ -927,11 +1069,28 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
     pwd = password or cfg.get("auto_login", {}).get("password")
 
     is_mac = sys.platform == "darwin"
+    if code_file:
+        passcode = None
+        try:
+            # Drop any stale code so it can never be submitted for this login.
+            Path(code_file).unlink(missing_ok=True)
+        except OSError as e:
+            print(f"❌ Cannot use code file: {e}", flush=True)
+            return False
+    if passcode is not None:
+        passcode = normalize_passcode(passcode)
+        if passcode is None:
+            print("❌ Passcodes must contain 6–8 digits.")
+            return False
 
     # If credentials are not present, check if we can prompt via TUI or fail gracefully
     if not usr or not pwd:
         if sys.stdin.isatty():
+            if _cancelled():
+                return False
             usr, pwd, save_creds, chosen_mode = prompt_credentials_tui(default_auto_exp=auto_exp or True)
+            if _cancelled():
+                return False
             if not usr or not pwd:
                 return False
             if save_creds:
@@ -953,6 +1112,8 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
 
     if not force:
         valid, _ = quick_check_session_http()
+        if _cancelled():
+            return False
         if valid:
             print("✅ You are already logged in! (Use 'bb login --force' to re-authenticate)")
             return True
@@ -980,67 +1141,100 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
     except Exception:
         pass
 
+    sms_available = False
+    if is_mac:
+        sms_available, reason = check_sms_access()
+        if not sms_available:
+            print(f"   ⚠️ SMS auto-capture unavailable: {reason}")
+        elif not ensure_messages_sync():
+            print("   ⚠️ Messages could not be started. Open Messages to enable SMS syncing, or enter the code manually.")
+    if _cancelled():
+        return False
+    result_queue = queue.Queue()
+    attempt_events = []
+
     with sync_playwright() as p:
         try:
             login_stage = "launching browser context"
             context, page = _launch_context(p, headless=headless)
-            if force:
-                context.clear_cookies()
-                print("   🧹 Forced clean re-authentication: session cookies cleared.")
         except SystemExit:
             return False
 
         try:
+            def _persist_verified_session() -> bool:
+                if _cancelled():
+                    return False
+                if not _save_session(context):
+                    print("   ❌ Authentication was verified, but the session cookies could not be saved.")
+                    return False
+                return True
+
+            if _cancelled():
+                return False
+            if force:
+                context.clear_cookies()
+                print("   🧹 Forced clean re-authentication: session cookies cleared.")
+
             # Main credential submission loop with interactive retry on invalid credentials
             while True:
+                if _cancelled():
+                    return False
                 login_stage = "opening Blackboard course landing page"
-                page.goto(f"{BLACKBOARD_BASE}/ultra/course")
-                page.wait_for_timeout(2500)
+                # Snapshot before navigation: Duo may automatically send SMS on arrival.
+                start_rowid = get_current_max_rowid() if sms_available else 0
+                trigger_time = time.time()
+                page.goto(f"{BLACKBOARD_BASE}/ultra/course", wait_until="domcontentloaded")
+                if _cancelled():
+                    return False
 
                 # --- 1. CLICK PORTAL BUTTON IF PRESENT ---
                 login_stage = "clicking UMBC portal button"
                 print("   ↳ Looking for UMBC login portal button...")
                 try:
-                    if _click_exact_text_in_any_frame(page, "Log into Blackboard via myUMBC") or _click_exact_text_in_any_frame(page, "UMBC Login") or _click_exact_text_in_any_frame(page, "Sign in"):
-                        print("   ↳ Clicking portal login button...")
-                        page.wait_for_timeout(2000)
+                    if _click_exact_text_in_any_frame(
+                        page, ("Log into Blackboard via myUMBC", "UMBC Login", "Sign in"),
+                        stop_when=lambda: (
+                            _has_auth_markers(page) or "duosecurity.com" in page.url
+                            or page.locator("input[type='text'], input[type='email'], input[type='password']").first.is_visible()
+                        ),
+                    ):
+                        print("   ↳ Clicked portal login button.")
                 except PlaywrightTimeout:
                     pass
+
+                if _cancelled():
+                    return False
 
                 # --- 2. FILL USERNAME AND PASSWORD ---
                 login_stage = "filling UMBC username and password"
                 print(f"   ↳ Filling credentials for '{usr}'...")
-                try:
-                    usr_field = page.get_by_label(re.compile(r"Email Address / Username / Campus ID", re.I))
-                    if usr_field.count() == 0:
-                        usr_field = page.locator("input[type='text'], input[type='email'], input[name='j_username']").first
-                    if usr_field.is_visible(timeout=6000):
-                        usr_field.fill(usr)
-                        page.wait_for_timeout(400)
-
-                    pwd_field = page.get_by_label(re.compile(r"Password", re.I))
+                if "duosecurity.com" not in page.url and not _is_clearly_authenticated_url(page.url):
+                    usr_field = page.locator("input[name='j_username'], input[type='text'], input[type='email']").first
+                    usr_field.wait_for(state="visible", timeout=10_000)
+                    if _cancelled():
+                        return False
+                    usr_field.fill(usr)
+                    pwd_field = page.locator("input[type='password'], input[name='j_password']").first
                     if pwd_field.count() == 0:
-                        pwd_field = page.locator("input[type='password'], input[name='j_password']").first
+                        if _cancelled():
+                            return False
+                        usr_field.press("Enter")
+                    pwd_field.wait_for(state="visible", timeout=10_000)
+                    if _cancelled():
+                        return False
+                    pwd_field.fill(pwd)
+                    if _cancelled():
+                        return False
+                    if not _click_exact_text_in_any_frame(
+                        page, ("Log In", "Log in", "Sign in"), timeout=2000,
+                        stop_when=lambda: "duosecurity.com" in page.url or _is_clearly_authenticated_url(page.url),
+                    ):
+                        if "duosecurity.com" not in page.url and not _is_clearly_authenticated_url(page.url):
+                            if _cancelled():
+                                return False
+                            pwd_field.press("Enter", timeout=2000, no_wait_after=True)
 
-                    if pwd_field.is_visible(timeout=2000):
-                        pwd_field.fill(pwd)
-                        try:
-                            page.get_by_role("button", name=re.compile(r"^Log In$", re.I)).click(timeout=3000)
-                        except Exception:
-                            page.keyboard.press("Enter")
-                    else:
-                        page.keyboard.press("Enter")
-                        page.wait_for_timeout(1500)
-                        try:
-                            pwd_field.wait_for(state="visible", timeout=6000)
-                            pwd_field.fill(pwd)
-                            page.keyboard.press("Enter")
-                        except PlaywrightTimeout:
-                            pass
-                except Exception as e:
-                    print(f"   ⚠️ Exception while filling login fields: {e}")
-
-                # --- 3. FAST TRANSITION MONITOR (<10s): Duo, Blackboard Direct, or SSO Auth Error ---
+                # --- 3. WAIT FOR DUO, BLACKBOARD, OR A DEFINITIVE SSO ERROR ---
                 login_stage = "waiting for SSO authentication response"
                 duo_reached = False
                 bb_reached = False
@@ -1048,15 +1242,17 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 sso_err_type = ""
                 sso_err_msg = ""
 
-                for _ in range(20):  # 20 * 500ms = 10s max wait
-                    page.wait_for_timeout(500)
+                response_deadline = time.monotonic() + 15.0
+                while time.monotonic() < response_deadline:
+                    if _cancelled():
+                        return False
                     cur_url = page.url.lower()
 
                     if "duosecurity.com" in cur_url:
                         duo_reached = True
                         break
 
-                    if "blackboard.umbc.edu/ultra" in cur_url and _is_authenticated_session(page):
+                    if "blackboard.umbc.edu/ultra" in cur_url and _has_auth_markers(page):
                         bb_reached = True
                         break
 
@@ -1066,13 +1262,17 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                         sso_err_type = err_type
                         sso_err_msg = err_text
                         break
+                    page.wait_for_timeout(100)
 
                 if bb_reached:
                     print("   ✅ Already authenticated (active session detected). Skipping Duo.")
-                    _save_session(context)
+                    if not _wait_for_authenticated_session(context, page):
+                        print("   ❌ Blackboard session could not be verified.")
+                        return False
+                    if not _persist_verified_session():
+                        return False
                     track_session_usage("login")
                     print("✨ Auto-Login Successful!")
-                    context.close()
                     return True
 
                 if duo_reached:
@@ -1092,7 +1292,7 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
 
                     if tg_notifier:
                         try:
-                            tg_notifier.send_raw_message(f"❌ <b>UMBC Login Failed</b>: {sso_err_msg}\nCheck credentials in <code>config.json</code>.")
+                            _notify_login(tg_notifier, f"❌ <b>UMBC Login Failed</b>: {sso_err_msg}\nCheck credentials in <code>config.json</code>.")
                         except Exception:
                             pass
 
@@ -1114,7 +1314,6 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
 
                     page.screenshot(path="auth_error.png")
                     print("   📸 Screenshot saved to: auth_error.png")
-                    context.close()
                     return False
 
                 # Fallback check if on Duo
@@ -1123,21 +1322,25 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 else:
                     print(f"   ⚠️ Did not reach Duo or detect definitive SSO error. Current URL: {page.url}")
                     try:
-                        page.wait_for_url("**/duosecurity.com/**", timeout=4000)
+                        page.wait_for_url(lambda url: (urlparse(url).hostname or "").endswith(".duosecurity.com"), timeout=4000)
                         break
                     except PlaywrightTimeout:
                         page.screenshot(path="duo_timeout_state.png")
                         print("   📸 Screenshot saved to: duo_timeout_state.png")
-                        context.close()
                         return False
 
             # --- 4. REACHED DUO ---
+            if _cancelled():
+                return False
             print("   ↳ Checking Duo 2FA state...")
-            page.wait_for_timeout(1500)
 
             if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
                 print("   ✅ Already authenticated (active session detected). Skipping Duo.")
-                _save_session(context)
+                if not _wait_for_authenticated_session(context, page):
+                    print("   ❌ Blackboard session could not be verified.")
+                    return False
+                if not _persist_verified_session():
+                    return False
                 track_session_usage("login")
                 print("✨ Auto-Login Successful!")
                 return True
@@ -1147,49 +1350,66 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
             if "duosecurity.com" in page.url.lower():
                 print("   ↳ Clicking 'Other options'...")
                 try:
-                    if _click_exact_text_in_any_frame(page, "Other options", timeout=6000):
-                        page.wait_for_timeout(1500)
+                    if _click_exact_text_in_any_frame(
+                        page, "Other options", timeout=6000,
+                        stop_when=lambda: (
+                            _duo_passcode_input(page) is not None
+                            or _is_clearly_authenticated_url(page.url)
+                            or page.get_by_text("Text message passcode", exact=False).first.is_visible()
+                        ),
+                    ):
                         print("   ↳ Clicked 'Other options'.")
                     else:
                         print("   ↳ Duo may already display available methods.")
                 except Exception as e:
                     print(f"   ⚠️ Notice on 'Other options': {e}")
-                finally:
-                    page.wait_for_timeout(1000)
+
+            if _cancelled():
+                return False
 
             if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
                 print("   ✅ Already authenticated (active session detected). Skipping Duo.")
-                _save_session(context)
+                if not _wait_for_authenticated_session(context, page):
+                    print("   ❌ Blackboard session could not be verified.")
+                    return False
+                if not _persist_verified_session():
+                    return False
                 track_session_usage("login")
                 print("✨ Auto-Login Successful!")
                 return True
 
             # --- 6. SELECT "TEXT MESSAGE PASSCODE" SPECIFICALLY ---
             login_stage = "selecting Duo text message passcode"
-            from core.sms_listener import get_current_max_rowid
-            start_rowid = get_current_max_rowid() if is_mac else 0
 
             if "duosecurity.com" in page.url.lower():
                 print("   ↳ Selecting 'Text message passcode'...")
                 try:
-                    passcode_input_check = page.locator("input[name='passcode'], input[id='passcode'], input[type='text'][autocomplete], input[id*='passcode']").first
-                    if not passcode_input_check.is_visible(timeout=1000):
+                    if _duo_passcode_input(page) is None:
+                        start_rowid = get_current_max_rowid() if sms_available else 0
+                        trigger_time = time.time()
                         if not _click_exact_text_in_any_frame(page, "Text message passcode", timeout=6000):
                             if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
                                 print("   ✅ Already authenticated (active session detected). Skipping Duo.")
-                                _save_session(context)
+                                if not _wait_for_authenticated_session(context, page):
+                                    print("   ❌ Blackboard session could not be verified.")
+                                    return False
+                                if not _persist_verified_session():
+                                    return False
                                 track_session_usage("login")
                                 print("✨ Auto-Login Successful!")
                                 return True
                             raise PlaywrightTimeout("Text message passcode control not found")
-                        page.wait_for_timeout(2000)
                         print("   ↳ Clicked 'Text message passcode'. Passcode is being sent...")
                     else:
                         print("   ↳ Passcode input already active.")
                 except PlaywrightTimeout:
                     if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
                         print("   ✅ Already authenticated (active session detected). Skipping Duo.")
-                        _save_session(context)
+                        if not _wait_for_authenticated_session(context, page):
+                            print("   ❌ Blackboard session could not be verified.")
+                            return False
+                        if not _persist_verified_session():
+                            return False
                         track_session_usage("login")
                         print("✨ Auto-Login Successful!")
                         return True
@@ -1204,7 +1424,11 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 except Exception as e:
                     if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
                         print("   ✅ Already authenticated (active session detected). Skipping Duo.")
-                        _save_session(context)
+                        if not _wait_for_authenticated_session(context, page):
+                            print("   ❌ Blackboard session could not be verified.")
+                            return False
+                        if not _persist_verified_session():
+                            return False
                         track_session_usage("login")
                         print("✨ Auto-Login Successful!")
                         return True
@@ -1213,25 +1437,31 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                     print("   📸 Screenshot saved to: duo_timeout_state.png")
                     return False
 
-            # --- 7. WAIT FOR PASSCODE INPUT ---
+            if _cancelled():
+                return False
+
+            # --- 7. WAIT FOR PASSCODE INPUT (including embedded Duo frames) ---
             login_stage = "waiting for Duo passcode input"
-            if "duosecurity.com" in page.url.lower():
-                passcode_input = page.locator(
-                    "input[name='passcode'], input[id='passcode'], input[type='text'][autocomplete], input[id*='passcode']"
-                ).first
-                try:
-                    passcode_input.wait_for(state="visible", timeout=12000)
-                except PlaywrightTimeout:
-                    if "blackboard.umbc.edu/ultra" in page.url.lower() and _is_authenticated_session(page):
-                        print("   ✅ Already authenticated (active session detected). Skipping Duo.")
-                        _save_session(context)
-                        track_session_usage("login")
-                        print("✨ Auto-Login Successful!")
-                        return True
-                    print("   ❌ Timeout waiting for passcode input. Duo layout may have changed.")
-                    page.screenshot(path="duo_timeout_state.png")
-                    print("   📸 Screenshot saved to: duo_timeout_state.png")
+            input_deadline = time.monotonic() + 12.0
+            passcode_input = _duo_passcode_input(page)
+            while passcode_input is None and time.monotonic() < input_deadline:
+                if _cancelled():
                     return False
+                if _is_clearly_authenticated_url(page.url):
+                    if not _wait_for_authenticated_session(context, page):
+                        print("   ❌ Blackboard session could not be verified.")
+                        return False
+                    if not _persist_verified_session():
+                        return False
+                    track_session_usage("login")
+                    return True
+                page.wait_for_timeout(100)
+                passcode_input = _duo_passcode_input(page)
+            if _cancelled():
+                return False
+            if passcode_input is None:
+                print("   ❌ Timeout waiting for passcode input. Use 'bb login --manual'.")
+                return False
 
             sent_to_hint = ""
             try:
@@ -1242,175 +1472,219 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
             except Exception:
                 pass
 
-            # --- 8 & 9. DUAL-CHANNEL PASSCODE ENTRY & RETRY LOOP ---
+            # --- 8 & 9. PASSCODE ENTRY & RETRY LOOP ---
             login_stage = "submitting Duo passcode"
-            import queue
-            import threading
-
-            max_attempts = 3
-            passcode_accepted = False
+            if _cancelled():
+                return False
+            if code_file:
+                print("WAITING_FOR_CODE", flush=True)
+                file_deadline = time.monotonic() + float(code_timeout)
+                file_code = None
+                warned_invalid = False
+                while file_code is None and time.monotonic() < file_deadline and not login_stop_event.is_set():
+                    try:
+                        raw = Path(code_file).read_text(encoding="utf-8", errors="ignore").strip()
+                    except OSError:
+                        raw = ""
+                    if raw:
+                        try:
+                            Path(code_file).unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                        file_code = normalize_passcode(raw)
+                        if file_code is None and not warned_invalid:
+                            print("   ⚠️ Code file did not contain a 6–8 digit code; still waiting.", flush=True)
+                            warned_invalid = True
+                        continue
+                    page.wait_for_timeout(500)
+                if _cancelled():
+                    return False
+                if file_code is None:
+                    print("   ❌ Timed out waiting for the code file.", flush=True)
+                    return False
+                print("   ↳ Code received from file; submitting.", flush=True)
+                previous_error = _visible_duo_error(page)
+                passcode_input.fill(file_code)
+                if not _click_exact_text_in_any_frame(page, "Verify", timeout=1000):
+                    passcode_input.press("Enter", timeout=2000, no_wait_after=True)
+                outcome = _wait_for_passcode_outcome(page, previous_error=previous_error)
+                if outcome != "accepted":
+                    print("   ❌ Duo did not accept the code. Run the login again for a fresh SMS.", flush=True)
+                    return False
+                print("   ✅ Duo passcode accepted!", flush=True)
+                max_attempts = 0
+                passcode_accepted = True
+            else:
+                max_attempts = 3
+            if not code_file and not (sms_available or sys.stdin.isatty() or tg_notifier or passcode):
+                print("❌ No passcode input is available. Use 'bb login --manual' or run in a terminal.")
+                return False
+            passcode_accepted = bool(code_file)
+            tried_codes = set()
+            sms_recovery_used = False
+            sms_wait_seconds = 25
+            terminal_available = sys.stdin.isatty()
+            terminal_started = False
 
             for attempt in range(1, max_attempts + 1):
-                code = None
-
-                # If passcode was supplied via CLI argument, submit directly on first attempt
-                if passcode and attempt == 1:
-                    code = str(passcode).strip()
-                    print(f"\n   🔑 Submitting Duo passcode supplied via CLI: {code}")
-                else:
-                    result_queue = queue.Queue()
-                    stop_event = threading.Event()
-                    trigger_time = time.time()
-
-                    # A. Real-time macOS SMS/iMessage Listener (macOS only)
-                    if is_mac:
-                        def _sms_worker():
+                if _cancelled():
+                    return False
+                stop_event = threading.Event()
+                attempt_events.append(stop_event)
+                code = passcode if attempt == 1 else None
+                if code is None:
+                    active_sources = set()
+                    if terminal_available:
+                        active_sources.add("cli")
+                    if sms_available:
+                        active_sources.add("sms")
+                        def _sms_worker(event=stop_event, excluded=frozenset(tried_codes)):
                             try:
-                                from core.sms_listener import wait_for_duo_sms_passcode
-                                c = wait_for_duo_sms_passcode(start_rowid=start_rowid, after_unix_timestamp=trigger_time, timeout_seconds=90)
-                                if c and not stop_event.is_set():
-                                    result_queue.put(("sms", c))
+                                captured = wait_for_duo_sms_passcode(
+                                    start_rowid=start_rowid, after_unix_timestamp=trigger_time,
+                                    timeout_seconds=sms_wait_seconds, excluded_codes=excluded, stop_event=event,
+                                    access_checked=True,
+                                )
+                                if captured and not event.is_set():
+                                    result_queue.put(("sms", captured, event))
                             except Exception:
                                 pass
+                            finally:
+                                if not event.is_set():
+                                    result_queue.put(("sms-finished", None, event))
                         threading.Thread(target=_sms_worker, daemon=True).start()
-
-                    # B. Telegram prompt
                     if tg_notifier:
-                        header = "🔐 <b>UMBC Duo 2FA Passcode Required</b>" if attempt == 1 else f"❌ <b>Incorrect Duo Passcode (Attempt {attempt}/{max_attempts})</b>"
-                        try:
-                            tg_notifier.send_raw_message(
-                                f"{header}\n\n"
-                                f"Duo sent a 6-digit text passcode to your phone{sent_to_hint}.\n\n"
-                                f"Reply with the 6-digit code or enter it in your terminal."
-                            )
-                            def _tg_worker():
-                                c = tg_notifier.poll_for_passcode(timeout_sec=120, stop_event=stop_event)
-                                if c and not stop_event.is_set():
-                                    result_queue.put(("telegram", c))
-                            threading.Thread(target=_tg_worker, daemon=True).start()
-                        except Exception:
-                            pass
-
-                    print("\n" + "=" * 60)
-                    if attempt > 1:
-                        print("  ❌ Incorrect passcode. Please check your phone for the latest code.")
-                    print(f"  📲 Duo text passcode sent to your phone{sent_to_hint} (Attempt {attempt}/{max_attempts}).")
-                    if is_mac:
-                        print("  ⚡ Listening for incoming macOS SMS passcode in real-time...")
-                    else:
-                        print("  💡 Enter the 6-digit passcode below, or reply via Telegram.")
-                    if tg_notifier:
-                        print("  💡 You can also reply directly in Telegram or type it below.")
-                    print("=" * 60)
-
-                    # C. CLI terminal fallback
-                    def _cli_worker():
-                        try:
-                            prompt_label = "  🔑 Enter your Duo passcode (or wait for SMS auto-capture): " if is_mac else "  🔑 Enter your Duo passcode: "
-                            cli_input = input(prompt_label).strip()
-                            if cli_input and not stop_event.is_set():
-                                result_queue.put(("cli", cli_input))
-                        except (EOFError, KeyboardInterrupt):
-                            pass
-
-                    threading.Thread(target=_cli_worker, daemon=True).start()
-
-                    try:
-                        src, code = result_queue.get(timeout=120)
-                        stop_event.set()
-                        if src == "sms":
-                            print(f"\n   ⚡ \033[32mAuto-captured Duo SMS Passcode from macOS Messages: {code}\033[0m")
-                            if tg_notifier:
-                                tg_notifier.send_raw_message(f"⚡ <i>Auto-detected SMS passcode <code>{code}</code> from macOS Messages. Submitting...</i>")
-                        elif src == "telegram":
-                            print(f"\n   📲 Received Duo passcode from Telegram: {code}")
-                    except queue.Empty:
-                        stop_event.set()
-                        print("\n   ❌ Timeout waiting for passcode entry.")
-                        context.close()
+                        active_sources.add("telegram")
+                        def _tg_worker(event=stop_event, attempt_number=attempt):
+                            try:
+                                tg_notifier.send_raw_message(
+                                    f"🔐 <b>UMBC Duo passcode needed (attempt {attempt_number}/{max_attempts})</b>\n"
+                                    f"Enter the 6–8 digit passcode from your phone{sent_to_hint}."
+                                )
+                                if not event.is_set():
+                                    captured = tg_notifier.poll_for_passcode(timeout_sec=120, stop_event=event)
+                                    if captured and not event.is_set():
+                                        result_queue.put(("telegram", captured, event))
+                            except Exception:
+                                pass
+                            finally:
+                                if not event.is_set():
+                                    result_queue.put(("telegram-finished", None, event))
+                        threading.Thread(target=_tg_worker, daemon=True).start()
+                    if not active_sources:
+                        print("   ❌ No passcode input is available for another attempt. Use 'bb login --manual' or run in a terminal.")
                         return False
-
-                if not code:
-                    print("   ❌ No passcode entered. Aborting.")
-                    context.close()
+                    if attempt > 1:
+                        print("   ⚠️ Enter a different passcode, or request a new one in Duo. The rejected code will be ignored.")
+                    print(f"   📲 Waiting for your Duo passcode{sent_to_hint} (attempt {attempt}/{max_attempts}).")
+                    if terminal_available and not terminal_started:
+                        threading.Thread(
+                            target=_read_terminal_passcodes,
+                            args=(result_queue, login_stop_event, sms_available), daemon=True,
+                        ).start()
+                        terminal_started = True
+                    deadline = time.monotonic() + 120.0
+                    while code is None and time.monotonic() < deadline and not login_stop_event.is_set():
+                        try:
+                            message = result_queue.get(timeout=min(0.2, max(0.001, deadline - time.monotonic())))
+                        except queue.Empty:
+                            continue
+                        source, entered = message[:2]
+                        if len(message) == 3 and message[2] is not stop_event:
+                            continue
+                        if source in ("sms-finished", "telegram-finished", "terminal-closed"):
+                            finished = {"sms-finished": "sms", "telegram-finished": "telegram", "terminal-closed": "cli"}[source]
+                            active_sources.discard(finished)
+                            if source == "terminal-closed":
+                                terminal_available = False
+                            if not active_sources or (source == "sms-finished" and not sms_recovery_used):
+                                break
+                            continue
+                        candidate = normalize_passcode(entered)
+                        if candidate is None:
+                            print("   ⚠️ Passcodes must contain 6–8 digits. Try again.")
+                        elif candidate in tried_codes:
+                            print("   ⚠️ That passcode was already tried; waiting for a different code.")
+                        else:
+                            code = candidate
+                            print(f"   ↳ Passcode received via {source}; submitting.")
+                    stop_event.set()
+                if _cancelled():
                     return False
-
-                # 2. Fill & Submit code
-                print("   ↳ Submitting passcode...")
+                if code is None:
+                    if sms_available and not sms_recovery_used and attempt < max_attempts:
+                        sms_recovery_used = True
+                        sms_wait_seconds = 65
+                        resend_rowid = get_current_max_rowid()
+                        resend_time = time.time()
+                        if _click_exact_text_in_any_frame(
+                            page, ("Send a new passcode", "Send new passcode", "Resend passcode"), timeout=2000,
+                        ):
+                            start_rowid, trigger_time = resend_rowid, resend_time
+                            print("   ↳ SMS delivery is delayed; requested one replacement passcode.")
+                        else:
+                            print("   ↳ Duo is not ready to resend; continuing to wait for the original SMS.")
+                        continue
+                    print("   ❌ No new passcode received. Use 'bb login --manual' to continue in a browser.")
+                    return False
+                tried_codes.add(code)
+                previous_error = _visible_duo_error(page)
+                if _cancelled():
+                    return False
                 passcode_input.fill(code)
-                page.wait_for_timeout(400)
-
-                try:
-                    passcode_input.press("Enter")
-                except Exception:
-                    pass
-
-                try:
-                    _click_exact_text_in_any_frame(page, "Verify", timeout=3000)
-                except Exception:
-                    pass
-
-                page.wait_for_timeout(2000)
-
-                # 3. Check if passcode was rejected
-                error_detected = False
-                try:
-                    err = page.locator("div.error-message, [role='alert'], div:has-text('Incorrect passcode'), div:has-text('Invalid passcode'), div:has-text('incorrect')").first
-                    if err.is_visible(timeout=1000):
-                        error_detected = True
-                except Exception:
-                    pass
-
-                if not error_detected and ("duosecurity.com" not in page.url or not passcode_input.is_visible(timeout=1000)):
+                if _cancelled():
+                    return False
+                # Submit once. Searching after Enter could click Verify twice or
+                # waste a timeout after Duo has already redirected.
+                if not _click_exact_text_in_any_frame(page, "Verify", timeout=1000):
+                    passcode_input.press("Enter", timeout=2000, no_wait_after=True)
+                outcome = _wait_for_passcode_outcome(page, previous_error=previous_error)
+                if _cancelled():
+                    return False
+                if outcome == "accepted":
                     print("   ✅ Duo passcode accepted!")
                     passcode_accepted = True
                     break
-                else:
-                    print("   ⚠️  Duo rejected the passcode.")
-                    if attempt == max_attempts:
-                        print("   ❌ Maximum attempts reached. Aborting.")
-                        if tg_notifier:
-                            tg_notifier.send_raw_message("❌ <b>Login Failed</b>: Maximum Duo passcode attempts exceeded.")
-                        context.close()
-                        return False
+                if outcome == "timeout":
+                    print("   ❌ Duo did not confirm the result. Use 'bb login --manual'; the code will not be resubmitted.")
+                    return False
+                print("   ⚠️ Duo rejected the passcode.")
+                if attempt == max_attempts:
+                    print("   ❌ Maximum passcode attempts reached.")
+                    return False
 
             if not passcode_accepted:
-                context.close()
                 return False
 
             # --- 10. TRUST BROWSER (if prompted) ---
+            if _cancelled():
+                return False
             login_stage = "handling Duo trust browser prompt"
             print("   ⏳ Checking for 'Trust browser' prompt...")
             try:
-                if (
-                    _click_exact_text_in_any_frame(page, "Yes, this is my device", timeout=5000)
-                    or _click_exact_text_in_any_frame(page, "Trust browser", timeout=2000)
-                    or _click_exact_text_in_any_frame(page, "Remember this device", timeout=2000)
+                if _click_exact_text_in_any_frame(
+                    page, TRUST_LABELS, timeout=5000,
+                    stop_when=lambda: _is_clearly_authenticated_url(page.url),
                 ):
                     print("   ↳ Clicked 'Yes, this is my device'.")
-                    _save_session(context)
             except Exception:
                 pass
 
-            # --- 11. WAIT FOR BLACKBOARD DASHBOARD ---
-            login_stage = "waiting for Blackboard dashboard"
-            print("   ⏳ Waiting for Blackboard to load...")
-            try:
-                page.wait_for_url("**/ultra/**", timeout=60_000)
-                print("   ✅ Successfully authenticated and reached Blackboard!")
-            except PlaywrightTimeout:
-                print(f"   ❌ Timeout waiting for Blackboard Dashboard. Current URL: {page.url}")
-                page.screenshot(path="timeout_state.png")
-                print("   📸 Screenshot saved to: timeout_state.png")
-                context.close()
+            if _cancelled():
                 return False
 
-            page.wait_for_timeout(3000)  # let Blackboard fully cookie up
-            _save_session(context)
+            # --- 11. VERIFY THE SESSION WITHOUT WAITING FOR DASHBOARD ASSETS ---
+            login_stage = "verifying Blackboard session"
+            print("   ⏳ Verifying Blackboard session...")
+            if not _wait_for_authenticated_session(context, page):
+                print("   ❌ Blackboard did not confirm authentication. Use 'bb login --manual'.")
+                return False
+            if not _persist_verified_session():
+                return False
             track_session_usage("login")
             if tg_notifier:
                 try:
-                    tg_notifier.send_raw_message("✅ <b>Blackboard Auto-Login Successful!</b>\nYour session is cached and ready.")
+                    _notify_login(tg_notifier, "✅ <b>Blackboard Auto-Login Successful!</b>\nYour session is cached and ready.")
                 except Exception:
                     pass
             print("✨ Auto-Login Successful!")
@@ -1421,16 +1695,43 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
             return False
 
         finally:
+            login_stop_event.set()
+            for event in attempt_events:
+                event.set()
+            for tab in list(context.pages):
+                try:
+                    tab.close(run_before_unload=False)
+                except PlaywrightError:
+                    pass
             context.close()
 
 
-def _save_session(context) -> None:
-    """Persist browser cookies to disk so the session survives between runs."""
+def _save_session(context) -> bool:
+    """Atomically persist verified browser cookies for later runs."""
+    temp_path = None
     try:
         cookies = context.cookies()
-        (Path(SESSION_DIR) / "cookies.json").write_text(json.dumps(cookies))
+        target = Path(SESSION_DIR) / "cookies.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=target.parent,
+            prefix=f".{target.name}.", suffix=".tmp", delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            json.dump(cookies, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, target)
+        return True
     except Exception as e:
         print(f"   ⚠️  Could not save session cookies: {e}")
+        return False
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 async def _require_session_async(cdp_url: str = None) -> bool:

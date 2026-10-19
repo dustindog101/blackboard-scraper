@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -201,7 +202,7 @@ HELP_GUIDES: Dict[str, str] = {
 2. One-Time Setup & Smart Automated SSO Login:
    $ bb login
    - If no config or login is detected, an interactive TUI setup wizard prompts for UMBC credentials.
-   - Automatically intercepts incoming macOS Duo 2FA SMS passcodes in <3ms.
+   - Automatically captures Duo SMS passcodes when macOS Messages access is available.
    - Saves cookies for seamless headless operation.
    - Accepts mode variants: `bb login auto`, `bb login --auto`, `bb login --force`.
 
@@ -730,7 +731,9 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
     login_p.add_argument("--force", "-f", action="store_true", help="Force re-login even if active session exists")
     login_p.add_argument("--username", "-u", help="Username for login (prompts if omitted)")
     login_p.add_argument("--password", "-p", help="Password for login (prompts if omitted)")
-    login_p.add_argument("--passcode", "--duo-passcode", dest="duo_passcode", help="Provide 6-digit Duo SMS passcode directly via CLI")
+    login_p.add_argument("--passcode", "--duo-passcode", dest="duo_passcode", help="Provide a 6–8 digit Duo SMS passcode directly via CLI")
+    login_p.add_argument("--code-file", dest="code_file", metavar="PATH", help="Start SSO once, send the Duo SMS, print WAITING_FOR_CODE, then poll PATH for the code (deleted after reading)")
+    login_p.add_argument("--timeout", dest="code_timeout", type=float, default=300.0, help="Seconds to wait for the --code-file code (default: 300)")
 
     subparsers.add_parser(
         "logout",
@@ -1240,19 +1243,30 @@ async def main_async(args: argparse.Namespace) -> None:
         username = getattr(args, "username", None)
         password = getattr(args, "password", None)
 
-        if is_manual:
+        code_file = getattr(args, "code_file", None)
+        if is_manual and not code_file:
             await asyncio.to_thread(login, force_flag, username, password, cdp)
         else:
-            await asyncio.to_thread(
-                login_auto,
-                username=username,
-                password=password,
-                headless=headless,
-                cdp_url=cdp,
-                auto_exp=True,
-                force=force_flag,
-                passcode=getattr(args, "duo_passcode", None),
-            )
+            cancel_event = threading.Event()
+            try:
+                success = await asyncio.to_thread(
+                    login_auto,
+                    username=username,
+                    password=password,
+                    headless=headless,
+                    cdp_url=cdp,
+                    auto_exp=True,
+                    force=force_flag,
+                    passcode=getattr(args, "duo_passcode", None),
+                    cancel_event=cancel_event,
+                    code_file=code_file,
+                    code_timeout=getattr(args, "code_timeout", 300.0),
+                )
+            except asyncio.CancelledError:
+                cancel_event.set()
+                raise
+            if not success:
+                raise SystemExit(1)
         return
 
     if subcmd == "logout" or getattr(args, "logout", False):
@@ -1808,7 +1822,11 @@ def main() -> None:
         sys.exit(1)
 
     args = _parse_args()
-    asyncio.run(main_async(args))
+    try:
+        asyncio.run(main_async(args))
+    except KeyboardInterrupt:
+        print("\nCancelled.", file=sys.stderr)
+        raise SystemExit(130) from None
 
 
 if __name__ == "__main__":
