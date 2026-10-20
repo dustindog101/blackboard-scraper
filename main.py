@@ -25,6 +25,7 @@ if sys.platform == "win32":
         pass
 
 from core.config import BLACKBOARD_BASE, load_courses, save_courses
+from core.gradebook import course_label
 from core.export_json import build_composite_schema, build_export_doc
 from core.session import _launch_context, _require_session, _require_session_async, check_session_async, login, login_auto, quick_check_session_http
 from core.async_engine import AsyncSessionManager, AsyncCourseWorkerPool, EngineConfig, TaskProfile, get_optimal_concurrency
@@ -38,7 +39,7 @@ from scrapers.discussions import (
     scrape_discussions,
     scrape_discussions_http,
 )
-from scrapers.grades import save_grades, scrape_grades_async
+from scrapers.grades import SessionExpired, fetch_gradebooks_async, format_grades_text, grades_json, save_grades
 from scrapers.profile import save_profile, scrape_profile_async
 from scrapers.briefing import run_briefing_async, format_briefing_cli
 from scrapers.outline import (
@@ -57,7 +58,7 @@ from scrapers.assignments import (
 )
 from scrapers.quiz import scrape_assessment_attempt_async, save_assessment_attempt, format_assessment_attempt_cli
 from scrapers.assignment_view import prepare_assignment_view, format_assignment_view
-from scrapers.due_dates import aggregate_due_dates_async, save_due_dates, format_due_dates_table
+from scrapers.due_dates import due_report_async, format_calendar_list, format_due_dates_table, public_item, save_due_dates
 from scrapers.search import find_items_async, grab_item_async
 
 
@@ -1353,12 +1354,16 @@ async def main_async(args: argparse.Namespace) -> None:
     # --- briefing ---
     if subcmd in ("briefing", "brief") or getattr(args, "briefing", False):
         concurrency = get_optimal_concurrency(TaskProfile.MEDIUM, getattr(args, "concurrency", None))
-        bundle = await run_briefing_async(
-            headless=headless,
-            cdp_url=cdp,
-            write_markdown=getattr(args, "md", False),
-            concurrency=concurrency,
-        )
+        try:
+            bundle = await run_briefing_async(
+                headless=headless,
+                cdp_url=cdp,
+                write_markdown=getattr(args, "md", False),
+                concurrency=concurrency,
+            )
+        except SessionExpired as e:
+            print(f"❌ {e}", file=sys.stderr)
+            sys.exit(1)
 
         if getattr(args, "telegram", False):
             try:
@@ -1388,26 +1393,24 @@ async def main_async(args: argparse.Namespace) -> None:
     if subcmd == "due" or window is not None:
         if not window:
             window = "7d"
-        concurrency = get_optimal_concurrency(TaskProfile.MEDIUM, getattr(args, "concurrency", None))
-        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=concurrency))
-        await session_manager.initialize()
         try:
-            async with session_manager.acquire_page() as page:
-                items = await aggregate_due_dates_async(
-                    page,
-                    courses,
-                    window_filter=window,
-                    exclude_completed=getattr(args, "exclude_completed", False),
-                )
-                if getattr(args, "md", False):
-                    save_due_dates(items, window_filter=window)
-        finally:
-            await session_manager.close()
+            report = await due_report_async(
+                None, courses, window_filter=window,
+                exclude_completed=getattr(args, "exclude_completed", False),
+            )
+        except SessionExpired as e:
+            print(f"❌ {e}", file=sys.stderr)
+            sys.exit(1)
+        except ValueError as e:
+            print(f"❌ {e}", file=sys.stderr)
+            sys.exit(2)
+        if getattr(args, "md", False):
+            save_due_dates(report["items"], window_filter=window)
 
         if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
-            _emit_json(args, items)
+            _emit_json(args, [public_item(e) for e in report["items"]])
         else:
-            print(format_due_dates_table(items, window_filter=window))
+            print(format_due_dates_table(report["items"], window_filter=window, notes=report["notes"], overdue=report["overdue"]))
         return
 
     # --- outline ---
@@ -1678,44 +1681,24 @@ async def main_async(args: argparse.Namespace) -> None:
             print("❌ No courses configured. Run 'bb courses discover' first.", file=sys.stderr)
             return
 
-        concurrency = get_optimal_concurrency(TaskProfile.LIGHT, getattr(args, "concurrency", None))
-        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=concurrency))
-        await session_manager.initialize()
-        raw_gr: dict[str, list[dict]] = {}
+        target_dict = {cid: courses.get(cid, cid) for cid in target_cids}
         try:
-            pool = AsyncCourseWorkerPool(session_manager, task_profile=TaskProfile.LIGHT)
-            async def _worker(cid, cname, page):
-                data = await scrape_grades_async(cid, page)
-                if getattr(args, "md", False):
-                    save_grades(data, cid)
-                return data
-
-            target_dict = {cid: courses.get(cid, cid) for cid in target_cids}
-            raw_gr = await pool.execute_task_per_course(target_dict, _worker)
-        finally:
-            await session_manager.close()
+            results = await fetch_gradebooks_async(target_dict)
+        except SessionExpired as e:
+            print(f"❌ {e}", file=sys.stderr)
+            sys.exit(1)
+        books = [r for r in results.values() if not r.get("error")]
+        skipped = [courses.get(cid, cid) for cid, r in results.items() if r.get("error")]
+        if getattr(args, "md", False):
+            for book in books:
+                save_grades(book, book["course_id"])
+        for name in skipped:
+            print(f"⚠️ {course_label(name)}: gradebook not visible to students, skipped", file=sys.stderr)
 
         if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
-            formatted_json = [
-                {
-                    "course_id": cid,
-                    "course_name": courses.get(cid, cid),
-                    "grades": data if isinstance(data, list) else [],
-                }
-                for cid, data in raw_gr.items()
-            ]
-            _emit_json(args, formatted_json)
+            _emit_json(args, grades_json(books))
         else:
-            for cid, data in raw_gr.items():
-                cname = courses.get(cid, cid)
-                print(f"\n🎓 Grades: {cname}")
-                print("━" * 50)
-                if not data:
-                    print("  (No graded items found)")
-                else:
-                    for g in data:
-                        due = f" (Due: {g['dueDate']})" if g.get("dueDate") else ""
-                        print(f"• {g['name']}: {g.get('grade','Not graded')}{due} [{g.get('status','')}]")
+            print(format_grades_text(books))
         return
 
     # --- calendar ---
@@ -1734,7 +1717,7 @@ async def main_async(args: argparse.Namespace) -> None:
         if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
             _emit_json(args, calendar)
         else:
-            print(format_due_dates_table(calendar, window_filter="calendar"))
+            print(format_calendar_list(calendar))
         return
 
     # --- activity ---

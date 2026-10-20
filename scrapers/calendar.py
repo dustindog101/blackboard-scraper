@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from core.config import BLACKBOARD_BASE, SESSION_DIR, load_courses
 from core.output import ensure_output_dir
+from core.time import to_iso
 from core.async_engine import AdaptiveDOM
 
 logger = logging.getLogger("blackboard.scrapers.calendar")
@@ -90,6 +91,9 @@ def scrape_calendar_api(course_id: Optional[str] = None) -> Optional[List[Dict[s
             "due": human_due,
             "due_date": human_due,
             "raw_due": iso_due,
+            "due_at": to_iso(iso_due),
+            "course_id": cal_id,
+            "source_id": item.get("itemSourceId"),
             "id": item.get("id"),
             "type": item.get("type", "CalendarItem"),
         })

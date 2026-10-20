@@ -109,19 +109,20 @@ run `bb discover` on a fresh installation when needed.
 ## 📚 Academic Scrapers
 
 ### `bb briefing`
-**Description:** Master aggregation command. Concurrently queries global activity stream, calendar due dates, course announcements, and gradebooks across all courses in parallel (<6s).
-- `--json`: Emits complete standardized v2 JSON schema to stdout.
+**Description:** REST-only morning summary (about 1 s, no browser on the happy path): overdue work, due in the next 48 hours, later this week, a grade line per course (official or calculated), and announcements from the last 7 days. Built from the same Gradable Item status model as `grades`, `due` and `assignments`.
+- `--json`: Emits the v2 composite document. Each course has `overall` (same shape as `grades --json`) and `grades` (items with `due_at`, `status`, `score`, `possible`, `percent`); `global.overdue` and `global.urgent` hold the deadline rows.
 - `--out <file>`: Exports JSON directly to specified filepath.
 - `--telegram`: Dispatches formatted summary card to configured Telegram chat.
 - `--md`, `--save`: Saves Markdown report to `output/briefing.md`.
+- An expired session prints `Session expired, run `bb login`.` and exits 1.
 
 ### `bb due [WINDOW]`
-**Description:** Cross-source deadline aggregator combining Blackboard's global calendar items and per-course gradebooks in <200ms. Deduplicates items and applies relative window filters.
-- `WINDOW`: Positional filter, e.g. `7d` (default), `14d`, `30d`, `150d`, `overdue`, `all`.
-  - Example: `bb due 14d`
-  - Example: `bb due overdue`
-- `--exclude-completed`: Excludes assignments already submitted or graded.
-- `--json`: Emits structured deadline JSON.
+**Description:** Deadlines from each course's gradebook (the status model) reconciled with Blackboard's calendar. Items are keyed by course + title, grouped by day, in local time with the zone (`Tue Oct 21 11:59 PM EDT`).
+- `WINDOW`: `7d` (default), `14d`, `30d`, any `Nd`, `overdue`, `all`.
+  - `overdue`: dated, past and not completed (graded, needs grading, submitted and exempt count as completed).
+  - `all`: everything, plus `No due date` and `Already done` groups. Undated items appear only here.
+- `--exclude-completed`: Hides completed items.
+- `--json`: List of `{title, course_id, course, due_at (ISO-8601 UTC), status, completed, score, possible, percent, category, source}`.
 - Legacy: `bb --due 7d`, `bb --upcoming 10` (maps to `bb due 10d`).
 
 ### `bb calendar [COURSE]`
@@ -138,11 +139,14 @@ run `bb discover` on a fresh installation when needed.
 - `--json`: Emits structured JSON.
 
 ### `bb grades [COURSE]`
-**Description:** Fast REST API gradebook extractor (<150ms per course) retrieving assessment titles, points possible, earned scores, due dates, and running grades.
+**Description:** Per course: the overall grade, then every Gradable Item sorted by due date with score, percent, status and due time (local, with zone). Three REST requests per course (columns, your whole gradebook, grade schemas), courses in parallel, no browser.
+- Overall is labeled `official` when the course has a Calculated gradebook column the student can see (`Overall Grade`, `Total Points Earned`; the percent uses the points graded so far), otherwise `calculated` (sum score / sum possible over graded, non-exempt, included items with points). The letter comes from the course's Tabular grade schema. `N of M graded` counts items that count toward the total.
+- Statuses: `graded`, `needs_grading`, `submitted`, `not_submitted`, `exempt`, `unknown`. A gradable discussion marked as handed in is only believed after your own posts are found.
 - `COURSE`: Positional course code or keyword (e.g. `bb grades IS410`).
 - `-c <COURSE>`: Named course flag.
-- `--all`: Scrape all courses in parallel.
-- `--json`: Emits structured JSON.
+- `--all`: All courses.
+- `--json`: `[{course_id, course_name, overall:{source,label,score,possible,percent,letter,graded,total}, items:[{name,category,due_at,status,score,possible,percent,feedback}], excluded:[{name,reason}]}]`.
+- An expired session prints `Session expired, run `bb login`.` and exits 1.
 
 ### `bb outline [COURSE]`
 **Description:** Traverses course outline hierarchy, learning modules, syllabi, documents, and attachments.

@@ -142,6 +142,7 @@ def build_composite_schema(
             "syllabus": syllabus,
             "outline": outline,
             "assignments": assigns,
+            "overall": cdata.get("overall"),
             "grades": grades,
             "announcements": anns,
         })
@@ -162,6 +163,8 @@ def build_composite_schema(
         "global": {
             "activity_stream": activity_data,
             "calendar_due_dates": calendar_data,
+            "overdue": bundle.get("overdue", []),
+            "urgent": bundle.get("urgent", []),
         },
     }
 

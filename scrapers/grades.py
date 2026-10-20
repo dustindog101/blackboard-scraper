@@ -1,100 +1,66 @@
+"""Gradebook command: per-course overall grade plus Gradable Items, from the shared status model.
+
+REST only on the happy path (`core.gradebook`); the browser scraper is used only for courses whose REST
+call failed for a reason other than an expired session, and its session is created lazily.
+"""
 import asyncio
-import json
 import logging
+import re
 import sys
-import urllib.error
-import urllib.request
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from core.config import BLACKBOARD_BASE, SESSION_DIR, load_courses
-from core.output import ensure_output_dir
+from core.config import BLACKBOARD_BASE, load_courses
 from core.async_engine import AdaptiveDOM
+from core.gradebook import (
+    EXPIRED, GRADED, NOT_SUBMITTED, UNAVAILABLE, UNKNOWN, NEEDS_GRADING, SUBMITTED, EXEMPT,
+    course_label, course_title, fetch_gradebooks, public_view,
+)
+from core.output import ensure_output_dir
+from core.time import format_local, parse_datetime, to_iso
 
 logger = logging.getLogger("blackboard.scrapers.grades")
 
-
-def get_cookie_header() -> Optional[str]:
-    """Extract Cookie header string from .session/cookies.json."""
-    cookie_file = SESSION_DIR / "cookies.json"
-    if not cookie_file.exists():
-        return None
-    try:
-        cookies_list = json.loads(cookie_file.read_text())
-        return "; ".join([
-            f"{c['name']}={c['value']}"
-            for c in cookies_list
-            if "blackboard.umbc.edu" in c.get("domain", "") or "umbc.edu" in c.get("domain", "")
-        ])
-    except Exception:
-        return None
+EXPIRED_MESSAGE = "Session expired, run `bb login`."
 
 
-def _format_grade_due(iso_str: str) -> str:
-    """Format ISO UTC timestamp into clean date string (e.g. 8/30/26)."""
-    if not iso_str:
-        return ""
-    try:
-        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00")).astimezone()
-        return dt.strftime("%-m/%-d/%y")
-    except Exception:
-        return iso_str
+class SessionExpired(Exception):
+    pass
 
 
-def scrape_grades_api(course_id: str) -> Optional[List[Dict[str, Any]]]:
-    """
-    High-speed HTTP REST API gradebook scraper (<150ms).
-    Queries GET /learn/api/public/v2/courses/{course_id}/gradebook/columns.
-    """
-    cookie_header = get_cookie_header()
-    if not cookie_header:
-        return None
+def _cookie() -> Optional[str]:
+    from scrapers.quiz import _get_cookie_header
+    return _get_cookie_header()
 
-    headers = {
-        "Cookie": cookie_header,
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-    }
 
-    url = f"{BLACKBOARD_BASE}/learn/api/public/v2/courses/{course_id}/gradebook/columns"
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=7) as resp:
-            if resp.status != 200:
-                return None
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        if e.code in (401, 403, 404):
-            # Course is closed or unavailable -> return empty list immediately
-            return []
-        logger.debug(f"Gradebook HTTP {e.code} for {course_id}: {e}")
-        return None
-    except Exception as e:
-        logger.debug(f"Gradebook network error for {course_id}: {e}")
-        return None
+# ---------------------------------------------------------------------------
+# Browser fallback (only for courses REST could not answer)
+# ---------------------------------------------------------------------------
 
-    raw_cols = data.get("results", [])
-    extracted: List[Dict[str, Any]] = []
+_UI_STATUS = (
+    ("needs grading", NEEDS_GRADING), ("not submitted", NOT_SUBMITTED), ("missing", NOT_SUBMITTED),
+    ("submitted", SUBMITTED), ("graded", GRADED), ("exempt", EXEMPT),
+)
 
-    for col in raw_cols:
-        name = col.get("name", "Untitled").strip()
-        # Skip internal calculation containers if course has actual items
-        if name.lower() in ("overall grade", "total", "weighted total") and len(raw_cols) > 1:
-            continue
 
-        due_iso = col.get("grading", {}).get("due") or ""
-        due_formatted = _format_grade_due(due_iso)
-        pts = col.get("score", {}).get("possible")
-
-        extracted.append({
-            "name": name,
-            "dueDate": due_formatted,
-            "status": "Unopened",
-            "grade": "--",
-            "points_possible": pts,
+def _rows_to_gradebook(course_id: str, course_name: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Shape browser-scraped rows like a REST gradebook. No overall: the browser rows carry no totals."""
+    items = []
+    for row in rows:
+        text = (row.get("status") or "").strip().lower()
+        status = next((v for k, v in _UI_STATUS if k in text), UNKNOWN)
+        nums = re.findall(r"\d+(?:\.\d+)?", row.get("grade") or "")
+        score = float(nums[0]) if nums and status == GRADED else None
+        possible = float(nums[1]) if len(nums) > 1 else None
+        items.append({
+            "name": row.get("name", "Untitled"), "category": "other", "due_at": to_iso(row.get("dueDate")),
+            "status": status, "score": score, "possible": possible,
+            "percent": round(score / possible * 100, 1) if score is not None and possible else None,
+            "feedback": None, "_counts": False, "_column_id": None, "_content_id": None,
         })
-
-    return extracted
+    overall = {"source": "none", "label": None, "score": None, "possible": None, "percent": None,
+               "letter": None, "graded": sum(i["status"] == GRADED for i in items), "total": len(items)}
+    return {"course_id": course_id, "course_name": course_name, "overall": overall, "items": items, "excluded": []}
 
 
 async def scrape_grades_playwright_async(course_id: str, page: Any) -> List[Dict[str, Any]]:
@@ -102,12 +68,12 @@ async def scrape_grades_playwright_async(course_id: str, page: Any) -> List[Dict
     url = f"{BLACKBOARD_BASE}/ultra/courses/{course_id}/grades"
     courses = load_courses()
     name = courses.get(course_id, course_id)
-    print(f"🎓 Scraping grades for {name} (Playwright fallback)...")
+    print(f"🎓 Scraping grades for {name} (Playwright fallback)...", file=sys.stderr)
 
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
     except Exception as e:
-        print(f"   ⚠️ Navigation error for {name}: {e}")
+        print(f"   ⚠️ Navigation error for {name}: {e}", file=sys.stderr)
         return []
 
     # Wait for React/MUI table or empty state
@@ -123,7 +89,7 @@ async def scrape_grades_playwright_async(course_id: str, page: Any) -> List[Dict
     )
 
     if not matched_sel or "You can't access" in matched_sel:
-        print("   ℹ️  Course is currently unavailable or closed.")
+        print("   ℹ️  Course is currently unavailable or closed.", file=sys.stderr)
         return []
 
     grades: List[Dict[str, Any]] = []
@@ -174,79 +140,144 @@ async def scrape_grades_playwright_async(course_id: str, page: Any) -> List[Dict
         else:
             break
 
-    print(f"   ✅ Extracted {len(grades)} graded items from {name}.")
+    print(f"   ✅ Extracted {len(grades)} graded items from {name}.", file=sys.stderr)
     return grades
 
 
+async def _browser_fallback(failed: Dict[str, str], page: Optional[Any]) -> Dict[str, Dict[str, Any]]:
+    print(f"⚠️ HTTP Gradebook API unavailable for {len(failed)} course(s); falling back to Playwright browser scraper...", file=sys.stderr)
+
+    async def run(p: Any) -> Dict[str, Dict[str, Any]]:
+        out = {}
+        for cid, name in failed.items():
+            out[cid] = _rows_to_gradebook(cid, name, await scrape_grades_playwright_async(cid, p))
+        return out
+
+    if page is not None:
+        return await run(page)
+    from core.async_engine import AsyncSessionManager, EngineConfig
+    manager = AsyncSessionManager(EngineConfig(headless=True))
+    await manager.initialize()
+    try:
+        async with manager.acquire_page() as p:
+            return await run(p)
+    finally:
+        await manager.close()
+
+
+async def fetch_gradebooks_async(courses: Dict[str, str], page: Optional[Any] = None) -> Dict[str, Dict[str, Any]]:
+    """Gradebooks for all `courses`, concurrently, keyed by course id.
+
+    Raises SessionExpired on a 401. Courses closed or hidden from students (403/404) come back as `{"error": ...}`.
+    """
+    cookie = _cookie()
+    if not cookie:
+        raise SessionExpired(EXPIRED_MESSAGE)
+    results = await asyncio.to_thread(fetch_gradebooks, courses, cookie)
+    if any(r.get("error") == EXPIRED for r in results.values()):
+        raise SessionExpired(EXPIRED_MESSAGE)
+    failed = {cid: courses[cid] for cid, r in results.items() if r.get("error") == UNAVAILABLE}
+    if failed:
+        results.update(await _browser_fallback(failed, page))
+    return results
+
+
 async def scrape_grades_async(course_id: str, page: Optional[Any] = None) -> List[Dict[str, Any]]:
-    """
-    Unified gradebook scraper.
-    Primary: Fast HTTP REST API endpoint (<150ms).
-    Fallback: Playwright browser DOM scraper if API fails.
-    """
-    courses = load_courses()
-    name = courses.get(course_id, course_id)
-
-    try:
-        api_results = await asyncio.to_thread(scrape_grades_api, course_id)
-        if api_results is not None:
-            return api_results
-    except Exception as e:
-        logger.debug(f"Gradebook HTTP API exception for {name}: {e}")
-
-    # Fallback path: Playwright browser scraper
-    print(f"⚠️ HTTP Gradebook API unavailable for {name}; falling back to Playwright browser scraper...", file=sys.stderr)
-    if page:
-        return await scrape_grades_playwright_async(course_id, page)
-    else:
-        from core.async_engine import AsyncSessionManager, EngineConfig
-        session_manager = AsyncSessionManager(EngineConfig(headless=True))
-        await session_manager.initialize()
-        try:
-            async with session_manager.acquire_page() as p:
-                return await scrape_grades_playwright_async(course_id, p)
-        finally:
-            await session_manager.close()
-
-
-def scrape_grades(course_id: str, page: Any) -> list[dict]:
-    """Synchronous fallback wrapper."""
-    import asyncio
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                return pool.submit(asyncio.run, scrape_grades_async(course_id, page)).result()
-        return asyncio.run(scrape_grades_async(course_id, page))
-    except Exception:
+    """Legacy per-course list (Telegram, menubar): `name`, `dueDate`, `status`, `grade`, plus the new status fields."""
+    name = load_courses().get(course_id, course_id)
+    book = (await fetch_gradebooks_async({course_id: name}, page)).get(course_id, {})
+    if book.get("error"):
         return []
+    return [{
+        "name": i["name"],
+        "dueDate": format_local(parse_datetime(i["due_at"])) if i["due_at"] else "",
+        "status": i["status"].replace("_", " "),
+        "grade": f"{_num(i['score'])} / {_num(i['possible'])}" if i["score"] is not None and i["possible"] else "",
+        "points_possible": i["possible"],
+        "due_at": i["due_at"],
+        "status_code": i["status"],
+    } for i in book["items"]]
 
 
-def save_grades(grades: list[dict], course_id: str):
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+def _num(value: Optional[float]) -> str:
+    return "" if value is None else f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _clip(text: str, width: int) -> str:
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def overall_line(overall: Dict[str, Any]) -> str:
+    """`94.3% A  official (Overall Grade) · 7 of 9 graded`."""
+    counts = f"{overall['graded']} of {overall['total']} graded"
+    source = overall["source"]
+    if source == "none":
+        return f"no grade yet · {counts}"
+    parts = []
+    if overall["percent"] is not None:
+        parts.append(f"{overall['percent']:g}%" + (f" {overall['letter']}" if overall["letter"] else ""))
+    elif overall["letter"]:
+        parts.append(overall["letter"])
+    if overall["score"] is not None and overall["possible"]:
+        parts.append(f"{_num(overall['score'])} / {_num(overall['possible'])} pts")
+    label = f"official: {overall['label']}" if source == "official" and overall["label"] else source
+    if source == "calculated":
+        label = "calculated from graded points"
+    return f"{'  '.join(parts) or 'no value'}  ({label}) · {counts}"
+
+
+def format_grades_text(books: List[Dict[str, Any]]) -> str:
+    out: List[str] = []
+    for book in books:
+        title = course_title(book["course_name"])
+        out.append(f"{course_label(book['course_name'])}  {title}".rstrip())
+        out.append(f"  {overall_line(book['overall'])}")
+        items = book["items"]
+        if not items:
+            out += ["  (no gradebook items)", ""]
+            continue
+        rows = []
+        for i in items:
+            due = format_local(parse_datetime(i["due_at"])) if i["due_at"] else "no due date"
+            score = f"{_num(i['score'])} / {_num(i['possible'])}" if i["score"] is not None and i["possible"] else (
+                f"{_num(i['possible'])} pts" if i["possible"] else "")
+            pct = f"{i['percent']:.1f}%" if i["percent"] is not None else ""
+            rows.append((due, _clip(i["name"], 40), score, pct, i["status"].replace("_", " ")))
+        widths = [max(len(r[c]) for r in rows) for c in range(5)]
+        for due, name, score, pct, status in rows:
+            out.append(f"  {due:<{widths[0]}}  {name:<{widths[1]}}  {score:>{widths[2]}}  {pct:>{widths[3]}}  {status}".rstrip())
+        notes = []
+        with_feedback = sum(1 for i in items if i["feedback"])
+        if with_feedback:
+            notes.append(f"{with_feedback} with instructor feedback (see --json)")
+        if book["excluded"]:
+            notes.append("not counted: " + ", ".join(f"{e['name']} ({e['reason']})" for e in book["excluded"][:3])
+                         + (f" +{len(book['excluded']) - 3} more" if len(book["excluded"]) > 3 else ""))
+        out += [f"  {n}" for n in notes] + [""]
+    return "\n".join(out).rstrip()
+
+
+def grades_json(books: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [public_view(b) for b in books]
+
+
+def save_grades(book: Dict[str, Any], course_id: str):
     out_dir = ensure_output_dir("grades")
-    courses = load_courses()
-    name = courses.get(course_id, course_id)
     filepath = out_dir / f"{course_id}.md"
-
     lines = [
-        f"# Grades: {name}",
-        f"_Course ID: {course_id}_",
+        f"# Grades: {book['course_name']}",
         f"_Scraped: {datetime.now().strftime('%Y-%m-%d %H:%M')}_",
-        "", "---", "",
+        "", f"**Overall:** {overall_line(book['overall'])}", "",
+        "| Due | Item | Score | % | Status |", "|---|---|---|---|---|",
     ]
-
-    if not grades:
-        lines.append("_No grades found._")
-    else:
-        lines.append("| Assignment | Due Date | Status | Grade |")
-        lines.append("|---|---|---|---|")
-        for g in grades:
-            safe_name = g['name'].replace('|', '-')
-            safe_due = g['dueDate'].replace('|', '-')
-            safe_status = g['status'].replace('|', '-')
-            safe_grade = g['grade'].replace('|', '-')
-            lines.append(f"| {safe_name} | {safe_due} | {safe_status} | {safe_grade} |")
-
+    for i in book["items"]:
+        due = format_local(parse_datetime(i["due_at"])) if i["due_at"] else "no due date"
+        score = f"{_num(i['score'])} / {_num(i['possible'])}" if i["score"] is not None and i["possible"] else ""
+        pct = f"{i['percent']:.1f}%" if i["percent"] is not None else ""
+        lines.append(f"| {due} | {i['name'].replace('|', '-')} | {score} | {pct} | {i['status'].replace('_', ' ')} |")
     filepath.write_text("\n".join(lines))
-    print(f"   💾 Saved to: {filepath.name}")
+    print(f"   💾 Saved to: {filepath.name}", file=sys.stderr)
