@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from core.config import BLACKBOARD_BASE, load_courses
 from core.output import ensure_output_dir
 from core.async_engine import AdaptiveDOM
-from core.gradebook import MAX_CONNECTIONS, course_label, due_iso, is_calculated, item_status, status_text, student_records
+from core.gradebook import MAX_CONNECTIONS, course_label, default_api_get, due_iso, is_calculated, item_status, status_text, student_records
 from core.time import format_local, parse_datetime, to_iso
 from scrapers.quiz import _api_get, _get_cookie_header, _clean_html_text
 
@@ -18,8 +17,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("blackboard.scrapers.assignments")
 
-# Shared by all courses fetched at once.
-_SLOTS = threading.BoundedSemaphore(MAX_CONNECTIONS)
 
 
 def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, Any]]]:
@@ -37,12 +34,11 @@ def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, An
         return None
 
     # Content details (one request per item) and the student's records are independent: fetch them together.
-    # Total requests in flight stay below the server's stall threshold (see core.gradebook.MAX_CONNECTIONS).
+    # core.rest caps requests in flight (the server stalls above ~6).
     content_ids = [c["contentId"] for c in cols["results"] if c.get("contentId") and not is_calculated(c)]
 
     def _detail(content_id: str):
-        with _SLOTS:
-            return _api_get(f"/learn/api/v1/courses/{course_id}/contents/{content_id}?expand=gradebookCategory", cookie_header)
+        return default_api_get(f"/learn/api/v1/courses/{course_id}/contents/{content_id}?expand=gradebookCategory", cookie_header)
 
     with ThreadPoolExecutor(max_workers=MAX_CONNECTIONS) as pool:
         records_future = pool.submit(student_records, course_id, cols["results"], cookie_header)
