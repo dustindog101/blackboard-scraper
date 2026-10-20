@@ -41,6 +41,19 @@ class GradebookError(Exception):
         self.kind = kind
 
 
+_STATUS_TEXT = {
+    GRADED: "✓ graded", NEEDS_GRADING: "submitted ✓ (awaiting grade)", SUBMITTED: "submitted ✓",
+    NOT_SUBMITTED: "not submitted", EXEMPT: "exempt", UNKNOWN: "status unknown",
+}
+
+
+def status_text(status: str, item: Optional[Dict[str, Any]] = None) -> str:
+    """Student-facing wording for terminal output. JSON keeps the enum values."""
+    if status == GRADED and item is not None and not item.get("possible"):
+        return "✓ graded (no points)"
+    return _STATUS_TEXT.get(status, "status unknown")
+
+
 def default_api_get(path: str, cookie: str) -> Optional[Dict[str, Any]]:
     from scrapers.quiz import _api_get
     return _api_get(path, cookie)

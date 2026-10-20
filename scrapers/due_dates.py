@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.gradebook import COMPLETED, FORBIDDEN, NOT_FOUND, UNKNOWN, course_label
+from core.gradebook import COMPLETED, FORBIDDEN, NOT_FOUND, UNKNOWN, course_label, status_text
 from core.output import ensure_output_dir
 from core.time import format_clock, format_local, local_zone, parse_datetime
 from scrapers.calendar import scrape_calendar_async
@@ -151,7 +151,7 @@ def public_item(e: Dict[str, Any], legacy: bool = False) -> Dict[str, Any]:
     out = {k: v for k, v in e.items() if not k.startswith("_")}
     if legacy:
         out["due_date"] = format_local(e["_dt"]) if e["_dt"] else "TBD"
-        out["status"] = e["status"].replace("_", " ")
+        out["status"] = status_text(e["status"], e)
     return out
 
 
@@ -178,7 +178,7 @@ def rows(items: List[Dict[str, Any]], full_date: bool) -> List[str]:
         when = ("TBD" if dt is None else format_local(dt) if full_date else format_clock(dt) + f" {dt.astimezone(local_zone()):%Z}")
         pts = (f"{_num(e['score'])} / {_num(e['possible'])}" if e["score"] is not None and e["possible"]
                else f"{_num(e['possible'])} pts" if e["possible"] else "")
-        cells.append((when, e["course"], _clip(e["title"], 44), pts, e["status"].replace("_", " ")))
+        cells.append((when, e["course"], _clip(e["title"], 44), pts, status_text(e["status"], e)))
     widths = [max(len(c[i]) for c in cells) for i in range(5)]
     return [f"  {w:<{widths[0]}}  {c:<{widths[1]}}  {t:<{widths[2]}}  {p:>{widths[3]}}  {s}".rstrip() for w, c, t, p, s in cells]
 
@@ -187,7 +187,9 @@ def format_due_dates_table(items: List[Dict[str, Any]], window_filter: str = "7d
     """Grouped text view of `select()` output (internal entries, not public dicts)."""
     kind, days = parse_window(window_filter)
     title = {"overdue": "Overdue", "all": "All deadlines"}.get(kind) or f"Due in the next {int(days)} days"
-    lines = [f"{title} · {len(items)} item{'s' if len(items) != 1 else ''}"]
+    done = sum(1 for e in items if e["completed"])
+    count = f"{len(items) - done} open" + (f", {done} done" if done else "")
+    lines = [f"{title} · {count if items else 'none'}"]
     now = datetime.now(local_zone())
     today = now.date()
     dated = [e for e in items if e["_dt"] is not None]
@@ -206,7 +208,7 @@ def format_due_dates_table(items: List[Dict[str, Any]], window_filter: str = "7d
         current = None
         group: List[Dict[str, Any]] = []
         groups = []
-        for e in upcoming:
+        for e in sorted(upcoming, key=lambda e: (e["_dt"].astimezone(local_zone()).date(), e["completed"], e["_dt"])):
             header = _day_header(e["_dt"], today)
             if header != current:
                 group = []
@@ -232,7 +234,7 @@ def save_due_dates(items: List[Dict[str, Any]], window_filter: str = "7d") -> Pa
     lines = [f"# Due ({window_filter})", f"_Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}_", "", "| Course | Item | Due | Status |", "|---|---|---|---|"]
     for e in items:
         due = format_local(e["_dt"]) if e["_dt"] else "TBD"
-        lines.append(f"| {e['course']} | {e['title'].replace('|', '-')} | {due} | {e['status'].replace('_', ' ')} |")
+        lines.append(f"| {e['course']} | {e['title'].replace('|', '-')} | {due} | {status_text(e['status'], e)} |")
     filepath.write_text("\n".join(lines))
     print(f"   💾 Saved to: {filepath.name}", file=sys.stderr)
     return filepath

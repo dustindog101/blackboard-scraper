@@ -14,14 +14,14 @@ from core.config import BLACKBOARD_BASE, load_courses
 from core.async_engine import AdaptiveDOM
 from core.gradebook import (
     EXPIRED, GRADED, NOT_SUBMITTED, UNAVAILABLE, UNKNOWN, NEEDS_GRADING, SUBMITTED, EXEMPT,
-    course_label, course_title, fetch_gradebooks, public_view,
+    course_label, course_title, fetch_gradebooks, public_view, status_text,
 )
 from core.output import ensure_output_dir
 from core.time import format_local, parse_datetime, to_iso
 
 logger = logging.getLogger("blackboard.scrapers.grades")
 
-EXPIRED_MESSAGE = "Session expired, run `bb login`."
+EXPIRED_MESSAGE = "Session expired — run `bb login`"
 
 
 class SessionExpired(Exception):
@@ -191,7 +191,7 @@ async def scrape_grades_async(course_id: str, page: Optional[Any] = None) -> Lis
     return [{
         "name": i["name"],
         "dueDate": format_local(parse_datetime(i["due_at"])) if i["due_at"] else "",
-        "status": i["status"].replace("_", " "),
+        "status": status_text(i["status"], i),
         "grade": f"{_num(i['score'])} / {_num(i['possible'])}" if i["score"] is not None and i["possible"] else "",
         "points_possible": i["possible"],
         "due_at": i["due_at"],
@@ -230,25 +230,52 @@ def overall_line(overall: Dict[str, Any]) -> str:
     return f"{'  '.join(parts) or 'no value'}  ({label}) · {counts}"
 
 
-def format_grades_text(books: List[Dict[str, Any]]) -> str:
+def _item_row(i: Dict[str, Any]) -> tuple:
+    due = format_local(parse_datetime(i["due_at"])) if i["due_at"] else "no due date"
+    score = f"{_num(i['score'])} / {_num(i['possible'])}" if i["score"] is not None and i["possible"] else (
+        f"{_num(i['possible'])} pts" if i["possible"] else "")
+    pct = f"{i['percent']:.1f}%" if i["percent"] is not None else ""
+    return (due, _clip(i["name"], 40), score, pct, status_text(i["status"], i))
+
+
+def summary_lines(pairs: List[tuple]) -> List[str]:
+    """One aligned line per course: `ECON 122  83.5% B  official    22 of 31 graded`. pairs = [(label, overall)]."""
+    cells = []
+    for label, o in pairs:
+        if o["source"] == "none":
+            value, source = "no grade yet", ""
+        else:
+            value = ((f"{o['percent']:g}%" if o["percent"] is not None else "") + (f" {o['letter']}" if o["letter"] else "")).strip() or "n/a"
+            source = o["source"]
+        cells.append((label, value, source, f"{o['graded']} of {o['total']} graded"))
+    widths = [max(len(c[i]) for c in cells) for i in range(3)]
+    return [f"{a:<{widths[0]}}  {b:<{widths[1]}}  {c:<{widths[2]}}  {d}".rstrip() for a, b, c, d in cells]
+
+
+def format_grades_summary(books: List[Dict[str, Any]]) -> str:
+    return "\n".join(summary_lines([(course_label(b["course_name"]), b["overall"]) for b in books]))
+
+
+def format_grades_text(books: List[Dict[str, Any]], summary: bool = False, summary_only: bool = False) -> str:
+    """Per-course detail with column widths shared across every course; optional summary table first."""
+    if not books:
+        return "No grades found."
     out: List[str] = []
+    if summary or summary_only:
+        out += ["GRADES", ""] + ["  " + line for line in format_grades_summary(books).splitlines()]
+        if summary_only:
+            return "\n".join(out)
+        out.append("")
+    all_rows = [_item_row(i) for b in books for i in b["items"]]
+    widths = [max((len(r[c]) for r in all_rows), default=0) for c in range(5)]
     for book in books:
-        title = course_title(book["course_name"])
-        out.append(f"{course_label(book['course_name'])}  {title}".rstrip())
+        out.append(f"{course_label(book['course_name'])}  {course_title(book['course_name'])}".rstrip())
         out.append(f"  {overall_line(book['overall'])}")
         items = book["items"]
         if not items:
             out += ["  (no gradebook items)", ""]
             continue
-        rows = []
-        for i in items:
-            due = format_local(parse_datetime(i["due_at"])) if i["due_at"] else "no due date"
-            score = f"{_num(i['score'])} / {_num(i['possible'])}" if i["score"] is not None and i["possible"] else (
-                f"{_num(i['possible'])} pts" if i["possible"] else "")
-            pct = f"{i['percent']:.1f}%" if i["percent"] is not None else ""
-            rows.append((due, _clip(i["name"], 40), score, pct, i["status"].replace("_", " ")))
-        widths = [max(len(r[c]) for r in rows) for c in range(5)]
-        for due, name, score, pct, status in rows:
+        for due, name, score, pct, status in (_item_row(i) for i in items):
             out.append(f"  {due:<{widths[0]}}  {name:<{widths[1]}}  {score:>{widths[2]}}  {pct:>{widths[3]}}  {status}".rstrip())
         notes = []
         with_feedback = sum(1 for i in items if i["feedback"])
@@ -278,6 +305,6 @@ def save_grades(book: Dict[str, Any], course_id: str):
         due = format_local(parse_datetime(i["due_at"])) if i["due_at"] else "no due date"
         score = f"{_num(i['score'])} / {_num(i['possible'])}" if i["score"] is not None and i["possible"] else ""
         pct = f"{i['percent']:.1f}%" if i["percent"] is not None else ""
-        lines.append(f"| {due} | {i['name'].replace('|', '-')} | {score} | {pct} | {i['status'].replace('_', ' ')} |")
+        lines.append(f"| {due} | {i['name'].replace('|', '-')} | {score} | {pct} | {status_text(i['status'], i)} |")
     filepath.write_text("\n".join(lines))
     print(f"   💾 Saved to: {filepath.name}", file=sys.stderr)

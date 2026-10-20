@@ -791,8 +791,8 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
         parents=[course_parent, output_parent, engine_parent],
         help="Gradebook and feedback",
         description="Scrape a course gradebook.",
-        epilog="Examples:\n  bb grades IS410\n  bb grades -c IS410 --json\n  bb grades --all",
-    )
+        epilog="Examples:\n  bb grades\n  bb grades --summary\n  bb grades IS410\n  bb grades -c IS410 --json\n  bb grades --all",
+    ).add_argument("--summary", action="store_true", help="Print only the one-line-per-course overall grade table")
     subparsers.add_parser(
         "announcements",
         aliases=["announce", "news"],
@@ -1698,7 +1698,7 @@ async def main_async(args: argparse.Namespace) -> None:
         if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
             _emit_json(args, grades_json(books))
         else:
-            print(format_grades_text(books))
+            print(format_grades_text(books, summary=not target_course_arg, summary_only=getattr(args, "summary", False)))
         return
 
     # --- calendar ---

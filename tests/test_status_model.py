@@ -191,7 +191,7 @@ class TestFetch(unittest.TestCase):
              patch("scrapers.grades.fetch_gradebooks", lambda c, k: real(c, k, api)):
             with self.assertRaises(grades.SessionExpired) as ctx:
                 asyncio.run(grades.fetch_gradebooks_async({"c1": "X"}))
-        self.assertEqual(str(ctx.exception), "Session expired, run `bb login`.")
+        self.assertEqual(str(ctx.exception), "Session expired — run `bb login`")
 
 
 class TestTime(unittest.TestCase):
@@ -265,12 +265,12 @@ class TestDue(unittest.TestCase):
     def test_text_shows_zone_course_label_and_status(self):
         entries = due_dates.reconcile(self.books(), [], self.COURSES)
         text = due_dates.format_due_dates_table(due_dates.select(entries, "7d", False), "7d", overdue=1)
-        self.assertIn("Due in the next 7 days · 1 item", text)
+        self.assertIn("Due in the next 7 days · 1 open", text)
         self.assertIn(local_zone().tzname(datetime.now()), text)
         for expected in ("IS 410", "not submitted", "1 overdue and not done: bb due overdue"):
             self.assertIn(expected, text)
         self.assertNotIn("_100", text)
-        self.assertIn("Overdue · 0 items", due_dates.format_due_dates_table([], "overdue"))
+        self.assertIn("Overdue · none", due_dates.format_due_dates_table([], "overdue"))
 
 
 class TestGradesOutput(unittest.TestCase):
@@ -291,12 +291,49 @@ class TestGradesOutput(unittest.TestCase):
         json.dumps(grades.grades_json([book]))
 
 
+class TestStudentWording(unittest.TestCase):
+    def test_status_text(self):
+        self.assertEqual(gb.status_text("needs_grading"), "submitted ✓ (awaiting grade)")
+        self.assertEqual(gb.status_text("graded"), "✓ graded")
+        self.assertEqual(gb.status_text("graded", {"possible": 0}), "✓ graded (no points)")
+        self.assertEqual(gb.status_text("unknown"), "status unknown")
+        self.assertEqual(gb.status_text("not_submitted"), "not submitted")
+
+    def test_due_lists_open_work_before_submitted_work_within_a_day(self):
+        courses = {"c1": "IS 410 DB (x) FA2026"}
+        due = iso(30)
+        columns = {"c1": [col("a", "Submitted early", due=due), col("b", "Still open", due=due)]}
+        gb._user_cache.clear()
+        books = gb.fetch_gradebooks(courses, "cookie", FakeApi(columns, {"c1": [rec("a", "COMPLETED")]}))
+        text = due_dates.format_due_dates_table(due_dates.select(due_dates.reconcile(books, [], courses), "7d", False), "7d")
+        self.assertLess(text.index("Still open"), text.index("Submitted early"))
+        self.assertIn("1 open, 1 done", text)
+        self.assertIn("submitted ✓", text)
+
+    def test_grades_summary_shared_widths_and_no_points(self):
+        a = gb.build_gradebook("c1", "IS 410 DB", [col("x", "Short", possible=0), col("y", "Quiz", possible=5)],
+                               [rec("x", "GRADED", 0), rec("y", "GRADED", 5)], SCHEMA["results"])
+        b = gb.build_gradebook("c2", "MATH 215 Finite", [col("z", "A much longer item name here", possible=100)],
+                               [rec("z", "GRADED", 50)], SCHEMA["results"])
+        summary = grades.format_grades_text([a, b], summary_only=True)
+        self.assertTrue(summary.startswith("GRADES"))
+        self.assertIn("IS 410", summary)
+        self.assertNotIn("Short", summary)
+        text = grades.format_grades_text([a, b], summary=True)
+        self.assertIn("✓ graded (no points)", text)
+        quiz = next(line for line in text.splitlines() if "Quiz" in line)
+        longer = next(line for line in text.splitlines() if "much longer" in line)
+        self.assertEqual(quiz.index("graded"), longer.index("graded"))
+
+
 class TestBriefing(unittest.TestCase):
     def test_rest_only_briefing_without_a_browser(self):
         courses = {"c1": "IS 410 DB (x) FA2026"}
         columns = {"c1": [col("a", "Done HW", due=iso(-30)), col("o", "Late HW", due=iso(-3)), col("s", "Soon HW", due=iso(10)),
                           col("w", "Week HW", due=iso(24 * 4)), calc("t", externalGrade=True)]}
-        records = {"c1": [rec("a", "GRADED", 10), rec("t", "GRADED", 91, displayGrade={"scaleType": "Percent", "score": 91})]}
+        columns["c1"].append(col("low", "Bad Quiz", due=iso(-24 * 5)))
+        records = {"c1": [rec("a", "GRADED", 10), rec("low", "GRADED", 2),
+                          rec("t", "GRADED", 91, displayGrade={"scaleType": "Percent", "score": 91})]}
         api = FakeApi(columns, records)
         gb._user_cache.clear()
         real = gb.fetch_gradebooks
@@ -313,13 +350,14 @@ class TestBriefing(unittest.TestCase):
              patch("scrapers.briefing.scrape_announcements_api", return_value=announcements), \
              patch("core.async_engine.AsyncSessionManager", side_effect=AssertionError("browser launched")):
             bundle = asyncio.run(briefing.run_briefing_async())
+        self.assertEqual([i["title"] for i in bundle["attention"]], ["Bad Quiz", "Soon HW"])
         self.assertEqual([i["title"] for i in bundle["overdue"]], ["Late HW"])
         self.assertEqual([i["title"] for i in bundle["urgent"]], ["Soon HW"])
         self.assertEqual([i["title"] for i in bundle["upcoming"]], ["Week HW"])
         self.assertEqual(bundle["courses"]["c1"]["overall"]["percent"], 91)
         self.assertEqual([a["title"] for a in bundle["courses"]["c1"]["announcements"]], ["Midterm moved"])
         text = briefing.format_briefing_cli(bundle)
-        for expected in ("OVERDUE (1)", "DUE IN THE NEXT 48 HOURS (1)", "LATER THIS WEEK (1)", "GRADES", "91% A", "official",
+        for expected in ("NEEDS ATTENTION (2)", "OVERDUE (1)", "DUE TODAY / TOMORROW (1)", "LATER THIS WEEK (1)", "GRADES", "91% A", "official",
                          "Midterm moved", "not submitted"):
             self.assertIn(expected, text)
 

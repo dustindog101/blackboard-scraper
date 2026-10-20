@@ -8,17 +8,18 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from core.config import load_courses
-from core.gradebook import FORBIDDEN, GRADED, NOT_FOUND, course_label
+from core.gradebook import FORBIDDEN, GRADED, NOT_FOUND, NOT_SUBMITTED, UNKNOWN, course_label
 from core.output import OUTPUT_BASE
 from core.time import format_local, local_zone, parse_datetime
 from scrapers.announcements import scrape_announcements_api
 from scrapers.calendar import scrape_calendar_async
 from scrapers.due_dates import public_item, reconcile, rows, select
-from scrapers.grades import _num, fetch_gradebooks_async, save_grades
+from scrapers.grades import _num, fetch_gradebooks_async, save_grades, summary_lines
 
 logger = logging.getLogger("blackboard.scrapers.briefing")
 
-URGENT_HOURS = 48
+LOW_SCORE_PERCENT = 60
+LOW_SCORE_DAYS = 21
 UPCOMING_DAYS = 7
 ANNOUNCEMENT_DAYS = 7
 RECENT_GRADE_DAYS = 14
@@ -77,7 +78,8 @@ async def run_briefing_async(
     entries = reconcile(books, calendar_items, courses)
     overdue = select(entries, "overdue", False, now)
     upcoming = [e for e in select(entries, f"{UPCOMING_DAYS}d", False, now) if not e["completed"]]
-    urgent = [e for e in upcoming if e["_dt"] <= now + timedelta(hours=URGENT_HOURS)]
+    tomorrow = now.date() + timedelta(days=1)
+    urgent = [e for e in upcoming if e["_dt"].astimezone(local_zone()).date() <= tomorrow]
     soon = [e for e in upcoming if e not in urgent]
 
     per_course: Dict[str, Any] = {}
@@ -94,13 +96,24 @@ async def run_briefing_async(
             notes.append(f"{block['course_label']}: announcements unavailable")
 
     def legacy(e: Dict[str, Any]) -> Dict[str, Any]:
-        item = public_item(e, legacy=True)
-        return {**item, "due": item["due_date"]}
+        text = format_local(e["_dt"]) if e["_dt"] else "TBD"
+        return {**public_item(e), "due_date": text, "due": text}
+
+    low = []
+    for cid, block in per_course.items():
+        for g in block["grades"]:
+            dt = parse_datetime(g["due_at"])
+            if (g["status"] == GRADED and g["possible"] and g["percent"] is not None and g["percent"] < LOW_SCORE_PERCENT
+                    and dt and now - timedelta(days=LOW_SCORE_DAYS) <= dt <= now):
+                low.append({**g, "title": g["name"], "course": block["course_label"], "course_id": cid})
+    low.sort(key=lambda g: g["due_at"], reverse=True)
+    open_urgent = [e for e in urgent if e["status"] in (NOT_SUBMITTED, UNKNOWN)]
 
     bundle = {
         "briefing_path": OUTPUT_BASE / "briefing.md",
         "generated_at": now.isoformat(),
         "overdue": [legacy(e) for e in overdue],
+        "attention": low + [legacy(e) for e in open_urgent],
         "urgent": [legacy(e) for e in urgent],
         "upcoming": [legacy(e) for e in soon],
         "calendar": [legacy(e) for e in urgent + soon],  # kept for Telegram / menubar
@@ -122,14 +135,6 @@ def run_briefing(headless: bool = True, cdp_url: Optional[str] = None, write_mar
     return asyncio.run(run_briefing_async(headless=headless, cdp_url=cdp_url, write_markdown=write_markdown))
 
 
-def _grade_line(block: Dict[str, Any]) -> str:
-    o = block["overall"]
-    if o["source"] == "none":
-        return f"no grade yet · {o['graded']} of {o['total']} graded"
-    value = (f"{o['percent']:g}%" if o["percent"] is not None else "") + (f" {o['letter']}" if o["letter"] else "")
-    return f"{value.strip() or 'n/a':<9} {o['source']:<10} {o['graded']} of {o['total']} graded"
-
-
 def format_briefing_cli(bundle: Dict[str, Any]) -> str:
     now = datetime.now(local_zone())
     lines = [f"Briefing · {format_local(now)}"]
@@ -138,8 +143,9 @@ def format_briefing_cli(bundle: Dict[str, Any]) -> str:
         if items:
             lines.extend(["", f"{title} ({len(items)})"] + rows(items, full_date=full_date))
 
+    section("NEEDS ATTENTION", bundle["attention"], True)
     section("OVERDUE", bundle["overdue"], True)
-    section(f"DUE IN THE NEXT {URGENT_HOURS} HOURS", bundle["urgent"], True)
+    section("DUE TODAY / TOMORROW", bundle["urgent"], True)
     section("LATER THIS WEEK", bundle["upcoming"], True)
     if not (bundle["overdue"] or bundle["urgent"] or bundle["upcoming"]):
         lines.extend(["", f"Nothing overdue or due in the next {UPCOMING_DAYS} days."])
@@ -147,8 +153,7 @@ def format_briefing_cli(bundle: Dict[str, Any]) -> str:
     graded_blocks = [(b["course_label"], b) for b in bundle["courses"].values() if b.get("overall")]
     if graded_blocks:
         lines.extend(["", "GRADES"])
-        width = max(len(label) for label, _ in graded_blocks)
-        lines.extend(f"  {label:<{width}}  {_grade_line(b)}" for label, b in graded_blocks)
+        lines.extend("  " + line for line in summary_lines([(label, b["overall"]) for label, b in graded_blocks]))
         recent = []
         cutoff = now - timedelta(days=RECENT_GRADE_DAYS)
         for b in bundle["courses"].values():
