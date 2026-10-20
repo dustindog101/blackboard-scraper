@@ -1,6 +1,7 @@
 """Browserless refresh through the IdP, with scripted responses (no network)."""
 
 import json
+import os
 import tempfile
 import unittest
 import urllib.error
@@ -70,7 +71,15 @@ class TestRefresh(Base):
         self.assertIn(b"shib_idp_ls_supported=true", read_post)
         self.assertEqual(hr.load_idp_storage()["shib_idp_session_ss"], "NEWVALUE")
         self.assertTrue(any(c["name"] == "__Host-shib_idp_session" for c in json.loads((self.dir / "cookies.json").read_text())))
-        self.assertEqual((self.dir / "idp_storage.json").stat().st_mode & 0o077, 0)
+        self.assertEqual(json.loads((self.dir / "idp_storage.json").read_text()), {"shib_idp_session_ss": "NEWVALUE"})
+        self.assertEqual({path.name for path in self.dir.iterdir()}, {"cookies.json", "idp_storage.json"})
+
+    @unittest.skipUnless(os.name == "posix", "POSIX mode bits do not describe Windows ACL permissions")
+    def test_refreshed_storage_and_cookies_have_private_posix_permissions(self):
+        self.assertEqual(self.run_chain(self.FULL), hr.REFRESHED)
+        for name in ("cookies.json", "idp_storage.json"):
+            with self.subTest(name=name):
+                self.assertEqual((self.dir / name).stat().st_mode & 0o777, 0o600)
 
     def test_credential_form_needs_login_and_nothing_is_saved(self):
         login = page("idp", "/idp/x?execution=e1s2", j_username="", j_password="", _eventId_proceed="Log In")

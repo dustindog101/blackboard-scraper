@@ -17,6 +17,8 @@ def names(candidates):
 class BrowserTestCase(unittest.TestCase):
     def setUp(self):
         for target in (patch.dict(os.environ, {}, clear=True),
+                       # Simulated OS discovery must not need the host's HOME/USERPROFILE.
+                       patch("core.browser.Path.home", return_value=Path("/fixture-home")),
                        patch("core.browser.shutil.which", return_value=None),
                        patch("core.browser._winner", None),
                        patch("core.browser._announced", False),
@@ -27,9 +29,10 @@ class BrowserTestCase(unittest.TestCase):
 
 class TestCandidateOrder(BrowserTestCase):
     def installed(self, *present):
-        """is_file() true only for these path fragments."""
+        """Match fixture paths despite the host Path's separator convention."""
         return patch("core.browser.Path.is_file", autospec=True,
-                     side_effect=lambda p: any(fragment in str(p) for fragment in present))
+                     side_effect=lambda p: any(fragment.replace("\\", "/") in str(p).replace("\\", "/")
+                                               for fragment in present))
 
     def test_macos_chrome_first_then_edge_brave_then_bundled_last(self):
         with patch("core.browser.sys.platform", "darwin"), patch("core.browser.default_browser", return_value=(None, "Safari")), \

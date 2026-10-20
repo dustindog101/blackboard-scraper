@@ -21,6 +21,7 @@ class TestLoginSafety(unittest.TestCase):
             with self.subTest(source=source), contextlib.ExitStack() as stack:
                 message = ('1234567', 0, 'private-sender', 'private-message')
                 stack.enter_context(patch.object(sms_listener.sys, 'platform', 'darwin'))
+                stack.enter_context(patch.object(sms_listener, 'check_sms_access', return_value=(True, '')))
                 stack.enter_context(patch.object(sms_listener, 'get_latest_duo_sms_sqlite', return_value=message if source == 'sqlite' else None))
                 stack.enter_context(patch.object(sms_listener, 'get_latest_duo_sms_imsg', return_value=message))
                 output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
