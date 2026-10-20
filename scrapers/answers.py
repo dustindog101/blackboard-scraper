@@ -175,17 +175,22 @@ def _test_from_content(content: dict) -> dict:
 
 _URL_COURSE = re.compile(r"/courses/(_\d+_\d+)")
 _URL_ITEM = re.compile(r"/(?:assessment|test|outline/assessment(?:/test)?)/(_\d+_\d+)|[?&](?:contentId|content_id)=(_\d+_\d+)")
+_URL_COURSE_QUERY = re.compile(r"[?&](?:course_id|courseId)=(_\d+_\d+)")
 
 
 def parse_target_url(target: str) -> Optional[tuple]:
     """(course_id, content_id) from a pasted Blackboard URL, None if TARGET is not a URL."""
-    if not re.match(r"https?://", target.strip(), re.I):
-        return None
     from urllib.parse import urlsplit
-    parts, base = urlsplit(target.strip()), urlsplit(BLACKBOARD_BASE)
+    base = urlsplit(BLACKBOARD_BASE)
+    raw = target.strip()
+    if re.match(re.escape(base.netloc) + r"/", raw, re.I):  # pasted without https://
+        raw = f"{base.scheme}://{raw}"
+    if not re.match(r"https?://", raw, re.I):
+        return None
+    parts = urlsplit(raw)
     if parts.netloc.lower() != base.netloc.lower():
         raise AnswersInputError(f"that URL is not on {base.netloc}")
-    course = _URL_COURSE.search(parts.path)
+    course = _URL_COURSE.search(parts.path) or _URL_COURSE_QUERY.search("?" + parts.query)
     item = _URL_ITEM.search(parts.path + ("?" + parts.query if parts.query else ""))
     if not course or not item:
         raise AnswersInputError("could not find a course and test ID in that URL; paste the test's page URL or use its title")
@@ -200,6 +205,8 @@ def resolve_target(target: str, course_ids: List[str], courses: Dict[str, str]) 
     """
     parsed = parse_target_url(target)
     if parsed:
+        if course_ids and len(course_ids) < len(courses or {}) and parsed[0] not in course_ids:
+            raise AnswersInputError("that URL is for a different course than -c; drop -c or fix it")
         course_ids, target = [parsed[0]], parsed[1]
     matches = []
     key = target.casefold().strip()
@@ -886,7 +893,7 @@ def _unsupported_lines(unsupported: List[Dict[str, Any]]) -> List[str]:
             for u in unsupported]
 
 
-def format_current(state: Dict[str, Any]) -> str:
+def format_current(state: Dict[str, Any], started: bool = False) -> str:
     proj = state["projection"]
     qs = proj["questions"]
     answered = sum(1 for q in qs if q["selected_choice_ids"])
@@ -900,7 +907,7 @@ def format_current(state: Dict[str, Any]) -> str:
         out.append("")
     if proj["unsupported"]:
         out += _unsupported_lines(proj["unsupported"]) + [""]
-    out.append("Read only; nothing was changed.")
+    out.append("New attempt started; no answers changed. Nothing submitted." if started else "Read only; nothing was changed.")
     return "\n".join(out)
 
 
@@ -1095,9 +1102,7 @@ def run_cli(args, courses: Dict[str, str], target_cids: List[str], cancel_event=
                        "target": {k: state["target"][k] for k in ("course_name", "title", "course_id", "assessment_id", "attempt_id")},
                        "due": state["due"], "questions": state["projection"]["questions"],
                        "unsupported": state["projection"]["unsupported"], "submitted": False}
-            current_text = format_current(state)
-            if start_receipt and start_receipt["dispatched"]:
-                current_text = current_text.replace("Read only; nothing was changed.", "Answers read only; no answers changed.")
+            current_text = format_current(state, started=bool(start_receipt and start_receipt["dispatched"]))
             return emit(payload, current_text, EXIT_OK)
 
         by_id = {q["question_attempt_id"]: q for q in state["projection"]["questions"]}
@@ -1115,7 +1120,8 @@ def run_cli(args, courses: Dict[str, str], target_cids: List[str], cancel_event=
     except AnswersInputError as exc:
         return fail(EXIT_PARTIAL if start_receipt and start_receipt["dispatched"] else EXIT_INPUT, "invalid_input", str(exc))
     except AnswersRefusal as exc:
-        return fail(EXIT_PARTIAL if start_receipt and start_receipt["dispatched"] else EXIT_REFUSED, exc.code, str(exc), **exc.details)
+        started = (start_receipt and start_receipt["dispatched"]) or (exc.details.get("start") or {}).get("dispatched")
+        return fail(EXIT_PARTIAL if started else EXIT_REFUSED, exc.code, str(exc), **exc.details)
     except Exception as exc:
         from scrapers.answer_attempts import StartUnknown
         if isinstance(exc, StartUnknown):

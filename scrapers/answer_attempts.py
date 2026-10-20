@@ -63,9 +63,10 @@ class BrowserStarter(a.BrowserTransport):
         page = self._page
         armed = False
         sent = False
+        blocked = None  # exceptions raised inside a Playwright route callback are swallowed; re-raise after the click
 
         def intercept(route):
-            nonlocal sent
+            nonlocal sent, blocked
             request = route.request
             if request.method in {"GET", "HEAD", "OPTIONS"}:
                 route.continue_()
@@ -74,9 +75,10 @@ class BrowserStarter(a.BrowserTransport):
                 try:
                     validate_start(path, request.post_data_json)
                     dispatch()  # fresh safety/count/deadline check immediately before dispatch
-                except BaseException:
+                except BaseException as exc:
+                    blocked = exc
                     route.abort()
-                    raise
+                    return
                 sent = True
                 route.continue_()
                 return
@@ -97,12 +99,19 @@ class BrowserStarter(a.BrowserTransport):
             if button.count() != 1:
                 raise AnswersRefusal("ambiguous_start", "Expected one Start attempt button; refusing.")
             armed = True
-            with page.expect_response(lambda response: response.request.method == "POST"
-                                      and response.url == a.BLACKBOARD_BASE + path,
-                                     timeout=10000):
-                button.click(timeout=5000)
-                # A warning may appear instead of dispatch. Never confirm it.
-                self._check_prompts(page)
+            try:
+                with page.expect_response(lambda response: response.request.method == "POST"
+                                          and response.url == a.BLACKBOARD_BASE + path,
+                                          timeout=10000):
+                    button.click(timeout=5000)
+                    # A warning may appear instead of dispatch. Never confirm it.
+                    self._check_prompts(page)
+            except Exception:
+                if blocked is not None:  # aborted by our own guard: report its reason, not a Playwright timeout
+                    raise blocked from None
+                raise
+            if blocked is not None:
+                raise blocked
             if not sent:
                 raise AnswersRefusal("start_not_sent", "No allowlisted start request observed; nothing retried. Check Blackboard.")
         finally:
@@ -152,10 +161,18 @@ def _preflight_sets(parsed, inventory):
     candidates = inventory["attempts"]
     if not candidates:
         raise AnswersRefusal("questions_unavailable", "Cannot validate --set before starting. Start with --new-attempt alone, then preview --set.")
-    projection = project_attempt(candidates[-1])
+    latest = max(candidates, key=lambda att: att.get("attemptDate") or att.get("creationDate") or "")
+    projection = project_attempt(latest)
     doc = {"snapshot": {"definition_sha256": a._definition(projection), "questions": projection["questions"]},
            "changes": set_changes(parsed, projection)}
     plan_changes(doc, projection, a._definition(projection))
+    return question_shape(projection)
+
+
+def question_shape(projection):
+    """Question identity, type and choice IDs/text in provider order. Equal across attempts of the same test
+    (verified live on two J#5 attempts); used so --set letters validated before a retake mean the same choices after it."""
+    return [(q["question_id"], q["type"], [(c["id"], c["text"]) for c in q["choices"]]) for q in projection["questions"]]
 
 
 def ensure_attempt(match, progress, parsed=None, cancel_event=None, http=None, browser_factory=None):
@@ -175,7 +192,7 @@ def ensure_attempt(match, progress, parsed=None, cancel_event=None, http=None, b
             state = a.state_from_inventory(match, before)
             progress(f"Attempt {state['target']['attempt_id']} is already IN_PROGRESS; using it. No new attempt started.")
             return state, {**receipt, "outcome": "existing", "attempt_id": state["target"]["attempt_id"]}
-        _preflight_sets(parsed, before)
+        shape = _preflight_sets(parsed, before)
         old_ids = {att["id"] for att in before["attempts"]}
         path = f"/learn/api/v1/courses/{match['course_id']}/gradebook/columns/{match['column_id']}/attempts"
         validate_start(path, _START_BODY)
@@ -208,7 +225,7 @@ def ensure_attempt(match, progress, parsed=None, cancel_event=None, http=None, b
                 receipt["transport"] = used
         except BaseException as exc:
             if not sent:
-                if isinstance(exc, (AnswersRefusal, AnswersInputError)):
+                if isinstance(exc, (AnswersRefusal, AnswersInputError, KeyboardInterrupt)):
                     raise
                 raise AnswersRefusal("transport_unavailable", f"No start dispatched ({type(exc).__name__}).") from None
             failure = type(exc).__name__
@@ -228,12 +245,21 @@ def ensure_attempt(match, progress, parsed=None, cancel_event=None, http=None, b
                         and new[0]["id"] == active_after[0]["id"] and old_ids <= ids_after):
                     state = a.state_from_inventory(match, after, new[0]["id"])
                     receipt.update(outcome="created_verified", attempt_id=new[0]["id"], transport=used)
+                    if shape is not None and question_shape(state["projection"]) != shape:
+                        receipt["questions_changed"] = True
+                        raise AnswersRefusal("questions_changed_after_start",
+                                             f"Started attempt {new[0]['id']}, but its questions differ from the previous attempt, "
+                                             "so no answers were saved. Preview again with --set, then --apply.",
+                                             start=dict(receipt))
                     if failure:
                         receipt["acknowledgment_error"] = failure
                     progress(f"Started attempt {new[0]['id']}; GET confirms exactly one new IN_PROGRESS attempt. Nothing submitted.")
                     return state, receipt
                 if new or active_after:
                     break  # contradictory result, not propagation lag
+            except AnswersRefusal as exc:
+                if exc.code == "questions_changed_after_start":
+                    raise  # attempt is confirmed; only the answer mapping is unsafe
             except Exception:
                 pass
             if index < 2:

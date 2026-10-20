@@ -17,7 +17,7 @@ confirms exactly one new IN_PROGRESS attempt by GET. HTTP first, installed brows
 next, optional bundled Playwright last. A dispatched start never retries or falls
 back (even 401/404); ambiguity exits 4. Timer/access-code prompts refuse. Combined
 start/save needs a readable prior question list for preflight; otherwise start
-separately. Both creation transports remain **UNVERIFIED live**. Never submits.
+separately. Creation request observed live from the Ultra UI; `bb`'s own start is offline-tested. Uses up one attempt. Never submits.
 
 Verified answer types: multiple answer (select all); single choice (multiple choice
 with one answer, encoded by Ultra as `multipleanswer` with `answerSelectionLimit: 1`);

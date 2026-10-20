@@ -49,7 +49,7 @@ with `--set ... --apply` to start and save. Reuse an existing IN_PROGRESS attemp
 Unknown safety/count/deadline settings, restrictions, no attempts remaining or less
 than 120 seconds until due refuse. Combined start/save requires readable prior
 questions for preflight; otherwise start separately, then preview/save. The creation
-transports are **UNVERIFIED live**. HTTP → installed browser → optional bundled
+request was observed live from the Ultra UI (bb's own start offline-tested; uses up one attempt). HTTP → installed browser → optional bundled
 Playwright; fallback is allowed only before a start dispatch. Never retry a dispatched
 start, including HTTP 401/404. GET must confirm exactly one new IN_PROGRESS attempt
 and its ID. Time-limit/access-code prompts refuse. Never submit; the student reviews

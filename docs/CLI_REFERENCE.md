@@ -257,10 +257,11 @@ bb answers "Practice Quiz" -c DEMO100 --new-attempt --set 1=A --apply    # retak
   HTTP first, then the installed browser, then optional bundled Playwright via `core.browser`.
   Only missing session/XSRF **before dispatch** permits browser fallback. After any start
   dispatch (including HTTP 401/404), never retry or switch transports: reconcile by GET only.
-  Browser mode clicks exactly `Start new attempt` / `Start attempt`, refuses timer/access-code
+  Browser mode opens the test's overview page and clicks the one `Start attempt N` link, refuses timer/access-code
   prompts and blocks every non-read request except the single allowlisted creation POST.
   GET must confirm exactly one new IN_PROGRESS attempt and its ID. Ambiguity exits 4.
-  Both HTTP and browser creation are **UNVERIFIED live**; see [protocol](specs/save-draft-answers-protocol.md).
+  The route and body were observed live from the Ultra UI; `bb`'s own start has run offline only. See [protocol](specs/save-draft-answers-protocol.md).
+  With `--set ... --apply`, if the new attempt's questions or choices differ from the previous attempt, nothing is saved (exit 4).
   With `--set`, all edits are preflighted against a readable prior attempt before creation,
   then translated again against the new runtime question list. If no prior question list
   is available, start separately, then preview/save. A changed new question definition may

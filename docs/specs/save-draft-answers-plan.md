@@ -27,8 +27,8 @@ HTTP precedes the installed browser and optional bundled Playwright; only pre-di
 unavailability permits fallback. No dispatched start is retried, including 401/404.
 GET must confirm exactly one new IN_PROGRESS attempt and ID; ambiguity exits 4.
 Timer/access-code prompts refuse; the browser blocks submit and all unrelated writes.
-Creation remains **UNVERIFIED live**; static JS inspection is evidence for its shape,
-not provider acceptance. See the [protocol](save-draft-answers-protocol.md).
+Creation route and body were observed live from the Ultra UI (2026-10-20, 201 Created);
+`bb`'s own start has run offline only. See the [protocol](save-draft-answers-protocol.md).
 Combined start/save preflights against readable prior questions before spending an
 attempt; without them start separately, then preview/save. New question changes may
 prevent saving after creation (exit 4, created ID retained). File/attempt pinning cannot

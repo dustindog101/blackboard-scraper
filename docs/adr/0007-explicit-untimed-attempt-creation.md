@@ -22,11 +22,10 @@ This local lock cannot serialize another host or a student's browser.
 
 The creation allowlist is exactly POST to
 `/learn/api/v1/courses/{courseId}/gradebook/columns/{columnId}/attempts` with the fixed
-native-test IN_PROGRESS body documented in the protocol. Static Ultra JS establishes
-the request shape, **not live acceptance**. HTTP is tried first. Missing session/XSRF
+native-test IN_PROGRESS body observed live from the Ultra UI (201 Created) and documented in the protocol. HTTP is tried first. Missing session/XSRF
 before dispatch allows the browser; all post-dispatch failures, including 401/404,
 reconcile by GET only. Browser launch uses `core.browser` (installed candidates first,
-optional bundled Playwright last). Click only `Start new attempt` / `Start attempt`;
+optional bundled Playwright last). On the test's overview page click only the `Start attempt N` link;
 never confirm a time-limit warning or access-code prompt. Intercept browser requests
 and block every non-read request except one exact allowlisted start POST. Never submit.
 
@@ -56,8 +55,8 @@ Blackboard**. This scope applies to both file and shorthand inputs.
 
 This supersedes ADR-0006's no-start rule only for explicit `--new-attempt`. Answer
 PATCH routes remain unable to create/submit; legacy assignment behavior is unchanged.
-Both creation transports remain **UNVERIFIED live**, including browser selectors and
-provider default fields. No real start, apply or submission was run during this work.
+The route, body and `Start attempt N` link were observed live in a student-authorized retake;
+`bb`'s own HTTP and browser start have run offline only. No submission was ever made.
 Offline synthetic tests cover grammar, output, shared saves, eligibility, fallback,
 route/body rejection, ambiguity, lost acknowledgments, cancellation and receipts.
 

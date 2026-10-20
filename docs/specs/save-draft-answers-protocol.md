@@ -134,28 +134,13 @@ calculated, file response, and anything else are unsupported: **answer in Blackb
 These encodings were observed by the original save implementation; exhaustive live
 clear behavior remains unverified.
 
-## Attempt creation: static source observed, transport UNVERIFIED live
+## Attempt creation: observed live from the Ultra UI
 
-On 2026-10-20 GET-only inspection of the deployed public Ultra build
-`uiv4001.2.0-rel.35_ca6d19d` found this call chain:
-
-- `app-99500fbee07467ea.js`: assessment service `launchAttempt` builds
-  `scoreProviderHandle: Test`, `status: InProgress`, and
-  `toolAttemptDetail["resource/x-bb-assessment"]: {type: Test, password: undefined}`.
-  JSON serialization omits the undefined password. The assessment type enum's Test
-  value is `"Test"`.
-- The gradebook column model's `launchAttempt` sends POST to its own column URL plus
-  `/attempts` (group attempts use a different path and are excluded).
-- `15059-99500fbee07467ea.js`, module `293183`, also exposes `createAttempt` through
-  the POST request class for `/v1/courses/%courseId%/gradebook/columns/%columnId%/attempts`.
-- GET-only content inspection observed `deploymentSettings.attemptCount` as the
-  attempts-allowed setting. `bb assignment` already reads that provider field.
-
-Public static sources (no session material):
-[app bundle](https://ultra.content.blackboardcdn.com/ultra/uiv4001.2.0-rel.35_ca6d19d/app-99500fbee07467ea.js),
-[API bundle](https://ultra.content.blackboardcdn.com/ultra/uiv4001.2.0-rel.35_ca6d19d/15059-99500fbee07467ea.js).
-No live POST was used to discover or test this path. The inferred minimal serialized
-body, now behind a separate strict allowlist in `scrapers/answer_attempts.py`, is:
+Observed 2026-10-20 (student-authorized retake of a graded untimed test with attempts
+remaining). On `/ultra/courses/{courseId}/assessment/{contentId}/overview?courseId={courseId}`
+the start control is a link (`<a>`) labelled `Start attempt N` (e.g. "Start attempt 2"),
+not a button. Clicking it sent exactly one request and opened
+`/ultra/courses/{courseId}/assessment/{contentId}/attempt/{newAttemptId}`:
 
 ```http
 POST /learn/api/v1/courses/_100_1/gradebook/columns/_200_1/attempts
@@ -164,18 +149,32 @@ Content-Type: application/json;charset=UTF-8
 
 ```json
 {
-  "scoreProviderHandle": "resource/x-bb-assessment",
+  "stagedAttemptGrades": [],
+  "scoreProviderHandle": {"name": "resource/x-bb-assessment", "iconClass": "test",
+                          "contentHandlers": ["resource/x-bb-asmt-test-link"],
+                          "needsGradingIcon": "grades", "needsReconcilingIcon": "grades"},
   "status": "IN_PROGRESS",
   "toolAttemptDetail": {"resource/x-bb-assessment": {"type": "Test"}}
 }
 ```
 
+Response: `201 Created` with the new attempt (`id`, `status: IN_PROGRESS`, `attemptDate`,
+`gradeId`). The code's HTTP start sends this exact body behind a strict allowlist
+(`scrapers/answer_attempts.py`). Earlier GET-only reading of the public Ultra bundle
+(`launchAttempt` / `createAttempt` on the same route) agrees with it.
+
+Observed vs not yet observed:
+
+- Observed: route, full UI body, 201 response, new-attempt navigation, the `Start attempt N`
+  link, and that question and choice IDs, order and text are identical across two attempts
+  of the same test.
+- Not yet observed: `bb`'s own HTTP start and browser click end to end (offline-tested only;
+  the observed body is reused verbatim), a first attempt (only a retake was seen), a
+  smaller body, and the timer/access-code prompts.
+
 Cookies/XSRF use the same origin-scoped session as answer saves. No extra body fields,
-query strings, alternate routes, redirects, submit/finalize or whole-attempt updates
-are allowed. The HTTP endpoint/body, deployed permission behavior, response shape,
-UI selectors and installed/bundled browser creation all remain **UNVERIFIED live**.
-The browser's actual serialized request may differ; extra fields are refused until
-reviewed rather than widening the allowlist automatically.
+query strings, alternate routes, redirects, submit/finalize or whole-attempt updates are
+allowed; a body that differs from the observed one is refused rather than widening the allowlist.
 
 Preconditions: `_safe_due`, complete known current-user attempt inventory, positive
 `attemptsAllowed - existing count` (provider `attemptCount` maps to attemptsAllowed),
@@ -189,7 +188,7 @@ Transport order: HTTP → installed browser → optional bundled Playwright thro
 `core.browser`. Only missing session/XSRF **before** dispatch permits fallback. Unlike
 answer PATCH's observed 401 exception, **no dispatched start may fall back or retry**,
 including 401, 403, 404, redirect, timeout, 429, 5xx or malformed replies. Browser
-mode clicks one exact `Start new attempt` / `Start attempt` button, refuses timer or
+mode clicks the one `Start attempt N` link (or a `Start new attempt` button), refuses timer or
 access-code prompts and intercepts all writes: only one exact creation POST can pass.
 It never confirms additional prompts or clicks Submit.
 

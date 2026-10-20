@@ -22,7 +22,7 @@ confirmation; it adds no mandatory stdin prompt.
 
 - Save only supported single-choice, multiple-answer and true/false responses in the
   current user's existing, unambiguous `IN_PROGRESS` native Ultra test attempt.
-- Never start, submit, finalize, grade or delete an attempt. Reject timed/proctored,
+- Never start (superseded for the explicit `--new-attempt` flag by ADR-0007), submit, finalize, grade or delete an attempt. Reject timed/proctored,
   password/secure-browser/IP-restricted, forced-completion and no-backtracking tests.
   Missing/unknown recognized safety fields or deadlines refuse; only explicit null
   means no due date. A missing time limit needs explicit no-timer fields. Recheck

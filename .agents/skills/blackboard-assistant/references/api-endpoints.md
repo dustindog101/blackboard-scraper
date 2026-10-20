@@ -24,7 +24,7 @@ Observed save route: `PATCH /learn/api/v1/courses/{courseId}/gradebook/attempts/
 with only `questionType` and `givenAnswer`. No submit route is allowed.
 Shorthand maps bb's provider-order letters to stable choice IDs before using this pipeline.
 
-Static-JS-discovered, **UNVERIFIED live** creation route:
+Creation route (observed live from the Ultra UI, 201 Created; full body in docs/specs/save-draft-answers-protocol.md):
 `POST /learn/api/v1/courses/{courseId}/gradebook/columns/{columnId}/attempts`.
 Only explicit `--new-attempt` permits its fixed native-test IN_PROGRESS body.
 The HTTP creation adapter allows no other body/route, redirects or retries. Browser

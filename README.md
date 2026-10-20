@@ -378,7 +378,7 @@ with `--set ... --apply` it can start and save. It uses an existing IN_PROGRESS 
 when present. Unknown safety/count/deadline data, restrictions, exhausted attempts and
 less than 120 seconds until due refuse. HTTP → installed browser → optional bundled
 Playwright; a dispatched start is never retried, and GET must confirm exactly one new
-IN_PROGRESS attempt. Creation transports are **UNVERIFIED live**. Combined start/save
+IN_PROGRESS attempt. The creation request was observed live from the Ultra UI; `bb`'s own start is offline-tested. Combined start/save
 requires a readable prior question list for input preflight; otherwise start separately.
 It never submits. Saved answers may be visible to course staff.
 

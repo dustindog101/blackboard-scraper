@@ -1706,3 +1706,31 @@ def test_parse_target_url_refuses_foreign_or_incomplete():
     for url in ("https://evil.example/ultra/courses/_1_1/assessment/_2_1", answers.BLACKBOARD_BASE + "/ultra/stream"):
         with pytest.raises(model.AnswersInputError):
             answers.parse_target_url(url)
+
+
+def test_new_attempt_set_apply_refuses_when_retake_choices_differ(retake, capsys, monkeypatch):
+    original = retake.create
+    def create_reordered(path, body, dispatch):
+        out = original(path, body, dispatch)
+        attempt = retake.created[out["id"]]
+        for qa in attempt["toolAttemptDetail"]["resource/x-bb-assessment"]["questionAttempts"]:
+            answers_list = (qa.get("question") or {}).get("answers")
+            if answers_list:
+                answers_list.reverse()  # same letters would now mean different choices
+        return out
+    monkeypatch.setattr(starts, "http_start", create_reordered)
+    code = answers.run_cli(args(new_attempt=True, set=["2=A,D"], apply=True), {CID: "TEST100"}, [CID])
+    result = assert_one_json(capsys)
+    assert code == 4
+    assert result["error"] == "questions_changed_after_start"
+    assert len(retake.dispatched) == 1
+    assert retake.provider.patch_count == 0
+
+
+def test_url_target_variants_and_course_conflict():
+    base = answers.BLACKBOARD_BASE
+    host = base.split("://", 1)[1]
+    assert answers.parse_target_url(f"{host}/ultra/courses/_1_1/assessment/_2_1/overview") == ("_1_1", "_2_1")
+    assert answers.parse_target_url(f"{base}/webapps/assessment/take/launchAssessment.jsp?course_id=_1_1&content_id=_2_1") == ("_1_1", "_2_1")
+    with pytest.raises(model.AnswersInputError):
+        answers.resolve_target(f"{base}/ultra/courses/_1_1/assessment/_2_1/overview", ["_9_1"], {"_9_1": "A", "_1_1": "B"})
