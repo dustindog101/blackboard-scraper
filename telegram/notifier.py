@@ -75,12 +75,15 @@ class TelegramNotifier:
                 time.sleep(1)
         return False
 
-    def poll_for_passcode(self, timeout_sec: int = 120, stop_event: Optional[Any] = None) -> Optional[str]:
+    def poll_for_passcode(self, timeout_sec: int = 120, stop_event: Optional[Any] = None,
+                          on_ready=None, excluded_codes=frozenset()) -> Optional[str]:
         """
         Polls Telegram getUpdates for an incoming 6–8 digit Duo passcode from admin_chat_id.
         Safely returns None if disabled, on network error, or if timeout expires.
         """
         if not self.enabled or not self.bot_token or not self.admin_chat_id:
+            return None
+        if stop_event and stop_event.is_set():
             return None
 
         # Fetch latest update_id offset to avoid reading old messages
@@ -94,6 +97,11 @@ class TelegramNotifier:
         except Exception:
             pass
 
+        if stop_event and stop_event.is_set():
+            return None
+        if on_ready is not None:
+            on_ready()
+
         start_time = time.time()
         while time.time() - start_time < timeout_sec:
             if stop_event and stop_event.is_set():
@@ -103,6 +111,8 @@ class TelegramNotifier:
                 poll_url = f"{self.api_base}/getUpdates?offset={offset}&timeout=2"
                 with urllib.request.urlopen(poll_url, timeout=6) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
+                    if stop_event and stop_event.is_set():
+                        return None
                     if data.get("ok") and data.get("result"):
                         for upd in data["result"]:
                             offset = max(offset, upd["update_id"] + 1)
@@ -113,12 +123,16 @@ class TelegramNotifier:
                             if str(from_id) == str(self.admin_chat_id):
                                 text = (msg.get("text") or "").strip()
                                 match = re.search(r"(?<![0-9])([0-9]{6,8})(?![0-9])", text)
-                                if match:
+                                if match and match.group(1) not in excluded_codes:
                                     return normalize_passcode(match.group(1))
             except Exception:
                 pass
 
-            time.sleep(1.0)
+            if stop_event:
+                if stop_event.wait(1.0):
+                    return None
+            else:
+                time.sleep(1.0)
         return None
 
     def send_chunks(self, chunks: List[str], chat_id: Optional[Any] = None) -> bool:

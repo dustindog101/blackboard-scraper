@@ -56,7 +56,7 @@ class TestLoginSafety(unittest.TestCase):
             cache.write_text('["fixture-previous-cache"]')
             stack.enter_context(patch.object(session, 'SESSION_DIR', root))
             stack.enter_context(patch.object(session, 'ensure_config_exists', return_value=(False, {'auto_login': {'username': 'fixture', 'password': 'fixture'}})))
-            stack.enter_context(patch.object(session, 'quick_check_session_http', return_value=(False, None)))
+            stack.enter_context(patch.object(session, 'check_session_state', return_value=('expired', None)))
             stack.enter_context(patch.object(session, 'sync_playwright'))
             launch = stack.enter_context(patch.object(session, '_launch_context', return_value=(context, page)))
             stack.enter_context(patch.object(session, 'wait_for_sso', side_effect=flow))
@@ -93,25 +93,22 @@ class TestLoginSafety(unittest.TestCase):
             self.assertEqual(json.loads(cache.read_text()), ['previous-fixture'])
             self.assertEqual(list(root.iterdir()), [cache])
 
-    def test_http_identity_required_and_response_disposed(self):
-        for status, data, expected in [(200, {'id': 'fixture'}, True), (200, {}, False), (302, {'id': 'fixture'}, False), (401, {}, False), (200, ['fixture'], False)]:
-            with self.subTest(status=status, data=data):
+    def test_identity_probe_uses_cookie_snapshot_without_mutating_browser(self):
+        for state, expected in [('valid', True), ('expired', False), ('unknown', False)]:
+            with self.subTest(state=state):
                 context = MagicMock()
-                response = context.request.get.return_value
-                response.status = status
-                response.json.return_value = data
-                self.assertEqual(login_flow.verify_session(context, 'https://fixture.invalid'), expected)
-                self.assertEqual(context.request.get.call_args.kwargs['max_redirects'], 0)
-                response.dispose.assert_called_once()
+                cookies = [{'name': 'fixture', 'value': 'fixture', 'domain': 'fixture.invalid', 'path': '/'}]
+                context.cookies.return_value = cookies
+                with patch.object(login_flow, 'probe_session', return_value=(state, None)) as probe:
+                    self.assertEqual(login_flow.verify_session(context, 'https://fixture.invalid'), expected)
+                probe.assert_called_once_with(timeout=2, cookies=cookies, url='https://fixture.invalid/learn/api/public/v1/users/me')
+                context.request.get.assert_not_called()
+                context.add_cookies.assert_not_called()
 
-    def test_invalid_json_disposes_response(self):
+    def test_browser_cookie_failure_is_not_verified(self):
         context = MagicMock()
-        response = context.request.get.return_value
-        response.status = 200
-        response.json.side_effect = ValueError('fixture')
-        with self.assertRaises(ValueError):
-            login_flow.verify_session(context, 'https://fixture.invalid')
-        response.dispose.assert_called_once()
+        context.cookies.side_effect = session.PlaywrightError('fixture')
+        self.assertFalse(login_flow.is_verified(context, 'https://fixture.invalid'))
 
     def test_automatic_login_rejects_borrowed_browser_without_launch(self):
         with patch.object(session, 'sync_playwright') as start, contextlib.redirect_stdout(io.StringIO()):

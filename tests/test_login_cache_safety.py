@@ -70,10 +70,10 @@ class TestLoginCacheSafety(unittest.TestCase):
             ("record_user_agent", {}),
         ):
             extras.enter_context(patch.object(session, name, **kwargs))
-        checks = quick_checks or [(False, None)]
+        checks = [("valid" if valid else "expired", user) for valid, user in (quick_checks or [(False, None)])]
         with patch.object(session, "SESSION_DIR", session_dir), \
              patch.object(session, "ensure_config_exists", return_value=(False, {"auto_login": {"username": "fixture", "password": "fixture"}})), \
-             patch.object(session, "quick_check_session_http", side_effect=checks), \
+             patch.object(session, "check_session_state", side_effect=checks), \
              patch.object(session.sys, "platform", "win32"), \
              patch.object(session.sys.stdin, "isatty", return_value=False), \
              patch.object(session, "sync_playwright", return_value=playwright), \

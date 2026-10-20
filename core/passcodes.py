@@ -52,6 +52,9 @@ def collect_passcode(sources, *, tried=frozenset(), sent_at: float, timeout: flo
     stop = threading.Event()
     result = RaceResult()
     active = set()
+    workers = []
+    if cancel is not None and cancel.is_set():
+        return result
 
     def work(source):
         reason = None
@@ -66,7 +69,9 @@ def collect_passcode(sources, *, tried=frozenset(), sent_at: float, timeout: flo
             result.notes[source.label] = source.unavailable or "unavailable"
         else:
             active.add(source.name)
-            threading.Thread(target=work, args=(source,), daemon=True).start()
+            worker = threading.Thread(target=work, args=(source,), daemon=True)
+            workers.append(worker)
+            worker.start()
 
     deadline = time.monotonic() + timeout
     try:
@@ -98,6 +103,12 @@ def collect_passcode(sources, *, tried=frozenset(), sent_at: float, timeout: flo
         return result
     finally:
         stop.set()
+        # Let cooperative file/terminal readers release their input before the
+        # next attempt starts. Network sources may still be finishing one I/O;
+        # those must check stop before consuming or publishing its result.
+        cleanup_deadline = time.monotonic() + 0.5
+        for worker in workers:
+            worker.join(max(0, cleanup_deadline - time.monotonic()))
 
 
 # ------------------------------------------------------------------ sources
@@ -122,7 +133,7 @@ def file_source(path, poll: float = 0.5) -> Source:
         while not stop.wait(poll):
             try:
                 written = target.stat().st_mtime
-                raw = target.read_text(encoding="utf-8", errors="ignore").strip()
+                raw = target.read_text(encoding="utf-8-sig", errors="ignore").strip()
             except OSError:
                 continue
             if not raw:

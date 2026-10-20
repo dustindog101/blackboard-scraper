@@ -44,19 +44,21 @@ class Base(unittest.TestCase):
         hr.save_idp_storage({"shib_idp_session_ss": "OLDVALUE"})
         self.sent = []
 
-    def run_chain(self, script, verified=True):
+    def run_chain(self, script, verified=True, verification_status=None):
         script = list(script)
 
         def fake(opener, url, data=None, timeout=10):
             self.sent.append((url, data))
             if url.endswith("/users/me"):
+                if verification_status is not None:
+                    return verification_status, {}, "unavailable"
                 return (200, {}, ME) if verified else (401, {}, "{}")
             item = script.pop(0)
             if isinstance(item, BaseException):
                 raise item
             return item
 
-        with patch.object(hr, "_request", side_effect=fake), patch("core.session_state.probe_session", return_value=("valid" if verified else "expired", {})):
+        with patch.object(hr, "_request", side_effect=fake):
             return hr.refresh_session_http()
 
 
@@ -101,6 +103,20 @@ class TestRefresh(Base):
         self.assertEqual(self.run_chain(self.FULL, verified=False), hr.NEEDS_LOGIN)
         self.assertEqual((self.dir / "cookies.json").read_text(), before)
 
+    def test_unknown_final_validation_preserves_both_caches(self):
+        for status in (429, 503):
+            with self.subTest(status=status):
+                before = (self.dir / "cookies.json").read_bytes()
+                storage = (self.dir / "idp_storage.json").read_bytes()
+                self.assertEqual(self.run_chain(self.FULL, verification_status=status), hr.UNKNOWN)
+                self.assertEqual((self.dir / "cookies.json").read_bytes(), before)
+                self.assertEqual((self.dir / "idp_storage.json").read_bytes(), storage)
+
+    def test_no_second_network_probe_after_verified_commit(self):
+        with patch("core.session_state.probe_session", return_value=(hr.UNKNOWN, None)) as probe:
+            self.assertEqual(self.run_chain(self.FULL), hr.REFRESHED)
+        probe.assert_not_called()
+
     def test_without_saved_idp_storage_needs_login(self):
         hr.forget_idp_storage()
         self.assertEqual(self.run_chain([]), hr.NEEDS_LOGIN)
@@ -110,7 +126,7 @@ class TestWiring(unittest.TestCase):
     def test_unknown_refresh_never_starts_a_login(self):
         from core import session
         with patch.object(session, "refresh_session_http", return_value=hr.UNKNOWN), \
-             patch.object(session, "quick_check_session_http", return_value=(False, None)), \
+             patch.object(session, "check_session_state", return_value=("expired", None)), \
              patch.object(session, "ensure_config_exists", return_value=(False, {"auto_login": {"username": "u", "password": "p"}})), \
              patch.object(session, "sync_playwright") as playwright, patch.object(session, "login_lock"):
             self.assertFalse(session.login_auto.__wrapped__(headless=True))

@@ -102,6 +102,31 @@ class TestRace(unittest.TestCase):
 
 
 class TestFileSource(unittest.TestCase):
+    def test_bom_does_not_bypass_invalid_stale_or_rejected_code_checks(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        for value, stale, tried in (("12345", False, set()), ("246810", True, set()), ("246810", False, {"246810"})):
+            with self.subTest(stale=stale, rejected=bool(tried)), tempfile.TemporaryDirectory() as temp:
+                path = Path(temp) / "code.txt"
+                path.write_text(value, encoding="utf-8-sig")
+                if stale:
+                    old = time.time() - 3600
+                    os.utime(path, (old, old))
+                result = race([file_source(path, poll=0.01)], timeout=0.1, tried=tried)
+                self.assertIsNone(result.code)
+                self.assertFalse(path.exists())
+
+    def test_powershell_utf8_bom_is_accepted_and_consumed(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "code.txt"
+            path.write_text("246810\n", encoding="utf-8-sig")
+            result = race([file_source(path, poll=0.01)], timeout=0.2)
+            self.assertEqual((result.code, result.source), ("246810", "file"))
+            self.assertFalse(path.exists())
+
     def test_fresh_file_is_read_and_deleted(self):
         import tempfile
         from pathlib import Path

@@ -240,7 +240,7 @@ class TestLoginDeadlines(unittest.TestCase):
 
     def test_cached_session_does_not_probe_messages(self):
         with patch.object(session, "ensure_config_exists", return_value=(False, {"auto_login": {"username": "fixture", "password": "fixture"}})), \
-             patch.object(session, "quick_check_session_http", return_value=(True, {})), \
+             patch.object(session, "check_session_state", return_value=("valid", {})), \
              patch.object(session, "check_sms_access") as access, contextlib.redirect_stdout(io.StringIO()):
             self.assertTrue(session.login_auto())
         access.assert_not_called()
@@ -264,7 +264,7 @@ class TestLoginRetry(unittest.TestCase):
             page.url = "https://blackboard.umbc.edu/ultra/course"
             return "accepted"
         with sso_and_verification(page), patch.object(session, "ensure_config_exists", return_value=(False, {"auto_login": {"username": "fixture", "password": "fixture"}})), \
-             patch.object(session, "quick_check_session_http", side_effect=[(False, None), (True, {})]), \
+             patch.object(session, "check_session_state", return_value=("expired", None)), \
              patch.object(session, "check_sms_access", return_value=(True, "")), \
              patch.object(session, "ensure_messages_sync", return_value=True), \
              patch.object(session, "get_current_max_rowid", return_value=10), \

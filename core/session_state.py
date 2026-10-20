@@ -121,16 +121,17 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def probe_session(timeout: float = 3.5) -> tuple[str, dict | None]:
+def probe_session(timeout: float = 3.5, *, cookies: list[dict] | None = None, url: str | None = None) -> tuple[str, dict | None]:
     """One REST call to /users/me with the saved cookies. Never logs in.
 
     Returns (VALID, user) | (EXPIRED, None) | (UNKNOWN, None).
     """
-    header = cookie_header()
+    target = url or BLACKBOARD_BASE + PROBE_PATH
+    header = cookie_header(url=target, cookies=cookies)
     if not header:
         return EXPIRED, None
     request = urllib.request.Request(
-        BLACKBOARD_BASE + PROBE_PATH,
+        target,
         headers={"Cookie": header, "User-Agent": user_agent(), "Accept": "application/json"},
     )
     opener = urllib.request.build_opener(_NoRedirect())

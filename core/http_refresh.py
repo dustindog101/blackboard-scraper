@@ -28,7 +28,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from core.config import BLACKBOARD_BASE, SESSION_DIR
-from core.session_state import UNKNOWN, VALID, cookie_header, load_cookies, user_agent
+from core.session_state import EXPIRED, UNKNOWN, VALID, cookie_header, load_cookies, user_agent
 
 REFRESHED = "refreshed"
 NEEDS_LOGIN = "needs_login"
@@ -125,11 +125,14 @@ def _jar_from(cookies: list[dict]) -> http.cookiejar.CookieJar:
 
 
 def _merge_cookies(old: list[dict], jar: http.cookiejar.CookieJar) -> list[dict]:
-    """Old cookies, with everything the refresh set or renewed replacing its match."""
-    merged = {(c["name"], c.get("domain"), c.get("path")): c for c in old}
+    """The live jar is authoritative, including cookies deleted by Set-Cookie."""
+    previous_cookies = {(c["name"], c.get("domain"), c.get("path")): c for c in old}
+    merged = {}
     for c in jar:
+        if c.is_expired():
+            continue
         key = (c.name, c.domain, c.path)
-        previous = merged.get(key, {})
+        previous = previous_cookies.get(key, {})
         merged[key] = {
             "name": c.name, "value": c.value or "", "domain": c.domain, "path": c.path,
             "expires": c.expires if c.expires else -1,
@@ -183,7 +186,6 @@ def refresh_session_http(timeout: float = 10.0) -> str:
     Returns REFRESHED (cookies saved, session verified), NEEDS_LOGIN (the IdP
     wants a person) or UNKNOWN (network trouble: change nothing).
     """
-    from core.session_state import probe_session
     cookies = load_cookies()
     storage = load_idp_storage()
     if not cookies or not storage:
@@ -201,7 +203,7 @@ def refresh_session_http(timeout: float = 10.0) -> str:
             if status in (301, 302, 303, 307, 308) and headers.get("Location"):
                 url, data = urllib.parse.urljoin(url, headers["Location"]), None
                 continue
-            if status >= 500:
+            if status >= 500 or status == 429:
                 return UNKNOWN
             if status != 200:
                 return NEEDS_LOGIN
@@ -225,20 +227,22 @@ def refresh_session_http(timeout: float = 10.0) -> str:
         verified = _verify(opener)
     except (urllib.error.URLError, TimeoutError, OSError):
         return UNKNOWN
-    if not verified:
+    if verified == UNKNOWN:
+        return UNKNOWN
+    if verified != VALID:
         return NEEDS_LOGIN
     _write_private(Path(SESSION_DIR) / "cookies.json", json.dumps(merged))
     if written:
         save_idp_storage({**storage, **written})
-    return REFRESHED if probe_session()[0] == VALID else NEEDS_LOGIN
+    return REFRESHED
 
 
-def _verify(opener) -> bool:
+def _verify(opener) -> str:
     status, _, body = _request(opener, BLACKBOARD_BASE + "/learn/api/public/v1/users/me", timeout=8)
     if status != 200:
-        return False
+        return EXPIRED if status in (301, 302, 303, 307, 308, 401, 403) else UNKNOWN
     try:
         data = json.loads(body)
     except ValueError:
-        return False
-    return isinstance(data, dict) and any(data.get(key) for key in ("id", "studentId", "userName"))
+        return EXPIRED
+    return VALID if isinstance(data, dict) and any(data.get(key) for key in ("id", "studentId", "userName")) else EXPIRED

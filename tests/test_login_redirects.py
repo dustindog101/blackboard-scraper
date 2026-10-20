@@ -38,11 +38,11 @@ class TestLoginRedirects(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
             stack.enter_context(patch.object(session, 'SESSION_DIR', Path(tmp)))
             stack.enter_context(patch.object(session, 'ensure_config_exists', return_value=(False, {'auto_login': {'username': 'fixture', 'password': 'fixture'}})))
-            stack.enter_context(patch.object(session, 'quick_check_session_http', return_value=(False, None)))
+            stack.enter_context(patch.object(session, 'check_session_state', return_value=('expired', None)))
             stack.enter_context(patch.object(session, 'sync_playwright'))
             stack.enter_context(patch.object(session, '_launch_context', return_value=(context, page)))
             stack.enter_context(patch.object(session, '_click_exact_text_in_any_frame', side_effect=click))
-            stack.enter_context(patch.object(session, '_is_authenticated_session', return_value=True))
+            stack.enter_context(patch('core.login_flow.probe_session', return_value=('valid', {'id': 'fixture'})))
             stack.enter_context(patch.object(session, 'track_session_usage'))
             stack.enter_context(patch('telegram.notifier.TelegramNotifier', return_value=SimpleNamespace(enabled=False)))
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))

@@ -171,7 +171,7 @@ class TestSMSRecovery(unittest.TestCase):
         with sso_and_verification(page), patch.object(session, "ensure_config_exists", return_value=(False, {"auto_login": {"username": "fixture", "password": "fixture"}})), \
              patch.object(session.sys, "platform", platform), \
              patch.object(session.sys.stdin, "isatty", return_value=terminal is not None), \
-             patch.object(session, "quick_check_session_http", return_value=(False, None)), \
+             patch.object(session, "check_session_state", return_value=("expired", None)), \
              patch.object(session, "check_sms_access", return_value=(True, "")), \
              patch.object(session, "ensure_messages_sync", return_value=True), \
              patch.object(session, "get_current_max_rowid", return_value=10), \

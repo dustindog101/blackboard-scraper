@@ -281,11 +281,13 @@ def _trust_prompt_visible(page) -> bool:
     return False
 
 
-def _wait_for_passcode_outcome(page, timeout: int = 15_000, previous_error: bool = False) -> str:
+def _wait_for_passcode_outcome(page, timeout: int = 15_000, previous_error: bool = False, cancel_event=None) -> str:
     """An unchanged input is pending, not proof that Duo rejected the code."""
     deadline = time.monotonic() + timeout / 1000.0
     error_cleared = not previous_error
     while True:
+        if cancelled(cancel_event):
+            raise LoginFlowError("Login cancelled.")
         if _is_clearly_authenticated_url(page.url) or _trust_prompt_visible(page):
             return "accepted"
         if _visible_duo_error(page):
@@ -366,18 +368,25 @@ def _sms_passcode_source(available, reason, start_rowid, sent_at, wait_seconds, 
     return Source("sms", "macOS Messages", run)
 
 
-def _telegram_passcode_source(notifier, attempt, max_attempts, hint):
+def _telegram_passcode_source(notifier, attempt, max_attempts, hint, excluded=frozenset(), method="sms"):
     """Ask the owner on Telegram and accept the reply."""
     if notifier is None:
         return Source("telegram", "Telegram", unavailable="not configured")
 
     def run(emit, stop):
-        notifier.send_raw_message(
-            f"🔐 <b>UMBC Duo passcode needed (attempt {attempt}/{max_attempts})</b>\n"
-            f"Duo sent a text{hint}. Reply with the 6–8 digit code."
+        def prompt():
+            if not stop.is_set():
+                instruction = f"Duo sent a text{hint}." if method == "sms" else "Open Duo Mobile for a current passcode."
+                notifier.send_raw_message(
+                    f"🔐 <b>UMBC Duo passcode needed (attempt {attempt}/{max_attempts})</b>\n"
+                    f"{instruction} Reply with the 6–8 digit code."
+                )
+        # Establish the update offset before asking. A fast reply must not be
+        # discarded as an old message while polling is starting.
+        code = None if stop.is_set() else notifier.poll_for_passcode(
+            timeout_sec=120, stop_event=stop, on_ready=prompt, excluded_codes=excluded,
         )
-        code = None if stop.is_set() else notifier.poll_for_passcode(timeout_sec=120, stop_event=stop)
-        if code:
+        if code and not stop.is_set():
             emit(code, time.time())
             return None
         return "no reply"
@@ -387,7 +396,8 @@ def _telegram_passcode_source(notifier, attempt, max_attempts, hint):
 def _approve_duo_push(page, notifier, cancelled, timeout: float = 90.0) -> bool:
     """Send (if needed) a Duo Push and wait for the user to approve it on their phone."""
     # Duo usually sends the push by itself on arrival; only press an explicit send button.
-    _click_exact_text_in_any_frame(page, ("Send Duo Push", "Send me a Push"), timeout=1500)
+    _click_exact_text_in_any_frame(page, ("Send Duo Push", "Send me a Push", "Duo Push"), timeout=1500,
+                                  stop_when=lambda: _trust_prompt_visible(page) or "duosecurity.com" not in page.url.lower())
     print("   📲 Approve the Duo push on your phone now (waiting up to 90s)...", flush=True)
     if notifier:
         _notify_login(notifier, "🔐 <b>Approve the Duo push on your phone</b> to finish the Blackboard login.")
@@ -732,9 +742,7 @@ async def check_session_async(quiet: bool = False, debug: bool = False, headless
                     login_time = meta.get("login_time_human", "Unknown")
                 except Exception:
                     pass
-            uid = user_data.get("studentId") or user_data.get("userName") or user_data.get("id")
-            print("✅ Session is ACTIVE (Verified via HTTP API in <150ms)")
-            print(f"   Student ID / User: {uid}")
+            print("✅ Session is ACTIVE (identity verified via HTTP API)")
             print(f"   Session Logged In: {login_time}")
         return True
 
@@ -800,8 +808,7 @@ def check_session(quiet: bool = False, debug: bool = False, headless: bool = Tru
     state, user_data = check_session_state()
     if state == VALID:
         if not quiet:
-            uid = user_data.get("studentId") or user_data.get("userName") or "Active"
-            print(f"✅ Session is ACTIVE (Student: {uid})")
+            print("✅ Session is ACTIVE (identity verified via HTTP API)")
         return True
 
     if state == UNKNOWN:
@@ -937,7 +944,7 @@ def login(force: bool = False, username: str = None, password: str = None, cdp_u
         if not username:
             username = auto_login_config.get("username")
             if username:
-                print(f"   📋 Using username from config: {username}")
+                print("   📋 Using username from config")
         if not password:
             password = auto_login_config.get("password")
             if password:
@@ -960,57 +967,17 @@ def login(force: bool = False, username: str = None, password: str = None, cdp_u
         except SystemExit:
             return
 
-        page.goto(f"{BLACKBOARD_BASE}/ultra/course")
-
-        # Basic auto-fill if credentials provided via CLI (useful for headless CI, though Duo blocks full automation)
-        if username and password:
-            print("   Attempting auto-fill of credentials...")
-            page.wait_for_timeout(3000)
-            if "google" in page.url or "sso" in page.url:
-                try:
-                    # Very brittle, Google changes this constantly. Best effort.
-                    if page.locator("input[type='email']").is_visible(timeout=2000):
-                        page.fill("input[type='email']", username)
-                        page.keyboard.press("Enter")
-
-                    page.wait_for_timeout(2000)
-                    if page.locator("input[type='password']").is_visible(timeout=3000):
-                        page.fill("input[type='password']", password)
-                        page.keyboard.press("Enter")
-                except Exception as e:
-                    print(f"   ⚠️ Auto-fill failed: {e}")
-
-        # Wait for the user to reach the actual Blackboard Ultra dashboard
-        print("⏳ Waiting for you to complete Duo 2FA...")
         try:
-            # The exact successful URL we wait for
-            page.wait_for_url("**/ultra/**", timeout=300_000) # Give them 5 mins to authenticate
-            print("✅ Reached Blackboard dashboard!")
-
-            try:
-                # Wait a few extra seconds to ensure cookies are fully set
-                page.wait_for_timeout(3000)
-                # Explicitly dump cookies (Chrome drops "Session" scoped cookies on exit otherwise)
-                import json
-                cookies = context.cookies()
-                (Path(SESSION_DIR) / "cookies.json").write_text(json.dumps(cookies))
-                record_idp_storage(context)
-            except Exception:
-                print("✅ Session saved (window closed early).")
-
-        except PlaywrightTimeout:
-            print("❌ Login timed out. Did not reach the dashboard within 5 minutes.")
+            page.goto(f"{BLACKBOARD_BASE}/ultra/course", wait_until="domcontentloaded", timeout=30_000)
+            print("⏳ Waiting for you to complete UMBC login and Duo 2FA...")
+            wait_for_blackboard(context, page, BLACKBOARD_BASE, timeout=300_000)
+            _persist_login(context, None, "✨ Session saved successfully.")
+        except LoginFlowError as error:
+            print(f"❌ {error}")
+        except PlaywrightError:
+            print("❌ Login browser failed. Saved cache preserved; run bb login --manual again.")
+        finally:
             context.close()
-            return
-
-        # Verify it's actually logged in
-        if _is_authenticated_session(page):
-            track_session_usage("login")
-            print("✨ Session saved successfully.")
-        else:
-            print("⚠️ URL looks correct, but it might still be a login page. Please verify by running 'bb check'.")
-
-        context.close()
 
 
 @_exclusive_login(False)
@@ -1075,7 +1042,8 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
             if save_creds:
                 save_auto_login_credentials(usr, pwd)
             if chosen_mode == "manual":
-                login(force=force, username=usr, password=pwd, cdp_url=cdp_url)
+                # This entrypoint already owns the login lock.
+                login.__wrapped__(force=force, username=usr, password=pwd, cdp_url=cdp_url)
                 valid, _ = quick_check_session_http()
                 return valid
             if chosen_mode == "auto_exp":
@@ -1090,10 +1058,13 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
             return False
 
     if not force:
-        valid, _ = quick_check_session_http()
+        state, _ = check_session_state()
         if _cancelled():
             return False
-        if valid:
+        if state == UNKNOWN:
+            print(f"⚠️ {NETWORK_MESSAGE}", file=sys.stderr)
+            return False
+        if state == VALID:
             print("✅ You are already logged in! (Use 'bb login --force' to re-authenticate)")
             return True
         refreshed = _http_refresh()
@@ -1133,7 +1104,6 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
             print("   ⚠️ Messages could not be started. Open Messages to enable SMS syncing, or enter the code manually.")
     if _cancelled():
         return False
-    attempt_events = []
 
     with sync_playwright() as p:
         try:
@@ -1204,7 +1174,7 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 print("   ❌ Duo shows no text, push or passcode method bb can use. "
                       "Add one in your Duo settings or run bb login --manual.")
                 return False
-            method = methods[0]
+            method = "passcode" if (passcode or code_file) and "sms" not in methods and "passcode" in methods else methods[0]
             if method == "push":
                 if not _approve_duo_push(page, tg_notifier, _cancelled):
                     return False
@@ -1215,9 +1185,9 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
 
             if method != "push":
                 # --- 6. SELECT "TEXT MESSAGE PASSCODE" SPECIFICALLY ---
-                login_stage = "selecting Duo text message passcode"
+                login_stage = "selecting Duo passcode method"
                 if "duosecurity.com" in page.url.lower():
-                    print("   ↳ Selecting 'Text message passcode'...")
+                    print(f"   ↳ Selecting {'Text message passcode' if method == 'sms' else 'Duo Mobile passcode'}...")
                     try:
                         if _duo_passcode_input(page) is None:
                             start_rowid = get_current_max_rowid() if sms_available else 0
@@ -1226,7 +1196,7 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                                 if _returned_to_blackboard(context, page):
                                     return _persist_login(context, login_stop_event, "✨ Auto-Login Successful! (Duo passed this device.)")
                                 raise PlaywrightTimeout("Text message passcode control not found")
-                            print("   ↳ Clicked 'Text message passcode'. Passcode is being sent...")
+                            print("   ↳ Passcode is being sent..." if method == "sms" else "   ↳ Enter the current passcode from Duo Mobile.")
                         else:
                             print("   ↳ Passcode input already active.")
                     except PlaywrightTimeout:
@@ -1289,14 +1259,12 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 for attempt in range(1, max_attempts + 1):
                     if _cancelled():
                         return False
-                    attempt_stop = threading.Event()
-                    attempt_events.append(attempt_stop)
                     if passcode and attempt == 1:
                         sources = [immediate_source(passcode)]
                         window = 5.0
                     else:
                         sources = [_sms_passcode_source(sms_available, sms_reason, start_rowid, trigger_time, sms_wait_seconds, frozenset(tried_codes)),
-                                   _telegram_passcode_source(tg_notifier, attempt, max_attempts, sent_to_hint),
+                                   _telegram_passcode_source(tg_notifier, attempt, max_attempts, sent_to_hint, frozenset(tried_codes), method),
                                    terminal.source() if terminal else Source("cli", "terminal", unavailable="not an interactive terminal")]
                         if code_file:
                             sources.append(file_source(code_file))
@@ -1306,7 +1274,6 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                             print("   ⚠️ Enter a different passcode, or request a new one in Duo. The rejected code will be ignored.")
                         print(f"   📲 Waiting for your Duo passcode{sent_to_hint} (attempt {attempt}/{max_attempts}).")
                     race = collect_passcode(sources, tried=tried_codes, sent_at=trigger_time, timeout=window, cancel=login_stop_event)
-                    attempt_stop.set()
                     if _cancelled():
                         return False
                     code = race.code
@@ -1339,7 +1306,7 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                     # waste a timeout after Duo has already redirected.
                     if not _click_exact_text_in_any_frame(page, "Verify", timeout=1000):
                         passcode_input.press("Enter", timeout=2000, no_wait_after=True)
-                    outcome = _wait_for_passcode_outcome(page, previous_error=previous_error)
+                    outcome = _wait_for_passcode_outcome(page, previous_error=previous_error, cancel_event=login_stop_event)
                     if _cancelled():
                         return False
                     if outcome == "accepted":
@@ -1400,8 +1367,6 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
 
         finally:
             login_stop_event.set()
-            for event in attempt_events:
-                event.set()
             for tab in list(context.pages):
                 try:
                     tab.close(run_before_unload=False)
@@ -1480,13 +1445,13 @@ async def _login_auto_async(**kwargs):
         raise
 
 
-async def _require_session_async(cdp_url: str = None) -> bool:
+async def _require_session_async(cdp_url: str = None, checked_state: str | None = None) -> bool:
     """Fast check for session before async scraping with auto-recovery and TUI setup."""
     if cdp_url:
         return True
 
     # One sub-150ms HTTP probe. Only a confirmed expiry may start a login (which texts a Duo code).
-    state, _ = check_session_state()
+    state = checked_state if checked_state is not None else check_session_state()[0]
     if state == VALID:
         return True
     if state == UNKNOWN:
@@ -1494,8 +1459,9 @@ async def _require_session_async(cdp_url: str = None) -> bool:
         return False
 
     # Expired: the HTTPS refresh needs no browser and no Duo text, so it goes first.
-    if await asyncio.to_thread(_http_refresh):
-        return True
+    refreshed = await asyncio.to_thread(_http_refresh)
+    if refreshed is not False:
+        return bool(refreshed)
 
     # Session missing or expired -> check config & credentials
     print("\n⚠️ No active Blackboard session detected.")
@@ -1542,20 +1508,21 @@ async def _require_session_async(cdp_url: str = None) -> bool:
     return False
 
 
-def _require_session(cdp_url: str = None) -> bool:
+def _require_session(cdp_url: str = None, checked_state: str | None = None) -> bool:
     """Check session before scraping with auto-recovery and TUI setup."""
     if cdp_url:
         return True
 
-    state, _ = check_session_state()
+    state = checked_state if checked_state is not None else check_session_state()[0]
     if state == VALID:
         return True
     if state == UNKNOWN:
         print(f"⚠️ {NETWORK_MESSAGE}", file=sys.stderr)
         return False
 
-    if _http_refresh():
-        return True
+    refreshed = _http_refresh()
+    if refreshed is not False:
+        return bool(refreshed)
 
     print("\n⚠️ No active Blackboard session detected.")
     created_blank, cfg = ensure_config_exists(notify=True)

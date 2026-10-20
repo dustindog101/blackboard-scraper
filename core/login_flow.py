@@ -7,6 +7,8 @@ from urllib.parse import urlsplit
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from core.session_state import VALID, probe_session
+
 # wait_for_sso outcomes.
 DUO = 'duo'
 AUTHENTICATED = 'authenticated'
@@ -31,18 +33,17 @@ def cancelled(event):
 
 
 def verify_session(context, base, timeout=2000):
-    """Probe current browser cookies without replacing the saved cache."""
-    response = context.request.get(
-        base + '/learn/api/public/v1/users/me',
-        headers={'Accept': 'application/json'}, timeout=timeout, max_redirects=0,
+    """Verify a cookie snapshot without mutating the browser's in-flight SSO jar.
+
+    BrowserContext.request shares cookies with the browser. An early 401 can
+    set an unauthenticated /learn/api cookie that shadows the later SAML cookie.
+    The REST probe sends a filtered snapshot and accepts no response cookies.
+    """
+    state, _ = probe_session(
+        timeout=timeout / 1000, cookies=context.cookies(),
+        url=base + '/learn/api/public/v1/users/me',
     )
-    try:
-        if response.status != 200:
-            return False
-        data = response.json()
-        return isinstance(data, dict) and any(data.get(key) for key in ('id', 'studentId', 'userName'))
-    finally:
-        response.dispose()
+    return state == VALID
 
 
 def is_verified(context, base, timeout=2000):
