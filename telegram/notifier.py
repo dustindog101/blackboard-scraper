@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 import urllib.parse
 import urllib.request
 
+from core.sms_listener import normalize_passcode
 from telegram.config import get_telegram_config
 from telegram.formatter import (
     format_announcement_alert,
@@ -76,7 +77,7 @@ class TelegramNotifier:
 
     def poll_for_passcode(self, timeout_sec: int = 120, stop_event: Optional[Any] = None) -> Optional[str]:
         """
-        Polls Telegram getUpdates for an incoming 6-digit Duo passcode from admin_chat_id.
+        Polls Telegram getUpdates for an incoming 6–8 digit Duo passcode from admin_chat_id.
         Safely returns None if disabled, on network error, or if timeout expires.
         """
         if not self.enabled or not self.bot_token or not self.admin_chat_id:
@@ -111,10 +112,9 @@ class TelegramNotifier:
                             # Check if message is from configured admin
                             if str(from_id) == str(self.admin_chat_id):
                                 text = (msg.get("text") or "").strip()
-                                # Look for 6-digit passcode pattern
-                                match = re.search(r"\b(\d{6})\b", text)
+                                match = re.search(r"(?<![0-9])([0-9]{6,8})(?![0-9])", text)
                                 if match:
-                                    return match.group(1)
+                                    return normalize_passcode(match.group(1))
             except Exception:
                 pass
 
