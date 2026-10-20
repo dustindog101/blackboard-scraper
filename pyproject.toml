@@ -14,7 +14,6 @@ authors = [
 ]
 dependencies = [
     "playwright>=1.40.0",
-    "beautifulsoup4>=4.12.0",
     "pypdf>=4.0.0",
     "tzdata>=2024.1; sys_platform == 'win32'",
 ]
@@ -25,6 +24,7 @@ menubar = [
 ]
 dev = [
     "ruff>=0.4.0",
+    "pytest>=8.0",
     "pre-commit>=3.7.0",
 ]
 
