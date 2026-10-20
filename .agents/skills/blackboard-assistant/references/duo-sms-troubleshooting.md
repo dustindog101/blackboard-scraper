@@ -1,21 +1,21 @@
-# Duo 2FA SMS Passcode Extraction & Troubleshooting
+# Login recovery
 
-### Mechanism Overview
-1. UMBC Duo login initiates an SMS text message dispatch to student's phone (`ending in 2146`).
-2. macOS Messages automatically syncs SMS/iMessage texts to local database `~/Library/Messages/chat.db`.
-3. `core/sms_listener.py` captures the highest existing `ROWID` before triggering the button, then polls SQLite every 0.5s for rows where `ROWID > start_rowid` and `is_from_me = 0`.
-4. Extracted codes are matched against ranked regex patterns (`UMBC SMS passcode.*: (\d{7})` or standard 6-digit codes).
+Use plain `bb login` for recovery; reserve `--force` for deliberate clean
+reauthentication. Never interpret a timeout or service failure as proof of expiry.
+An active remembered UMBC session may renew Blackboard over HTTPS without Duo.
 
-### Troubleshooting Steps
+When Duo is required, the login detects offered methods. Messages, configured
+Telegram, an interactive terminal and `--code-file` can supply a fresh passcode;
+accounts without SMS may offer push or a manual passcode. Keep one running login
+alive while supplying its response, rather than restarting and resending codes.
 
-1. **Permission / Full Disk Access**:
-   - If `chat.db` raises `PermissionDenied` or `Operation not permitted`:
-     - Ensure Terminal / Python has Full Disk Access in **macOS System Settings → Privacy & Security → Full Disk Access**.
-     - `core/sms_listener.py` automatically attempts fallback via `/opt/homebrew/bin/imsg`.
+If macOS Messages is unavailable in this launcher, use the remaining offered input
+sources. Full Disk Access is launcher-specific; a failure here does not establish
+that the user's Terminal lacks permission. Never copy message bodies or codes into
+logs or notes. On Windows, do not expect the macOS Messages reader.
 
-2. **Duo Prompt Timeout**:
-   - Default timeout is **90 seconds**.
-   - If cellular SMS is delayed, the dual-channel queue accepts manual entry via terminal prompt or Telegram reply (`@blackboardscrapbot`).
-
-3. **Wrong Course Detection**:
-   - If past courses are detected, run `python3 main.py --discover` to refresh term isolation for **Fall 2026**.
+For file handoff, use a private temporary path, wait for `WAITING_FOR_CODE`, then
+write the fresh code while that process waits. Old input is discarded and consumed
+input deleted. See [CLI authentication](../../../../docs/CLI_REFERENCE.md) and
+`bb login --help` for supported flags and deadlines. Use `bb login --manual` when
+the offered verification requires direct user interaction.

@@ -1,155 +1,50 @@
 ---
 name: blackboard-assistant
-description: Comprehensive operational runbook and automation skill for UMBC Blackboard Ultra. Use whenever the user asks to scrape or check Blackboard, view grades, check upcoming due dates/calendar, fetch announcements, run daily briefings, search course outlines/syllabi, auto-discover active semester courses, manage the Telegram bot daemon (@blackboardscrapbot), monitor session health/lifespan telemetry, or perform automated SSO logins with macOS SMS 2FA extraction.
+description: Read UMBC Blackboard through the bb CLI, inspect course work and grades, or recover its login. Use for Blackboard requests; use school ops skills only for an explicitly requested job or tracker update.
 ---
 
-# 🎓 UMBC Blackboard Ultra Assistant & Scraper Skill
+# Blackboard Assistant
 
-This skill teaches agents how to operate, debug, and query the **UMBC Blackboard Ultra Scraper & Academic Assistant** toolsuite.
+Use this skill with the checkout that supplies the executable. Global `bb` can point to a different checkout: inspect its launcher before relying on worktree-only features. In a selected checkout, run `.venv/bin/python main.py <command>`.
 
----
+Read requests stay read-only. Do not start attempts, submit, send notifications, update trackers, download files, or change course configuration unless the request calls for that action. Existing user authorization applies. Keep credentials, cookies, Duo codes and personal identifiers out of output and durable notes.
 
-## ⚡ Quick Reference: Most Common Commands
+## Choose the read
 
-Commands can be run globally via **`bb`**, **`blackboard`**, or **`bbscraper`** from any terminal directory (or `./.venv/bin/python main.py <command>` from the repo root). All legacy `--flag` invocations remain supported via the Legacy Flag Interceptor.
+| Request | Command |
+| --- | --- |
+| What needs doing this week? | `bb due 7d --exclude-completed` |
+| Anything overdue? | `bb due overdue` |
+| Daily overview | `bb briefing` |
+| Grades | `bb grades` or `bb grades <COURSE>` |
+| Recent instructor posts | `bb announcements --since 7d` |
+| Verified unread posts | `bb announcements --unread` (requires browser verification) |
+| Find a gradable item | `bb assignments <COURSE> --filter "<title terms>"` |
+| Instructions / rubric | `bb assignment "<exact title>" -c <COURSE>`; add `--rubric` for visible rubric |
+| Existing submission / answers | The same assignment command with `--full` |
+| Course material | `bb outline <COURSE>`, `bb search "<terms>" -c <COURSE>` |
+| Configured / enrolled courses | `bb courses` / `bb terms` |
 
-| Goal | Modern CLI Command | Output / Behavior |
-| :--- | :--- | :--- |
-| **Daily Academic Briefing** | `bb briefing` | Concurrent aggregation across all courses (<6s) |
-| **Upcoming Deadlines (7d)** | `bb due 7d` | Fast HTTP REST calendar & gradebook deadline schedule (<200ms) |
-| **Extended Deadlines** | `bb due 14d` / `bb due 150d` | Relative date window filtering for all upcoming assignments |
-| **Global Calendar View** | `bb calendar` | Direct HTTP REST query (`/calendars/items`) with localized dates |
-| **Course Announcements** | `bb announcements` | Fast REST API extraction with HTML cleanup & unread status |
-| **Latest Grades** | `bb grades` | Course gradebook columns, due dates, points, and running grades |
-| **Course Outline (Shallow)** | `bb outline MATH215` | Default shallow view with folder item counts & IDs |
-| **Selective Folder Expansion** | `bb outline MATH215 -f "Homework"` | Selectively expands target folder by name or ID |
-| **Full Outline Tree** | `bb outline MATH215 --expand-all` | Full recursive tree with all subfolders expanded |
-| **Interactive Folder Explorer** | `bb outline MATH215 -i` | Interactive terminal menu to browse & expand folders |
-| **List Course Assignments** | `bb assignments AGNG` | Lists all assignments, tests, and discussions with unique IDs (<150ms via HTTP fast-path) |
-| **Inspect Assignment / Submission** | `bb assignment <ID_or_Title>` | Shows instructions, brief details and rubric/work hints; use --rubric or --full for additional detail (non-destructive) |
-| **Clean Outline JSON** | `bb outline MATH215 --json` | Compact, streamlined JSON without bloated empty fields |
-| **Download File / Note** | `bb download "Worksheet_1.pdf"` | Auto-discovers course and downloads file directly to disk |
-| **Download by Item ID** | `bb download _8825690_1` | Downloads specific Blackboard item/notebook by exact ID |
-| **Active Course Discovery** | `bb discover` | Intelligently isolates current active term (Fall 2026) in <200ms |
-| **Session Health Probe** | `bb check` / `bb session check` | Ultra-fast HTTP REST API probe (<150ms) |
-| **Session Lifespan Stats** | `bb session stats` | Displays telemetry, rolling average lifespan, and auto-refresh timing |
-| **Automated 2FA Login** | `bb login` | Full SSO login with real-time macOS SMS Duo code interception |
-| **Manual Browser Login** | `bb login --manual` | Opens visible browser window for manual SSO / Touch ID |
-| **Telegram Bot Status** | `bb bot status` | Inspects bot daemon PID, RSS memory, and session status |
-| **Restart Bot Daemon** | `bb bot restart` | Gracefully reloads Telegram daemon |
-| **Launch Menubar App** | `bb menubar` | Starts native macOS status bar app (`🎓 BB 🟢`) |
+Text output is suitable for direct answers. Use `--json` for parsing; stdout should contain one JSON document and diagnostics go to stderr. Dates use `due_at` in structured output; present local time with its zone.
 
----
+Grades use the course's visible official total where identified, otherwise a clearly labeled calculation from included graded points. Preserve that source label: a points calculation does not establish a weighted final grade. Status is shared across grades, due, briefing and assignments: `graded`, `needs_grading`, `submitted`, `not_submitted`, `exempt`, `unknown`. Unknown or inaccessible data is not proof of missing work or no grades. A discussion's raw `NEEDS_GRADING` is insufficient without the shared model's own-post check.
 
-## 🧭 Agent Decision Tree: Handling User Prompts
+Recent announcements are not necessarily unread. REST read state is unknown unless verified. Do not infer publisher completion, attendance or credit from Blackboard metadata; a provider-specific request needs that provider's authoritative state. Assignment inspection identifies external tools without launching them.
 
-### 1. "What do I have due this week?" / "Check my deadlines"
-1. Verify session: `bb check`.
-2. If expired: run `bb login` to refresh session with zero typing.
-3. Run: `bb due 7d` (or `bb due 7d --json`).
-4. Format output nicely with Course Name, Assignment Title, Due Date, and Status.
+`bb discover` replaces the configured course list. Use it for requested discovery/term changes, not merely to list enrollments. Derive courses and terms live instead of using fixed semester lists or example IDs.
 
-### 2. "Check my grades" / "Did any new grades post?"
-1. Run `bb grades` (or `bb grades IS410`).
-2. Report each course's graded items, due dates, and point weights.
+## Session and login
 
-### 3. "Check announcements" / "What did professors post?"
-1. Run `bb announcements` (or `bb announcements ECON122`).
-2. Displays formatted announcements with relative posting dates and unread status.
+Run the requested read directly; it already probes the session. Use `bb check` when session health itself is the question. Verify `/users/me` identity when choosing between accounts; a successful request alone does not identify the intended account.
 
-### 4. "Log me in" / "Refresh my Blackboard session"
-1. Run `bb login --force`.
-2. The engine will:
-   - Load student credentials from `config.json` (`BH69617`).
-   - Fill username and password on UMBC SSO portal.
-   - Select Duo "Text message passcode".
-   - Intercept the incoming Duo text code directly from macOS Messages (`~/Library/Messages/chat.db`) via monotonic ROWID delta tracking in <3ms.
-   - Submit the passcode and save fresh session cookies.
+- Active: continue.
+- Expired: plain `bb login` first reuses the current session or attempts HTTPS refresh before browser SSO.
+- Unknown/network/server failure: report unavailable and retry reasonably; do not treat it as expiry or trigger forced login.
 
-### 5. "Search for [Topic] in my classes" (e.g. "Find the syllabus for database")
-1. Run `bb search "Syllabus"`.
-2. Returns matching document links, descriptions, and parent folder paths.
+Use `bb login --force` only when the user requests a clean reauthentication or concrete recovery requires clearing the saved sign-in. Browser login uses the installed Chromium-family OS default when supported, then installed alternatives with an explanation; bundled Chromium is optional. Do not install a browser to answer a routine read.
 
-### 6. "Download [File / Note / Worksheet / Syllabus]"
-1. Find item in outline: `bb outline <course> -f "<folder_name>"` (e.g. `bb outline AGNG -f "Start Here"`).
-2. Download by ID or Title: `bb download "<file_name_or_id>"` (e.g. `bb download _8837015_1` or `bb download "Fall 2026 Syllabus"`).
-3. The downloader will automatically locate the correct course and save the file into `downloads/<CourseName>/`.
+Duo methods depend on what the page offers (SMS, push or passcode). Let the existing login process collect the response; do not restart it just to deliver a late code. For an agent-mediated file handoff, start `bb login --code-file <private temporary path>` once, wait for `WAITING_FOR_CODE`, then deliver only the user's fresh code to that path. The login discards a pre-existing file and deletes a consumed code. Keep the same process alive. If the user completes push approval, continue that flow. Use `bb login --manual` when manual browser completion is needed.
 
-### 7. "Which courses am I enrolled in?"
-1. Run `bb courses`.
-2. If courses appear outdated or user changed semesters, run `bb discover` to auto-detect the current semester.
+## Details when needed
 
-### 8. "Check / inspect / solve an assignment or view my submission"
-1. **List or search assignments**: `bb assignments <course> --filter <text>` (e.g. `bb assignments ECON --filter "M3"`). This is the discovery step when a short title could match multiple items.
-2. **Inspect one item**: `bb assignment <ID_or_Title> -c <course>` shows instructions and concise details, with a hint if a rubric is available. Use `--instructions` for just instructions plus the hint, `--rubric` for only the visible rubric, or `--full` for instructions, rubric and accessible existing questions/answers, your submitted posts or file metadata. The flags are mutually exclusive and apply to JSON/Markdown too. Native rubric previews require `displayBefore: true`; linked course rubric documents have separate access rules. Lean views skip previous-work body requests. Explicit instruction documents (supported Google Docs, Blackboard PDF/DOCX files) may be read; external learning tools are identified and never launched. No mode starts an attempt unless `--start-attempt` is given; that flag implies full output and cannot be combined with focused views. Timed exams still require `--force-start`.
-3. **Use structured output when scripting**: append `--json`; human-readable output requires no `jq` or other filter.
-4. **Download required readings/syllabus**: `bb download "<file_or_id>"` (e.g. `bb download "Fall 2026 Syllabus"`).
-5. **Answer questions**: Read the downloaded course file/syllabus and cross-reference with the questions from `bb assignment`.
-
-Short title searches are case-insensitive and auto-resolve only when the best match is unique. If several items match, the command lists candidates and asks for a more specific title instead of silently choosing the first result.
-
----
-
-## 🏗️ Dual-Engine Architecture (HTTP REST + Playwright)
-
-The toolsuite uses a high-performance **dual-engine architecture**:
-1. **⚡ HTTP REST Fast-Path (Primary)**:
-   - All read operations (`due`, `calendar`, `announcements`, `grades`, `outline`, `search`, `profile`, `check`, `assignments`, `assignment`) execute via direct HTTP JSON requests using cached session cookies in `<150ms`.
-2. **🌐 Playwright Browser Fallback (Secondary)**:
-   - If an HTTP endpoint fails or is blocked, the scraper automatically notifies the user (`⚠️ HTTP <Feature> API unavailable; falling back to Playwright browser scraper...`) and seamlessly delegates to Playwright DOM extraction.
-3. **🔑 Playwright Auth Engine**:
-   - Spawns persistent browser context for initial UMBC SSO WebAuth login, Duo SMS 2FA passcode submission, and cookie persistence.
-
-```text
-tools/blackboard-scraper/
-├── main.py                     # Primary CLI router & async entrypoint
-├── menubar.py / ui/menubar.py  # Native macOS Menubar app (rumps)
-├── config.json                 # Enrolled active courses & auto_login credentials
-├── .session/                   # Cookies, session metadata, bot.log & PID locks
-├── core/
-│   ├── api.py                  # High-speed REST API client (<150ms HTTP probes)
-│   ├── session.py              # Playwright SSO login & session lifecycle
-│   ├── session_tracker.py      # Session lifespan telemetry & rolling analytics
-│   ├── sms_listener.py         # macOS Messages SQLite 2FA passcode extractor
-│   ├── course_discovery.py     # Academic term intelligence & course filtering
-│   ├── async_engine.py         # Playwright async pool & concurrency manager
-│   ├── route_optimizer.py      # Resource blocker (saves 70% bandwidth & RAM)
-│   └── diff_tracker.py         # Content hashing for instant change detection
-├── scrapers/
-│   ├── briefing.py             # Global aggregator (due dates + grades + news)
-│   ├── calendar.py             # Calendar REST fast-path + Playwright fallback
-│   ├── due_dates.py            # Cross-source deadline aggregator & window filter
-│   ├── grades.py               # Gradebook REST fast-path + Playwright fallback
-│   ├── announcements.py        # Announcements REST fast-path + Playwright fallback
-│   ├── outline.py              # Course outline REST fast-path + tree builder
-│   └── search.py               # Parallel course keyword search & file downloader
-└── telegram/
-    ├── bot.py                  # Long-polling Telegram bot daemon (@blackboardscrapbot)
-    ├── notifier.py             # HTML message formatter & Telegram dispatcher
-    └── keyboard.py             # Inline interactive keyboards & menus
-```
-
----
-
-## ⚠️ Critical Gotchas & Rules for Agents
-
-1. **Dual-Engine Execution**:
-   - Scrapers automatically attempt the high-speed HTTP REST API first (<150ms).
-   - Never remove the Playwright fallbacks; they ensure uninterrupted operation if Blackboard applies dynamic restrictions.
-2. **Current Enrolled Courses**:
-   - Current semester is **Fall 2026** (Student: `Amanuel • BH69617`).
-   - Active courses: `IS 410`, `ECON 122`, `ENGL 100`, `MATH 215`, `AGNG 100`.
-   - Merged parent course IDs (e.g. `_105737_1` for IS 410) contain the actual content outline; child sections are auto-deduplicated.
-3. **Session Verification**:
-   - Do NOT launch a full browser to check session status. Use `quick_check_session_http()` or `bb check` (`python3 main.py check`), which verifies user authentication via REST API in `<120ms`.
-4. **macOS 2FA SMS Interception**:
-   - macOS Messages SQLite DB is located at `~/Library/Messages/chat.db`.
-   - Always track incoming SMS using `ROWID > start_rowid` to avoid carrier timestamp drift.
-
-
----
-
-## 📚 Detailed Reference Manuals
-- [CLI Reference Guide](./references/cli-reference.md)
-- [API & REST Endpoints](./references/api-endpoints.md)
-- [Duo SMS 2FA Troubleshooting](./references/duo-sms-troubleshooting.md)
+Read the checkout's [CLI reference](../../../docs/CLI_REFERENCE.md) for command flags and output shapes; use `bb <command> --help` to confirm installed support. For scraper changes, read [coding standards](../../../docs/agents/coding-standards.md) and the relevant ADR. Do not preload architecture and login internals for routine reads.

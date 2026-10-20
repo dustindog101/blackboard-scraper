@@ -1,31 +1,19 @@
-# Blackboard Ultra REST API Endpoints Reference
+# REST inspection notes
 
-All endpoints query `https://blackboard.umbc.edu/learn/api/public/v1` using session cookies stored in `.session/cookies.json`.
+Use these only when diagnosing or extending the scraper; routine questions should
+use the CLI. Requests use the shared cookie filter and REST client. Do not print
+identity responses or auth data.
 
-### 1. User Profile & Health Probe
-- **Endpoint**: `GET /learn/api/public/v1/users/me`
-- **Purpose**: Ultra-fast session verification (<120ms). Returns student ID (`BH69617`), user ID (`_148386_1`), and name (`Amanuel Hailie`).
-- **Response Shape**:
-```json
-{
-  "id": "_148386_1",
-  "userName": "BH69617",
-  "name": {
-    "given": "Amanuel",
-    "family": "Hailie"
-  },
-  "studentId": "BH69617"
-}
-```
+- `GET /learn/api/public/v1/users/me`: verify authentication and intended identity.
+- `GET /learn/api/public/v1/terms`: term windows.
+- `GET /learn/api/public/v1/users/{userId}/courses?expand=course`: enrolled memberships.
+- `GET /learn/api/public/v2/courses/{courseId}/gradebook/columns`: visible gradable items.
+- `GET /learn/api/public/v2/courses/{courseId}/gradebook/users/{userId}`: student records
+  in one request per course; do not assume columns include scores.
+- `GET /learn/api/public/v1/courses/{courseId}/gradebook/schemas`: visible grade schemas.
 
-### 2. Academic Terms
-- **Endpoint**: `GET /learn/api/public/v1/terms`
-- **Purpose**: Retrieves all semester definitions (`Fall 2026`, `Spring 2026`, `Fall 2025`, etc.) with start and end dates.
-
-### 3. User Course Memberships
-- **Endpoint**: `GET /learn/api/public/v1/users/{userId}/courses?expand=course`
-- **Purpose**: Retrieves all lifetime course enrollments and joins term IDs to isolate the active semester.
-
-### 4. Direct Course Contents
-- **Endpoint**: `GET /learn/api/public/v1/courses/{courseId}/contents`
-- **Purpose**: Queries course folders, documents, and syllabus links without launching a browser.
+Endpoint paths and payloads may vary. Follow paging and distinguish expired auth,
+student visibility restrictions, missing data and network failure. Use the shared
+Gradable Item model rather than inferring completion from a raw discussion status.
+See [coding standards](../../../../docs/agents/coding-standards.md) and implementation
+in `core/gradebook.py` and `core/rest.py` for the maintained behavior.
