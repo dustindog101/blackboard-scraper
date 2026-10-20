@@ -13,7 +13,7 @@ An automated, high-performance headless scraper and academic intelligence engine
 - [⚡ Core Architectural Principles](#-core-architectural-principles)
 - [🚀 Quick Start](#-quick-start)
 - [🔐 Authentication & Headless Sessions](#-authentication--headless-sessions)
-- [🖥️ Beautiful CLI Output by Default](#️-beautiful-cli-output-by-default)
+- [CLI Output by Default](#cli-output-by-default)
 - [📦 Standardized v2 JSON Schemas](#-standardized-v2-json-schemas)
 - [🔀 Smart Course Selection Syntax](#-smart-course-selection-syntax)
 - [📚 Scraper Feature Reference](#-scraper-feature-reference)
@@ -196,7 +196,7 @@ Windows setup, run `bb discover` if your courses are not configured.
 
 ---
 
-## 🖥️ Beautiful CLI Output by Default
+## CLI Output by Default
 
 By default, **no Markdown files are saved to disk**. Commands print directly to terminal `stdout`:
 
@@ -226,7 +226,7 @@ By default, **no Markdown files are saved to disk**. Commands print directly to 
 Due in the next 7 days · 3 items
 
 Today, Tue Oct 20
-  1:00 PM EDT  ENGL 100  J#5: Library Research Module  10 pts  needs grading
+  1:00 PM EDT  ENGL 100  J#5: Library Research Module  10 pts  in progress (not submitted)
 
 Sun Oct 25
   11:59 PM EDT  AGNG 100  Module 8 Assignment  100 pts  not submitted
@@ -408,6 +408,24 @@ bb due 7d --exclude-completed        # Exclude graded/submitted
 ```
 
 ### 5. Course Announcements & Grades
+Grade text and saved Markdown show earned / possible points, an `official` or
+`calculated` source label, and how many items are graded. They do not display
+percentages, inferred letters, check marks, or emoji. When Blackboard supplies
+only a percent-scaled overall grade, the point total is labeled unavailable.
+JSON retains its `percent` and `letter` keys for compatibility; inferred
+letters are null.
+
+Submission wording follows the student's verified attempt or post. An
+`IN_PROGRESS` attempt displays `in progress (not submitted)` and remains open
+even when the public gradebook says Needs Grading.
+
+```text
+IS 410  Intro To Database Design
+  18 / 20 pts  (official: Overall Grade) · 1 of 2 graded
+  no due date  Quiz              18 / 20 pts  graded
+  no due date  Library Research  10 pts possible  in progress (not submitted)
+```
+
 ```bash
 bb announcements                     # Announcements across all courses
 bb announcements ECON122             # Announcements for single course

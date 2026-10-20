@@ -1,5 +1,10 @@
 # Blackboard candidate review — 2026-10-20
 
+Follow-up: the owner's correction exposed an unsupported submission inference after this
+review. See [submission status correction](submission-status-correction-2026-10-20.md).
+The historical test/command results below must not be treated as proof that every displayed
+completion state was independently verified.
+
 The review candidate combines `fix/cli-commands` (including `fix/status-model`),
 `fix/browser-login`, and the coding-standards cleanup. Production-code acceptance
 is against **bd49433**; subsequent parent changes are documentation only.

@@ -1,5 +1,11 @@
 # Final candidate acceptance — 2026-10-20
 
+Later correction: the command smokes below established execution, not the accuracy of every
+submission label. A user-reported false submission was reproduced and repaired after this
+acceptance run. See [submission status correction](submission-status-correction-2026-10-20.md)
+for the independent live attempt evidence and current regression results. These historical
+Windows results apply to bd49433, not the later status/output repair.
+
 Tested production-code commit: **`bd494336fef2d7b00deb4be7e765efd2bb1d1815`**.
 Result: native Windows offline/browser checks, one fresh Mac SSO, one fresh Windows SSO,
 and Windows read-command smoke passed. These are application acceptance observations,

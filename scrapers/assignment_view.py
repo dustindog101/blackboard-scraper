@@ -397,8 +397,12 @@ def format_assignment_view(data):
             lines += ["", rendered[min(starts):]]
         submission = data.get("submission")
         if submission:
-            lines += ["", "Your submission:"]
-            if submission.get("submitted_at"):
+            state = re.sub(r"[^A-Z]", "", str(data.get("status") or "").upper())
+            final = state in ("NEEDSGRADING", "COMPLETED", "SUBMITTED", "GRADED")
+            heading = ("Your draft (not submitted):" if state == "INPROGRESS" else
+                       "Your submission:" if final else "Your saved work (submission unverified):")
+            lines += ["", heading]
+            if final and submission.get("submitted_at"):
                 lines.append(f"Submitted: {_format_local_datetime(submission['submitted_at'])}")
             if submission.get("text"):
                 lines.append(submission["text"])

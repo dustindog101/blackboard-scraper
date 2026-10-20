@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from core.config import BLACKBOARD_BASE, load_courses
 from core.async_engine import AdaptiveDOM
 from core.gradebook import (
-    EXPIRED, GRADED, NOT_SUBMITTED, UNAVAILABLE, UNKNOWN, NEEDS_GRADING, SUBMITTED, EXEMPT,
+    EXPIRED, GRADED, NOT_SUBMITTED, UNAVAILABLE, UNKNOWN, SUBMITTED, EXEMPT,
     course_label, course_title, fetch_gradebooks, public_view, status_text,
 )
 from core.output import ensure_output_dir
@@ -38,7 +38,8 @@ def _cookie() -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 _UI_STATUS = (
-    ("needs grading", NEEDS_GRADING), ("not submitted", NOT_SUBMITTED), ("missing", NOT_SUBMITTED),
+    # Browser rows do not expose the student's attempt state; Needs Grading alone does not prove submission.
+    ("needs grading", UNKNOWN), ("not submitted", NOT_SUBMITTED), ("missing", NOT_SUBMITTED),
     ("submitted", SUBMITTED), ("graded", GRADED), ("exempt", EXEMPT),
 )
 
@@ -68,12 +69,12 @@ async def scrape_grades_playwright_async(course_id: str, page: Any) -> List[Dict
     url = f"{BLACKBOARD_BASE}/ultra/courses/{course_id}/grades"
     courses = load_courses()
     name = courses.get(course_id, course_id)
-    print(f"🎓 Scraping grades for {name} (Playwright fallback)...", file=sys.stderr)
+    print(f"Scraping grades for {name} (Playwright fallback)...", file=sys.stderr)
 
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
     except Exception as e:
-        print(f"   ⚠️ Navigation error for {name}: {e}", file=sys.stderr)
+        print(f"Navigation error for {name}: {e}", file=sys.stderr)
         return []
 
     # Wait for React/MUI table or empty state
@@ -89,7 +90,7 @@ async def scrape_grades_playwright_async(course_id: str, page: Any) -> List[Dict
     )
 
     if not matched_sel or "You can't access" in matched_sel:
-        print("   ℹ️  Course is currently unavailable or closed.", file=sys.stderr)
+        print("Course is currently unavailable or closed.", file=sys.stderr)
         return []
 
     grades: List[Dict[str, Any]] = []
@@ -140,12 +141,12 @@ async def scrape_grades_playwright_async(course_id: str, page: Any) -> List[Dict
         else:
             break
 
-    print(f"   ✅ Extracted {len(grades)} graded items from {name}.", file=sys.stderr)
+    print(f"Extracted {len(grades)} gradebook items from {name}.", file=sys.stderr)
     return grades
 
 
 async def _browser_fallback(failed: Dict[str, str], page: Optional[Any]) -> Dict[str, Dict[str, Any]]:
-    print(f"⚠️ HTTP Gradebook API unavailable for {len(failed)} course(s); falling back to Playwright browser scraper...", file=sys.stderr)
+    print(f"HTTP Gradebook API unavailable for {len(failed)} course(s); falling back to Playwright browser scraper...", file=sys.stderr)
 
     async def run(p: Any) -> Dict[str, Dict[str, Any]]:
         out = {}
@@ -207,41 +208,42 @@ def _num(value: Optional[float]) -> str:
     return "" if value is None else f"{value:.2f}".rstrip("0").rstrip(".")
 
 
+def _points(score: Optional[float], possible: Optional[float]) -> str:
+    if score is not None and possible is not None:
+        return f"{_num(score)} / {_num(possible)} pts"
+    if possible is not None:
+        return f"{_num(possible)} pts possible"
+    if score is not None:
+        return f"{_num(score)} pts earned; total unavailable"
+    return "point total unavailable"
+
+
 def _clip(text: str, width: int) -> str:
     return text if len(text) <= width else text[: width - 1] + "…"
 
 
 def overall_line(overall: Dict[str, Any]) -> str:
-    """`94.3% A  official (Overall Grade) · 7 of 9 graded`."""
+    """`85 / 100 pts (official: Overall Grade) · 7 of 9 graded`."""
     counts = f"{overall['graded']} of {overall['total']} graded"
     source = overall["source"]
     if overall.get("unavailable"):
         return "grades unavailable (partial data)"
     if source == "none":
         return f"no grade yet · {counts}"
-    parts = []
-    if overall["percent"] is not None:
-        parts.append(f"{overall['percent']:g}%" + (f" {overall['letter']}" if overall["letter"] else ""))
-    elif overall["letter"]:
-        parts.append(overall["letter"])
-    if overall["score"] is not None and overall["possible"]:
-        parts.append(f"{_num(overall['score'])} / {_num(overall['possible'])} pts")
+    points = _points(overall.get("score"), overall.get("possible"))
     label = f"official: {overall['label']}" if source == "official" and overall["label"] else source
     if source == "calculated":
         label = "calculated from graded points"
-    return f"{'  '.join(parts) or 'no value'}  ({label}) · {counts}"
+    return f"{points}  ({label}) · {counts}"
 
 
 def _item_row(i: Dict[str, Any]) -> tuple:
     due = format_local(parse_datetime(i["due_at"])) if i["due_at"] else "no due date"
-    score = f"{_num(i['score'])} / {_num(i['possible'])}" if i["score"] is not None and i["possible"] else (
-        f"{_num(i['possible'])} pts" if i["possible"] else "")
-    pct = f"{i['percent']:.1f}%" if i["percent"] is not None else ""
-    return (due, _clip(i["name"], 40), score, pct, status_text(i["status"], i))
+    return (due, _clip(i["name"], 40), _points(i.get("score"), i.get("possible")), status_text(i["status"], i))
 
 
 def summary_lines(pairs: List[tuple]) -> List[str]:
-    """One aligned line per course: `ECON 122  83.5% B  official    22 of 31 graded`. pairs = [(label, overall)]."""
+    """One aligned line per course: `ECON 122  85 / 100 pts  official  22 of 31 graded`."""
     cells = []
     for label, o in pairs:
         if o.get("unavailable"):
@@ -249,7 +251,7 @@ def summary_lines(pairs: List[tuple]) -> List[str]:
         elif o["source"] == "none":
             value, source = "no grade yet", ""
         else:
-            value = ((f"{o['percent']:g}%" if o["percent"] is not None else "") + (f" {o['letter']}" if o["letter"] else "")).strip() or "n/a"
+            value = _points(o.get("score"), o.get("possible"))
             source = o["source"]
         cells.append((label, value, source, f"{o['graded']} of {o['total']} graded"))
     widths = [max(len(c[i]) for c in cells) for i in range(3)]
@@ -271,7 +273,7 @@ def format_grades_text(books: List[Dict[str, Any]], summary: bool = False, summa
             return "\n".join(out)
         out.append("")
     all_rows = [_item_row(i) for b in books for i in b["items"]]
-    widths = [max((len(r[c]) for r in all_rows), default=0) for c in range(5)]
+    widths = [max((len(r[c]) for r in all_rows), default=0) for c in range(4)]
     for book in books:
         out.append(f"{course_label(book['course_name'])}  {course_title(book['course_name'])}".rstrip())
         out.append(f"  {overall_line(book['overall'])}")
@@ -279,8 +281,8 @@ def format_grades_text(books: List[Dict[str, Any]], summary: bool = False, summa
         if not items:
             out += ["  (no gradebook items)", ""]
             continue
-        for due, name, score, pct, status in (_item_row(i) for i in items):
-            out.append(f"  {due:<{widths[0]}}  {name:<{widths[1]}}  {score:>{widths[2]}}  {pct:>{widths[3]}}  {status}".rstrip())
+        for due, name, score, status in (_item_row(i) for i in items):
+            out.append(f"  {due:<{widths[0]}}  {name:<{widths[1]}}  {score:>{widths[2]}}  {status}".rstrip())
         notes = []
         with_feedback = sum(1 for i in items if i["feedback"])
         if with_feedback:
@@ -303,12 +305,11 @@ def save_grades(book: Dict[str, Any], course_id: str):
         f"# Grades: {book['course_name']}",
         f"_Scraped: {datetime.now().strftime('%Y-%m-%d %H:%M')}_",
         "", f"**Overall:** {overall_line(book['overall'])}", "",
-        "| Due | Item | Score | % | Status |", "|---|---|---|---|---|",
+        "| Due | Item | Points | Status |", "|---|---|---|---|",
     ]
     for i in book["items"]:
         due = format_local(parse_datetime(i["due_at"])) if i["due_at"] else "no due date"
-        score = f"{_num(i['score'])} / {_num(i['possible'])}" if i["score"] is not None and i["possible"] else ""
-        pct = f"{i['percent']:.1f}%" if i["percent"] is not None else ""
-        lines.append(f"| {due} | {i['name'].replace('|', '-')} | {score} | {pct} | {status_text(i['status'], i)} |")
+        points = _points(i.get("score"), i.get("possible"))
+        lines.append(f"| {due} | {i['name'].replace('|', '-')} | {points} | {status_text(i['status'], i)} |")
     filepath.write_text("\n".join(lines))
-    print(f"   💾 Saved to: {filepath.name}", file=sys.stderr)
+    print(f"Saved to: {filepath.name}", file=sys.stderr)

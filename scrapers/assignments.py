@@ -129,7 +129,9 @@ def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, An
         records = status_inputs["records"]
         record = (records or {}).get(col_id)
         status = (record or {}).get("status") or "NOT_ATTEMPTED"
-        model_status = item_status(c, record, status_inputs["posts"].get(col_id)) if records is not None else "unknown"
+        model_status = item_status(c, record, status_inputs["posts"].get(col_id),
+                                   status_inputs.get("attempts", {}).get(col_id),
+                                   attempts_checked=col_id in status_inputs.get("attempts", {})) if records is not None else "unknown"
 
         assignments.append({
             "id": content_id or col_id,

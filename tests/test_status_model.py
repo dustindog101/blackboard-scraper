@@ -52,6 +52,15 @@ class FakeApi:
         if path.endswith("/users/me"):
             return {"id": "_me_1"}
         for course, columns in self.columns.items():
+            if f"/courses/{course}/gradebook/columns/" in path and "/grades" in path:
+                column_id = path.split("/columns/")[1].split("/")[0]
+                record = next((r for r in self.records[course] if r.get("columnId") == column_id), None)
+                if not record:
+                    return {"results": []}
+                if "/attempts" in path:
+                    return {"results": [{"userId": "_me_1", "courseId": course, "gradeId": "grade-" + column_id,
+                                         "status": record.get("status")}]}
+                return {"results": [{"id": "grade-" + column_id, "userId": "_me_1", "courseId": course, "columnId": column_id}]}
             if f"/courses/{course}/gradebook/columns" in path:
                 return {"results": columns}
             if f"/courses/{course}/gradebook/users/" in path:
@@ -69,9 +78,9 @@ class TestItemStatus(unittest.TestCase):
     def test_every_status(self):
         c = col("c1", "HW")
         self.assertEqual(gb.item_status(c, rec("c1", "Graded", 9)), "graded")
-        self.assertEqual(gb.item_status(c, rec("c1", "NeedsGrading")), "needs_grading")
-        self.assertEqual(gb.item_status(c, rec("c1", "COMPLETED")), "submitted")
-        self.assertEqual(gb.item_status(c, rec("c1", "IN_PROGRESS")), "not_submitted")
+        self.assertEqual(gb.item_status(c, rec("c1", "NeedsGrading"), attempts=[{"status": "NEEDS_GRADING"}]), "needs_grading")
+        self.assertEqual(gb.item_status(c, rec("c1", "COMPLETED"), attempts=[{"status": "COMPLETED"}]), "submitted")
+        self.assertEqual(gb.item_status(c, rec("c1", "IN_PROGRESS")), "in_progress")
         self.assertEqual(gb.item_status(c, None), "not_submitted")
         self.assertEqual(gb.item_status(c, rec("c1", "GRADED", 9, exempt=True)), "exempt")
 
@@ -100,7 +109,7 @@ class TestBuildGradebook(unittest.TestCase):
         book = gb.build_gradebook("course", "IS 410 DB", columns, records, SCHEMA["results"])
         o = book["overall"]
         self.assertEqual((o["source"], o["label"], o["score"], o["possible"], o["percent"], o["letter"]),
-                         ("official", "Overall Grade", 94.0, 100.0, 94.0, "A"))
+                         ("official", "Overall Grade", 94.0, 100.0, 94.0, None))
         self.assertEqual([i["name"] for i in book["items"]], ["HW 1"])  # calculated columns are never items
 
     def test_calculated_total_when_no_official_column(self):
@@ -109,7 +118,7 @@ class TestBuildGradebook(unittest.TestCase):
         records = [rec("a", "GRADED", 9), rec("b", "GRADED", 14), rec("c", "NEEDS_GRADING"),
                    rec("e", "GRADED", 10, exempt=True)]
         o = gb.build_gradebook("course", "X", columns, records, SCHEMA["results"])["overall"]
-        self.assertEqual((o["source"], o["score"], o["possible"], o["percent"], o["letter"]), ("calculated", 23, 30, 76.7, "C"))
+        self.assertEqual((o["source"], o["score"], o["possible"], o["percent"], o["letter"]), ("calculated", 23, 30, 76.7, None))
         self.assertEqual((o["graded"], o["total"]), (2, 3))
 
     def test_excluded_items_with_reasons(self):
@@ -122,12 +131,13 @@ class TestBuildGradebook(unittest.TestCase):
         o = gb.build_gradebook("c", "X", [col("a", "A")], [], SCHEMA["results"])["overall"]
         self.assertEqual((o["source"], o["percent"]), ("none", None))
 
-    def test_letter_from_midpoint_schema(self):
-        self.assertEqual(gb.letter_for(97.5, MIDPOINT_SCHEMA), "A+")
-        self.assertEqual(gb.letter_for(94.3, MIDPOINT_SCHEMA), "A")
-        self.assertEqual(gb.letter_for(90.0, MIDPOINT_SCHEMA), "A-")
-        self.assertEqual(gb.letter_for(87.0, MIDPOINT_SCHEMA), "B+")
-        self.assertEqual(gb.letter_for(10.0, MIDPOINT_SCHEMA), "F")
+    def test_never_infers_a_letter_from_grade_schemas(self):
+        for schema in (MIDPOINT_SCHEMA, SCHEMA["results"]):
+            book = gb.build_gradebook("c", "X", [col("a", "HW"), calc("t")],
+                                      [rec("a", "GRADED", 9), rec("t", "GRADED", 95)], schema)
+            self.assertIsNone(book["overall"]["letter"])
+            calculated = gb.build_gradebook("c", "X", [col("a", "HW")], [rec("a", "GRADED", 9)], schema)
+            self.assertIsNone(calculated["overall"]["letter"])
 
     def test_sorted_by_due_date_and_documented_json_shape(self):
         columns = [col("c", "Late", due="2026-11-01T03:59:00Z"), col("n", "Undated"), col("a", "Early", due="2026-09-01T03:59:00Z")]
@@ -157,7 +167,7 @@ class TestFetch(unittest.TestCase):
     def setUp(self):
         gb._user_cache.clear()
 
-    def test_one_users_call_per_course_no_per_column_calls(self):
+    def test_bulk_records_plus_targeted_checks_only_for_ambiguous_items(self):
         columns = {"c1": [col("a", "A"), col("b", "B")], "c2": [col("x", "X")]}
         records = {"c1": [rec("a", "GRADED", 5), rec("b", "NEEDS_GRADING")], "c2": [rec("x", "GRADED", 10)]}
         api = FakeApi(columns, records)
@@ -165,7 +175,10 @@ class TestFetch(unittest.TestCase):
         self.assertEqual(result["c1"]["items"][0]["status"], "graded")
         self.assertEqual(sum("/users/me" in p for p in api.calls), 1)
         self.assertEqual(sum("/gradebook/users/_me_1" in p for p in api.calls), 2)
-        self.assertFalse(any("/grades?" in p for p in api.calls))
+        self.assertEqual(set(p for p in api.calls if "/grades?" in p),
+                         {f"/learn/api/v1/courses/{course}/gradebook/columns/{column}/grades?userId=_me_1"
+                          for course, column in (("c1", "a"), ("c1", "b"), ("c2", "x"))})
+        self.assertFalse(any("/schemas" in p for p in api.calls))
 
     def test_401_is_expired_not_empty(self):
         api = FakeApi({"c1": []}, {"c1": []}, status={"/gradebook/columns": 401})
@@ -283,19 +296,22 @@ class TestGradesOutput(unittest.TestCase):
             text = grades.format_grades_text([book])
         lines = text.splitlines()
         self.assertEqual(lines[0], "IS 410  Intro To DB")
-        for expected in ("94.3% A", "official: Overall Grade", "1 of 2 graded"):
+        for expected in ("94.3 / 100", "official: Overall Grade", "1 of 2 graded"):
             self.assertIn(expected, lines[1])
-        for expected in ("Wed Sep 30 11:59 PM EDT", "9 / 10", "90.0%", "not submitted"):
+        for expected in ("Wed Sep 30 11:59 PM EDT", "9 / 10", "not submitted"):
             self.assertIn(expected, text)
+        self.assertNotIn("%", text)
+        self.assertNotIn("✓", text)
         self.assertNotIn("Unopened", text)
         json.dumps(grades.grades_json([book]))
 
 
 class TestStudentWording(unittest.TestCase):
     def test_status_text(self):
-        self.assertEqual(gb.status_text("needs_grading"), "submitted ✓ (awaiting grade)")
-        self.assertEqual(gb.status_text("graded"), "✓ graded")
-        self.assertEqual(gb.status_text("graded", {"possible": 0}), "✓ graded (no points)")
+        self.assertEqual(gb.status_text("needs_grading"), "submitted (awaiting grade)")
+        self.assertEqual(gb.status_text("graded"), "graded")
+        self.assertEqual(gb.status_text("graded", {"possible": 0}), "graded (no points)")
+        self.assertEqual(gb.status_text("in_progress"), "in progress (not submitted)")
         self.assertEqual(gb.status_text("unknown"), "status unknown")
         self.assertEqual(gb.status_text("not_submitted"), "not submitted")
 
@@ -304,11 +320,13 @@ class TestStudentWording(unittest.TestCase):
         due = iso(30)
         columns = {"c1": [col("a", "Submitted early", due=due), col("b", "Still open", due=due)]}
         gb._user_cache.clear()
-        books = gb.fetch_gradebooks(courses, "cookie", FakeApi(columns, {"c1": [rec("a", "COMPLETED")]}))
+        books = {"c1": gb.build_gradebook("c1", courses["c1"], columns["c1"], [rec("a", "COMPLETED")], [],
+                                          attempts={"a": [{"status": "COMPLETED"}]})}
         text = due_dates.format_due_dates_table(due_dates.select(due_dates.reconcile(books, [], courses), "7d", False), "7d")
         self.assertLess(text.index("Still open"), text.index("Submitted early"))
         self.assertIn("1 open, 1 done", text)
-        self.assertIn("submitted ✓", text)
+        self.assertIn("submitted", text)
+        self.assertNotIn("✓", text)
 
     def test_grades_summary_shared_widths_and_no_points(self):
         a = gb.build_gradebook("c1", "IS 410 DB", [col("x", "Short", possible=0), col("y", "Quiz", possible=5)],
@@ -320,7 +338,7 @@ class TestStudentWording(unittest.TestCase):
         self.assertIn("IS 410", summary)
         self.assertNotIn("Short", summary)
         text = grades.format_grades_text([a, b], summary=True)
-        self.assertIn("✓ graded (no points)", text)
+        self.assertIn("graded (no points)", text)
         quiz = next(line for line in text.splitlines() if "Quiz" in line)
         longer = next(line for line in text.splitlines() if "much longer" in line)
         self.assertEqual(quiz.index("graded"), longer.index("graded"))
@@ -357,7 +375,7 @@ class TestBriefing(unittest.TestCase):
         self.assertEqual(bundle["courses"]["c1"]["overall"]["percent"], 91)
         self.assertEqual([a["title"] for a in bundle["courses"]["c1"]["announcements"]], ["Midterm moved"])
         text = briefing.format_briefing_cli(bundle)
-        for expected in ("NEEDS ATTENTION (2)", "OVERDUE (1)", "DUE TODAY / TOMORROW (1)", "LATER THIS WEEK (1)", "GRADES", "91% A", "official",
+        for expected in ("NEEDS ATTENTION (2)", "OVERDUE (1)", "DUE TODAY / TOMORROW (1)", "LATER THIS WEEK (1)", "GRADES", "91 / 100", "official",
                          "Midterm moved", "not submitted"):
             self.assertIn(expected, text)
 

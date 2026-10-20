@@ -136,7 +136,7 @@ run `bb discover` on a fresh installation when needed.
 
 ### `bb briefing`
 **Description:** REST-only morning summary (about 1 s, no browser on the happy path): overdue work, work due today/tomorrow, later this week, a grade line per course (official or calculated), and announcements from the last 7 days. Built from the same Gradable Item status model as `grades`, `due` and `assignments`.
-- `--json`: Emits the v2 composite document. Each course has `overall` (same shape as `grades --json`) and `grades` (items with `due_at`, `status`, `score`, `possible`, `percent`); `global.overdue` and `global.urgent` hold the deadline rows.
+- `--json`: Emits the v2 composite document. Each course has `overall` (same shape as `grades --json`) and `grades` (items with `due_at`, `status`, `score`, `possible`, `percent`); `global.overdue` and `global.urgent` hold the deadline rows. Human-readable grade lines show earned / possible points and source labels.
 - `--out <file>`: Exports JSON directly to specified filepath.
 - `--telegram`: Dispatches formatted summary card to configured Telegram chat.
 - `--md`, `--save`: Saves Markdown report to `output/briefing.md`.
@@ -145,7 +145,7 @@ run `bb discover` on a fresh installation when needed.
 ### `bb due [WINDOW]`
 **Description:** Deadlines from each course's gradebook (the status model) reconciled with Blackboard's calendar. Distinct gradebook items retain their column/content identities; calendar joins prefer source IDs and use titles only when unambiguous within a course. Deadlines are grouped by day, in local time with the zone (`Tue Oct 21 11:59 PM EDT`).
 - `WINDOW`: `7d` (default), `14d`, `30d`, any `Nd`, `overdue`, `all`.
-  - `overdue`: dated, past and not completed (graded, needs grading, submitted and exempt count as completed).
+  - `overdue`: dated, past and not completed. An assessment with a verified `IN_PROGRESS` attempt is still open, even if the public gradebook says Needs Grading.
   - `all`: everything, plus `No due date` and `Already done` groups. Undated items appear only here.
 - `--exclude-completed`: Hides completed items.
 - `--json`: List of `{item_id, title, course_id, course, due_at (ISO-8601 UTC), status, completed, score, possible, percent, category, source}`.
@@ -165,13 +165,14 @@ run `bb discover` on a fresh installation when needed.
 - `--json`: `[{course_id, course_name, announcements: [{title, created, modified, body, unread, older_term}], error?}]`. `unread` is `true`, `false` or `null` (unknown); it is `null` unless `--unread` verified it.
 
 ### `bb grades [COURSE]`
-**Description:** Per course: the overall grade, then every Gradable Item sorted by due date with score, percent, status and due time (local, with zone). Three REST requests per course (columns, your whole gradebook, grade schemas), courses in parallel, no browser.
-- Overall is labeled `official` when the course has a Calculated gradebook column the student can see (`Overall Grade`, `Total Points Earned`; the percent uses the points graded so far), otherwise `calculated` (sum score / sum possible over graded, non-exempt, included items with points). The letter comes from the course's Tabular grade schema. `N of M graded` counts items that count toward the total.
-- Statuses: `graded`, `needs_grading`, `submitted`, `not_submitted`, `exempt`, `unknown`. A gradable discussion marked as handed in is only believed after your own posts are found.
+**Description:** Per course: the overall grade, then every Gradable Item sorted by due date with earned / possible points, status and due time (local, with zone). Human-readable text and Markdown omit percentages and letters. Courses run in parallel with two bulk gradebook reads per course; targeted read-only attempt metadata checks verify native assessment states, including active retakes behind posted grades.
+- Overall is labeled `official` when the course has a visible calculated total (`Overall Grade`, `Total Points Earned`), otherwise `calculated` from graded, non-exempt, included item points. An official percentage without actual point totals is labeled `point total unavailable`; it is never presented as earned points out of 100. `N of M graded` counts items that count toward the total.
+- Statuses: `graded`, `needs_grading`, `submitted`, `in_progress`, `not_submitted`, `exempt`, `unknown`. `in_progress` displays as `in progress (not submitted)`. Submission requires the student's completed attempt or post; public Needs Grading alone does not prove submission.
+- A posted score remains a real grade even if an active retake is open; it still contributes to graded-point calculations. A posted grade with no online attempt is not called missing, because work can be graded outside an online attempt. Failed attempt verification stays unknown and open.
 - `COURSE`: Positional course code or keyword (e.g. `bb grades IS410`).
 - `-c <COURSE>`: Named course flag.
 - `--all`: All courses.
-- `--json`: `[{course_id, course_name, overall:{source,label,score,possible,percent,letter,graded,total}, items:[{name,category,due_at,status,score,possible,percent,feedback}], excluded:[{name,reason}]}]`.
+- `--json`: `[{course_id, course_name, overall:{source,label,score,possible,percent,letter,graded,total}, items:[{name,category,due_at,status,score,possible,percent,feedback}], excluded:[{name,reason}]}]`. The `percent` and `letter` keys remain for compatibility; inferred letter grades are null.
 - An expired session prints `Session expired, run `bb login`.` and exits 1.
 
 ### `bb outline [COURSE]`
@@ -335,9 +336,14 @@ All prior `--flag` invocations remain 100% operational:
 
 An official overall grade must be externally designated as the course total or use a
 recognized overall-total name; a category subtotal such as "Quiz average" is not a
-course grade. Percent-scaled totals remain percentages even if the column also lists
-whole-course points. When no official total is available, the labeled calculated
+course grade. Human-readable grades show actual earned / possible points only.
+Percent-scaled totals without real point totals are labeled as unavailable rather than
+shown as points out of 100. When no official total is available, the labeled calculated
 fallback uses included, non-exempt graded points and does not assume category weights.
+
+Submission status is verified against the student's attempt or post when available.
+A public Needs Grading state can coexist with an `IN_PROGRESS` attempt; that work is
+reported as `in progress (not submitted)` and remains open in deadline views.
 
 If student-grade records are unreadable, visible items retain `status: "unknown"` and
 `grades --json` includes `records_error`. Text and briefing label this partial data as

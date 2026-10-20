@@ -34,15 +34,19 @@ Output is the product. Every command must be useful at a glance and easy to pars
 - **Text output** is for a student reading a terminal:
   - grouped by course with a short course label (`IS 410`, not `IS410_1234_FA2026: ...`);
   - sorted (deadlines by due time, announcements newest first, grades by due date);
-  - aligned columns, with a one-line summary per group (for example `94.3% A (official)`);
+  - aligned columns, with a one-line summary per group (for example `85 / 100 pts (official)`);
   - times in **local time with the zone shown** (`Tue Oct 21 11:59 PM EDT`), never raw UTC;
   - says what is missing or estimated (`calculated`, `3 not yet graded`, `partial: 1 course failed`);
-  - no tracebacks, no debug lines, no `--` placeholders that mean "we didn't fetch it".
+  - no check marks, emoji, tracebacks, debug lines, or `--` placeholders that mean "we didn't fetch it";
+  - grades show earned / possible points, without inferred letters or percentages in text and Markdown;
+    keep source labels (`official`, `calculated`) and graded counts, and say when point totals are unavailable.
 - **`--json`**: stdout is exactly one JSON document. Progress, warnings and fallback notices go to **stderr**.
   Dates are ISO-8601 with offset (`due_at`). Field names are stable and documented in `docs/CLI_REFERENCE.md`.
 - `--md`, where supported, mirrors the text content.
 - **Status comes from one model.** `grades`, `due`, `briefing`, `assignments`, Telegram and the menubar use the same
-  Gradable Item status helper (graded / needs_grading / submitted / not_submitted / exempt / unknown).
+  Gradable Item status helper (graded / needs_grading / submitted / in_progress / not_submitted / exempt / unknown).
+  Submission wording requires evidence from the student's actual attempt or post. A started assessment with an
+  `IN_PROGRESS` attempt is `in progress (not submitted)`, even if the public gradebook says Needs Grading.
   When we don't know, say `unknown`. Never default to a made-up status like `Unopened`.
 
 ## 4. Speed

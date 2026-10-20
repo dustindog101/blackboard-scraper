@@ -1,12 +1,11 @@
 """The single Gradable Item status model.
 
 `grades`, `due`, `briefing` and `assignments` all read gradebook state through this module, so a given
-item has one status everywhere: graded / needs_grading / submitted / not_submitted / exempt / unknown.
+item has one status everywhere, including in-progress work that has not been submitted.
 Everything here is GET-only and REST-only (ADR-0002, ADR-0003).
 
-Per course it costs three requests: gradebook columns, the student's whole gradebook
-(`gradebook/users/{userId}`) and the grade schemas; plus one request per discussion whose completion
-has to be verified.
+Per course it reads columns and the student's whole gradebook. Ambiguous submission claims require
+targeted attempt metadata; discussions require the student's own published posts. Neither path reads answers.
 """
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -15,10 +14,10 @@ from typing import Any, Callable, Dict, List, Optional
 
 from core.time import parse_datetime, to_iso
 
-GRADED, NEEDS_GRADING, SUBMITTED, NOT_SUBMITTED, EXEMPT, UNKNOWN = (
-    "graded", "needs_grading", "submitted", "not_submitted", "exempt", "unknown",
+GRADED, NEEDS_GRADING, SUBMITTED, NOT_SUBMITTED, IN_PROGRESS, EXEMPT, UNKNOWN = (
+    "graded", "needs_grading", "submitted", "not_submitted", "in_progress", "exempt", "unknown",
 )
-STATUSES = (GRADED, NEEDS_GRADING, SUBMITTED, NOT_SUBMITTED, EXEMPT, UNKNOWN)
+STATUSES = (GRADED, NEEDS_GRADING, SUBMITTED, NOT_SUBMITTED, IN_PROGRESS, EXEMPT, UNKNOWN)
 # Work the student has handed in (or that needs nothing more from them).
 COMPLETED = frozenset({GRADED, NEEDS_GRADING, SUBMITTED, EXEMPT})
 
@@ -42,15 +41,15 @@ class GradebookError(Exception):
 
 
 _STATUS_TEXT = {
-    GRADED: "✓ graded", NEEDS_GRADING: "submitted ✓ (awaiting grade)", SUBMITTED: "submitted ✓",
-    NOT_SUBMITTED: "not submitted", EXEMPT: "exempt", UNKNOWN: "status unknown",
+    GRADED: "graded", NEEDS_GRADING: "submitted (awaiting grade)", SUBMITTED: "submitted",
+    NOT_SUBMITTED: "not submitted", IN_PROGRESS: "in progress (not submitted)", EXEMPT: "exempt", UNKNOWN: "status unknown",
 }
 
 
 def status_text(status: str, item: Optional[Dict[str, Any]] = None) -> str:
     """Student-facing wording for terminal output. JSON keeps the enum values."""
     if status == GRADED and item is not None and not item.get("possible"):
-        return "✓ graded (no points)"
+        return "graded (no points)"
     return _STATUS_TEXT.get(status, "status unknown")
 
 
@@ -112,6 +111,8 @@ def _get_all(path: str, cookie: str, api_get: Callable) -> List[Dict[str, Any]]:
         path = (data.get("paging") or {}).get("nextPage")
         if not path:
             break
+    if path:
+        raise GradebookError(UNAVAILABLE)  # a truncated collection cannot establish completion
     return results
 
 
@@ -180,10 +181,40 @@ def needs_post_check(column: Dict[str, Any], record: Dict[str, Any]) -> bool:
     )
 
 
-def item_status(column: Dict[str, Any], record: Optional[Dict[str, Any]], posts: Optional[int] = None) -> str:
+def needs_attempt_check(column: Dict[str, Any], record: Dict[str, Any]) -> bool:
+    """Aggregate gradebook states describe grading, not whether the student handed in an attempt."""
+    if column_kind(column) not in ("assignment", "assessment") or record.get("exempt"):
+        return False
+    raw = _norm_status(record.get("status"))
+    return raw in ("NEEDSGRADING", "COMPLETED", "ATTEMPTED", "SUBMITTED", "GRADED")
+
+
+def _attempt_status(attempts: Optional[List[Dict[str, Any]]], raw: str) -> str:
+    if attempts is None:
+        return UNKNOWN
+    if not attempts:
+        return NOT_SUBMITTED
+    states = {_norm_status(a.get("status")) for a in attempts}
+    # Do not assume the API ordered attempts or hide an active draft behind an older final attempt.
+    if "INPROGRESS" in states:
+        return IN_PROGRESS
+    final = {"NEEDSGRADING", "COMPLETED", "SUBMITTED", "GRADED"}
+    not_started = {"NOTATTEMPTED", "NOTSTARTED", "UNSUBMITTED"}
+    if states - final - not_started:
+        return UNKNOWN
+    if states & not_started:
+        return NOT_SUBMITTED
+    if states & final:
+        return NEEDS_GRADING if raw == "NEEDSGRADING" else SUBMITTED
+    return NOT_SUBMITTED
+
+
+def item_status(column: Dict[str, Any], record: Optional[Dict[str, Any]], posts: Optional[int] = None,
+                attempts: Optional[List[Dict[str, Any]]] = None, *, attempts_checked: bool = False) -> str:
     """Reconcile one gradebook column with the student's record into a single status.
 
-    `posts` is the verified count of the student's own discussion posts (None = not verified).
+    `posts` verifies our own discussion posts; `attempts` verifies assessment/assignment state.
+    None means not verified. Attempt existence, draft content and timestamps alone never prove submission.
     """
     kind = column_kind(column)
     submittable = kind in ("assignment", "assessment", "discussion")
@@ -193,6 +224,15 @@ def item_status(column: Dict[str, Any], record: Optional[Dict[str, Any]], posts:
         return EXEMPT
     raw = _norm_status(record.get("status"))
     has_score = _record_score(record) is not None
+    if raw == "GRADED" and has_score:
+        if attempts is None:
+            return UNKNOWN if attempts_checked else GRADED
+        if not attempts:
+            return GRADED  # an instructor can post a grade for work handed in outside an online attempt
+        state = _attempt_status(attempts, raw)
+        return GRADED if state in COMPLETED else state
+    if needs_attempt_check(column, record):
+        return _attempt_status(attempts, raw)
     if needs_post_check(column, record):
         if posts is None:
             return GRADED if raw == "GRADED" and has_score else UNKNOWN
@@ -201,12 +241,14 @@ def item_status(column: Dict[str, Any], record: Optional[Dict[str, Any]], posts:
     if raw == "GRADED" or (has_score and raw not in ("NEEDSGRADING", "INPROGRESS")):
         if has_score:
             return GRADED
-        return SUBMITTED if submittable else UNKNOWN
+        return UNKNOWN
     if raw == "NEEDSGRADING":
-        return NEEDS_GRADING
+        return NEEDS_GRADING if kind == "discussion" and posts else UNKNOWN
     if raw in ("COMPLETED", "ATTEMPTED", "SUBMITTED"):
-        return SUBMITTED
-    if raw in ("INPROGRESS", "NOTATTEMPTED", ""):
+        return SUBMITTED if kind == "discussion" and posts else UNKNOWN
+    if raw == "INPROGRESS":
+        return IN_PROGRESS if submittable else UNKNOWN
+    if raw in ("NOTATTEMPTED", ""):
         return NOT_SUBMITTED if submittable else UNKNOWN
     return UNKNOWN
 
@@ -227,45 +269,8 @@ def _feedback(record: Dict[str, Any]) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Letter grades and the course total
+# Reported course total (letters are never inferred)
 # ---------------------------------------------------------------------------
-
-def letter_for(percent: Optional[float], schemas: List[Dict[str, Any]], schema_id: Optional[str] = None) -> Optional[str]:
-    """Letter from the course's Tabular schema (the column's own schema if it is one)."""
-    if percent is None:
-        return None
-
-    def tabular(s: Dict[str, Any]) -> bool:
-        kind = str(s.get("scaleType") or s.get("type") or "tabular").lower()
-        return kind == "tabular" and bool(s.get("symbols"))
-
-    candidates = [s for s in schemas if tabular(s)]
-    schema = next((s for s in candidates if schema_id and s.get("id") == schema_id), None) or (candidates[0] if candidates else None)
-    if not schema:
-        return None
-    for lower, text in _symbol_bounds(schema["symbols"]):
-        if percent >= lower:
-            return text
-    return None
-
-
-def _symbol_bounds(symbols: List[Dict[str, Any]]) -> List[tuple]:
-    """[(lower_bound_percent, letter)] highest first.
-
-    This tenant gives each letter only its `absoluteValue` (the midpoint of its range, e.g. A = 95 for 93-97),
-    so bounds are rebuilt downward from 100: lower = 2 * midpoint - upper.
-    """
-    if all(_number(s.get("lowerBound")) is not None for s in symbols):
-        return sorted(((s["lowerBound"], s["text"]) for s in symbols if s.get("text")), reverse=True)
-    mids = sorted(((s["absoluteValue"], s["text"]) for s in symbols
-                   if _number(s.get("absoluteValue")) is not None and s.get("text")), reverse=True)
-    bounds, upper = [], 100.0
-    for i, (mid, text) in enumerate(mids):
-        lower = 0.0 if i == len(mids) - 1 else max(2 * mid - upper, 0.0)
-        bounds.append((lower, text))
-        upper = lower
-    return bounds
-
 
 _LETTER_RE = re.compile(r"^[A-F][+-]?$")
 
@@ -299,33 +304,35 @@ def _official_overall(column: Dict[str, Any], record: Dict[str, Any], schemas: L
     if scale == "percent" and display_score is not None:
         # displayGrade is already scaled; top-level record.score may still be raw points.
         percent: Optional[float] = round(display_score, 1)
-        score, possible = display_score, 100.0
+        score = _number(record.get("score"))
+        possible = _possible(column) if score is not None else None
     else:
         percent = _percent(score, possible)
     letter = text if isinstance(text, str) and _LETTER_RE.match(text.strip()) else None
-    letter = letter or letter_for(percent, schemas, (column.get("grading") or {}).get("schemaId"))
     return {"source": "official", "label": column.get("name"), "score": score, "possible": possible,
             "percent": percent, "letter": letter, "graded": graded, "total": total}
 
 
 def _calculated_overall(items: List[Dict[str, Any]], schemas: List[Dict[str, Any]], total: int) -> Dict[str, Any]:
-    counted = [i for i in items if i["_counts"] and i["status"] == GRADED and i["score"] is not None]
+    counted = [i for i in items if i["_counts"] and i["_graded"] and i["score"] is not None]
     score = round(sum(i["score"] for i in counted), 2)
     possible = round(sum(i["possible"] for i in counted), 2)
     percent = _percent(score, possible) if counted else None
     return {"source": "calculated" if counted else "none", "label": "Calculated" if counted else None,
             "score": score if counted else None, "possible": possible if counted else None,
-            "percent": percent, "letter": letter_for(percent, schemas), "graded": len(counted), "total": total}
+            "percent": percent, "letter": None, "graded": len(counted), "total": total}
 
 
 def build_gradebook(course_id: str, course_name: str, columns: List[Dict[str, Any]], records: Optional[List[Dict[str, Any]]],
-                    schemas: List[Dict[str, Any]], posts: Optional[Dict[str, Optional[int]]] = None) -> Dict[str, Any]:
+                    schemas: List[Dict[str, Any]], posts: Optional[Dict[str, Optional[int]]] = None,
+                    attempts: Optional[Dict[str, Optional[List[Dict[str, Any]]]]] = None) -> Dict[str, Any]:
     """Join columns with the student's records into the documented `grades --json` shape (plus `_`-prefixed helpers).
 
     `records=None` means the student's gradebook could not be read: every status is then `unknown`.
     """
     by_column = {r.get("columnId"): r for r in records or [] if r.get("columnId")}
     posts = posts or {}
+    attempts = attempts or {}
     items: List[Dict[str, Any]] = []
     excluded: List[Dict[str, str]] = []
 
@@ -334,7 +341,8 @@ def build_gradebook(course_id: str, course_name: str, columns: List[Dict[str, An
             continue  # totals are never items
         cid = column.get("id")
         record = by_column.get(cid)
-        status = item_status(column, record, posts.get(cid)) if records is not None else UNKNOWN
+        status = item_status(column, record, posts.get(cid), attempts.get(cid),
+                             attempts_checked=cid in attempts) if records is not None else UNKNOWN
         score = _record_score(record) if record else None
         possible = _possible(column)
         if status == EXEMPT:
@@ -355,6 +363,7 @@ def build_gradebook(course_id: str, course_name: str, columns: List[Dict[str, An
             "percent": _percent(score, possible),
             "feedback": _feedback(record) if record and score is not None else None,
             "_counts": counts,
+            "_graded": status == GRADED or bool(record and _norm_status(record.get("status")) == "GRADED" and score is not None),
             "_column_id": cid,
             "_content_id": column.get("contentId"),
         })
@@ -367,7 +376,7 @@ def build_gradebook(course_id: str, course_name: str, columns: List[Dict[str, An
     items.sort(key=sort_key)
     total = sum(1 for i in items if i["_counts"])
     official_col = _pick_official(columns, by_column)
-    graded = sum(1 for i in items if i["_counts"] and i["status"] == GRADED)
+    graded = sum(1 for i in items if i["_counts"] and i["_graded"])
     overall = (_official_overall(official_col, by_column[official_col["id"]], schemas, graded, total)
                if official_col else _calculated_overall(items, schemas, total))
     return {"course_id": course_id, "course_name": course_name, "overall": overall, "items": items, "excluded": excluded}
@@ -396,7 +405,10 @@ def _count_own_posts(course_id: str, discussion_id: str, user_id: str, cookie: s
         return None
     if (data.get("paging") or {}).get("nextPage"):
         return None  # more posts than we looked at: do not guess
-    return sum(1 for m in data.get("results", []) if m.get("userId") == user_id and m.get("status") != "DRAFT")
+    own = [m for m in data.get("results", []) if m.get("userId") == user_id]
+    if any(_norm_status(m.get("status")) not in ("PUBLISHED", "DRAFT", "DELETED") for m in own):
+        return None
+    return sum(1 for m in own if _norm_status(m.get("status")) == "PUBLISHED")
 
 
 def _verify_discussions(course_id: str, columns: List[Dict[str, Any]], records: List[Dict[str, Any]],
@@ -418,6 +430,41 @@ def _verify_discussions(course_id: str, columns: List[Dict[str, Any]], records: 
         return dict(zip(wanted, counts))
 
 
+def _read_attempts(course_id: str, column_id: str, user_id: str, cookie: str,
+                   api_get: Callable) -> Optional[List[Dict[str, Any]]]:
+    """Read metadata only, with identity checks at both grade and attempt boundaries."""
+    try:
+        grades = _get_all(f"/learn/api/v1/courses/{course_id}/gradebook/columns/{column_id}/grades?userId={user_id}",
+                          cookie, api_get)
+        if not grades or any(g.get("userId") != user_id or g.get("columnId") != column_id
+                             or g.get("courseId") != course_id or not g.get("id") for g in grades):
+            return None
+        attempts = []
+        for grade in grades:
+            rows = _get_all(f"/learn/api/v1/courses/{course_id}/gradebook/columns/{column_id}/grades/{grade['id']}/attempts",
+                            cookie, api_get)
+            if any(a.get("userId") != user_id or a.get("courseId") != course_id
+                   or a.get("gradeId") != grade["id"] for a in rows):
+                return None
+            attempts.extend(rows)
+        return attempts
+    except GradebookError as exc:
+        if exc.kind == EXPIRED:
+            raise
+        return None
+
+
+def _verify_attempts(course_id: str, columns: List[Dict[str, Any]], records: List[Dict[str, Any]],
+                     user_id: str, cookie: str, api_get: Callable) -> Dict[str, Optional[List[Dict[str, Any]]]]:
+    by_column = {r.get("columnId"): r for r in records}
+    pending = [c["id"] for c in columns if c.get("id") in by_column and needs_attempt_check(c, by_column[c["id"]])]
+    if not pending:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(3, len(pending))) as pool:
+        attempts = pool.map(lambda cid: _read_attempts(course_id, cid, user_id, cookie, api_get), pending)
+        return dict(zip(pending, attempts))
+
+
 def student_records(course_id: str, columns: List[Dict[str, Any]], cookie: str,
                     api_get: Callable = default_api_get) -> Dict[str, Any]:
     """One course's status inputs for callers that already hold the columns (`assignments`).
@@ -427,11 +474,13 @@ def student_records(course_id: str, columns: List[Dict[str, Any]], cookie: str,
     try:
         user_id = current_user_id(cookie, api_get)
         records = _get_all(f"/learn/api/public/v2/courses/{course_id}/gradebook/users/{user_id}", cookie, api_get)
+        attempts = _verify_attempts(course_id, columns, records, user_id, cookie, api_get)
     except GradebookError as exc:
-        return {"records": None, "posts": {}, "error": exc.kind}
+        return {"records": None, "posts": {}, "attempts": {}, "error": exc.kind}
     return {
         "records": {r.get("columnId"): r for r in records},
         "posts": _verify_discussions(course_id, columns, records, user_id, cookie, api_get),
+        "attempts": attempts,
     }
 
 
@@ -449,7 +498,6 @@ def fetch_gradebooks(courses: Dict[str, str], cookie: str, api_get: Callable = d
         except GradebookError as e:
             return {cid: {"error": e.kind} for cid in ids}
         cols = {cid: pool.submit(_get_all, f"/learn/api/public/v2/courses/{cid}/gradebook/columns", cookie, api_get) for cid in ids}
-        schemas = {cid: pool.submit(_get_all, f"/learn/api/public/v1/courses/{cid}/gradebook/schemas", cookie, api_get) for cid in ids}
         users = {cid: pool.submit(_get_all, f"/learn/api/public/v2/courses/{cid}/gradebook/users/{user_id}", cookie, api_get) for cid in ids}
 
         def finish(cid: str) -> Dict[str, Any]:
@@ -466,12 +514,12 @@ def fetch_gradebooks(courses: Dict[str, str], cookie: str, api_get: Callable = d
                     return {"error": EXPIRED}
                 records = None
                 records_error = e.kind
-            try:
-                scheme = schemas[cid].result()
-            except GradebookError:
-                scheme = []
             posts = _verify_discussions(cid, columns, records, user_id, cookie, api_get) if verify and records else {}
-            book = build_gradebook(cid, courses[cid], columns, records, scheme, posts)
+            try:
+                attempts = _verify_attempts(cid, columns, records, user_id, cookie, api_get) if verify and records else {}
+            except GradebookError as exc:
+                return {"error": exc.kind}
+            book = build_gradebook(cid, courses[cid], columns, records, [], posts, attempts)
             if records_error:
                 book["records_error"] = records_error
                 book["overall"]["unavailable"] = True

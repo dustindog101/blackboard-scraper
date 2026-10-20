@@ -15,7 +15,7 @@ import main
 from core import rest
 from core.display import ago, clip, fmt_when, parse_dt
 from core.gradebook import course_label
-from scrapers import activity, announcements
+from scrapers import activity, announcements, grades
 from scrapers.search import choose_download_target, files_within, grab_item_async
 
 COURSES = {"_1_1": "IS 410 Intro To Database Design (03.1520) FA2026", "_2_1": "ENGL 100 Composition (12.4799) FA2026"}
@@ -87,6 +87,65 @@ class TestDisplay(unittest.TestCase):
 
 def ann(title, created, unread=None):
     return {"id": title, "title": title, "created": created, "modified": None, "meta": "", "body": "Body of " + title, "unread": unread}
+
+
+class TestGradePointsOutput(unittest.TestCase):
+    def book(self):
+        return {
+            "course_id": "_1_1", "course_name": COURSES["_1_1"],
+            "overall": {"source": "official", "label": "Overall Grade", "score": 18, "possible": 20,
+                        "percent": 90, "letter": "A", "graded": 1, "total": 2},
+            "items": [
+                {"name": "Quiz", "due_at": None, "score": 18, "possible": 20, "percent": 90,
+                 "status": "graded", "feedback": None},
+                {"name": "Library Research", "due_at": None, "score": None, "possible": 10,
+                 "percent": None, "status": "in_progress", "feedback": None},
+            ],
+            "excluded": [],
+        }
+
+    def test_text_summary_and_detail_show_points_without_percent_or_letter(self):
+        book = self.book()
+        for rendered in (grades.format_grades_text([book]),
+                         grades.format_grades_text([book], summary=True),
+                         grades.format_grades_text([book], summary_only=True)):
+            self.assertIn("18 / 20 pts", rendered)
+            self.assertIn("official", rendered)
+            self.assertIn("1 of 2 graded", rendered)
+            self.assertNotIn("90%", rendered)
+            self.assertNotIn(" A ", rendered)
+        detail = grades.format_grades_text([book])
+        self.assertIn("10 pts possible", detail)
+        self.assertIn("in progress (not submitted)", detail)
+        self.assertNotIn("✓", detail)
+
+    def test_markdown_export_uses_points_column(self):
+        book = self.book()
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("scrapers.grades.ensure_output_dir", return_value=Path(tmp)), \
+             contextlib.redirect_stderr(io.StringIO()) as err:
+            grades.save_grades(book, "_1_1")
+            rendered = (Path(tmp) / "_1_1.md").read_text()
+        self.assertIn("| Due | Item | Points | Status |", rendered)
+        self.assertIn("18 / 20 pts", rendered)
+        self.assertNotIn("| % |", rendered)
+        self.assertNotIn("90%", rendered)
+        self.assertNotIn("💾", err.getvalue())
+
+    def test_percent_only_official_grade_does_not_claim_points(self):
+        book = self.book()
+        book["overall"].update(score=None, possible=None)
+        rendered = grades.format_grades_text([book], summary=True)
+        self.assertIn("point total unavailable", rendered)
+        self.assertIn("official: Overall Grade", rendered)
+        self.assertNotIn("90 / 100", rendered)
+        self.assertNotIn("90%", rendered)
+
+    def test_browser_needs_grading_without_attempt_is_unknown(self):
+        book = grades._rows_to_gradebook("c", "IS 410", [
+            {"name": "Library Research", "status": "Needs Grading", "grade": ""},
+        ])
+        self.assertEqual(book["items"][0]["status"], "unknown")
 
 
 class TestAnnouncements(unittest.TestCase):

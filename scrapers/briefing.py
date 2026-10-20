@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from core.config import load_courses
-from core.gradebook import FORBIDDEN, GRADED, NOT_FOUND, NOT_SUBMITTED, UNKNOWN, course_label
+from core.gradebook import FORBIDDEN, GRADED, NOT_FOUND, course_label
 from core.output import OUTPUT_BASE
 from core.time import format_local, local_zone, parse_datetime
 from scrapers.announcements import scrape_announcements_api
@@ -111,7 +111,7 @@ async def run_briefing_async(
                     and dt and now - timedelta(days=LOW_SCORE_DAYS) <= dt <= now):
                 low.append({**g, "title": g["name"], "course": block["course_label"], "course_id": cid})
     low.sort(key=lambda g: g["due_at"], reverse=True)
-    open_urgent = [e for e in urgent if e["status"] in (NOT_SUBMITTED, UNKNOWN)]
+    open_urgent = [e for e in urgent if not e["completed"]]
 
     bundle = {
         "briefing_path": OUTPUT_BASE / "briefing.md",
