@@ -162,7 +162,7 @@ class TestActivity(unittest.TestCase):
     def test_tidy_merges_duplicates_and_collapses_discussion_threads(self):
         def d(i, ts):
             return activity.normalize_entry({"se_id": f"d{i}", "providerId": "bb_disc", "se_courseId": "_2_1", "se_timestamp": ts,
-                                             "itemSpecificData": {"discussionboardDetails": {"forumName": "J4"}, "contentExtract": f"post {i}"}}, COURSES, {})
+                                             "itemSpecificData": {"discussionboardDetails": {"forumName": "J4"}, "contentExtract": f"post {i}"}}, COURSES, {}, full=True)
         graded = activity.normalize_entry(self.entry(), COURSES, {})
         ungraded = activity.normalize_entry(self.entry(se_id="x2", itemSpecificData={"title": "HW 1"}), COURSES, {})
         items = activity.tidy([d(1, 1792000000000), d(2, 1792000100000), d(3, 1792000200000), graded, ungraded, dict(graded, id="x3")])
@@ -170,6 +170,21 @@ class TestActivity(unittest.TestCase):
         thread = next(i for i in items if i["category"] == "discussion")
         self.assertEqual(thread["count"], 3)
         self.assertEqual(thread["message"], "post 3")
+
+    def test_classmate_names_and_text_hidden_unless_full(self):
+        raw = {"se_id": "d", "providerId": "bb_disc", "se_courseId": "_2_1", "se_timestamp": 1792000000000, "se_userId": "u1",
+               "itemSpecificData": {"discussionboardDetails": {"forumName": "J4"}, "contentExtract": "secret words"}}
+        users = {"u1": {"sx_name": "Some Classmate"}}
+        hidden = activity.normalize_entry(raw, COURSES, users)
+        self.assertNotIn("author", hidden)
+        self.assertNotIn("message", hidden)
+        shown = activity.normalize_entry(raw, COURSES, users, full=True)
+        self.assertEqual(shown["author"], "Some Classmate")
+        self.assertIn("secret words", shown["message"])
+
+    def test_collapsed_thread_shows_count_and_latest_time(self):
+        item = {"category": "discussion", "course": COURSES["_2_1"], "title": "J4", "at": "2026-10-19T22:44:00+00:00", "count": 10}
+        self.assertRegex(activity.format_activity([item], 1), r"\[10 responses, latest \d+:\d{2} [AP]M")
 
     def test_text_groups_by_course_without_truncating_mid_line(self):
         items = [activity.normalize_entry(self.entry(), COURSES, {})]
@@ -357,3 +372,11 @@ class TestUsageErrors(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAnnouncementPreview(unittest.TestCase):
+    def test_entities_decoded_and_blocks_separated(self):
+        html_in = ('<p><a data-bbtype="attachment" href="x?a=1&amp;b=2">Poof! Gone!</a>Hello all,</p>'
+                   '<h2>Rock &amp;amp; Roll</h2><p>Next&nbsp;line</p>')
+        text = announcements._clean_html_body(html_in)
+        self.assertEqual(text.splitlines(), ["Poof! Gone!", "Hello all,", "Rock & Roll", "Next line"])

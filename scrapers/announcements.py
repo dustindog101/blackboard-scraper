@@ -7,6 +7,7 @@ import asyncio
 import html
 import logging
 import re
+from html.parser import HTMLParser
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -21,14 +22,53 @@ logger = logging.getLogger("blackboard.scrapers.announcements")
 PREVIEW_CHARS = 170
 
 
+_BLOCK_TAGS = {"p", "div", "li", "ul", "ol", "br", "tr", "table", "blockquote", "hr",
+               "h1", "h2", "h3", "h4", "h5", "h6", "section", "article", "header", "footer"}
+
+
+class _TextExtractor(HTMLParser):
+    """Visible text only; block-level boundaries become line breaks so headings never glue to the next sentence."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: List[str] = []
+        self._skip = 0
+        self._attachment = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a" and ("data-bbtype", "attachment") in attrs:
+            self._attachment = True  # a file link runs straight into the next sentence in the HTML
+            self.parts.append("\n")
+        if tag in ("script", "style"):
+            self._skip += 1
+        elif tag in _BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self._attachment:
+            self._attachment = False
+            self.parts.append("\n")
+        if tag in ("script", "style"):
+            self._skip = max(0, self._skip - 1)
+        elif tag in _BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if not self._skip:
+            self.parts.append(data)
+
+
 def _clean_html_body(raw_html: str) -> str:
-    """Convert Blackboard HTML announcement body into clean, formatted plaintext."""
+    """Blackboard HTML announcement body -> clean plaintext (entities decoded, even when double-encoded)."""
     if not raw_html:
         return ""
-    text = re.sub(r"</p>|</li>|<br\s*/?>|</div>|</h[1-6]>", "\n", raw_html, flags=re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", "", text)
-    text = html.unescape(text)
-    return "\n".join(line.strip() for line in text.splitlines() if line.strip())
+    parser = _TextExtractor()
+    parser.feed(raw_html)
+    parser.close()
+    text = "".join(parser.parts).replace("\xa0", " ")
+    for _ in range(2):  # "&amp;amp;" arrives double-encoded from some posts
+        text = html.unescape(text)
+    return "\n".join(" ".join(line.split()) for line in text.splitlines() if line.strip())
 
 
 def normalize_announcements(raw_items: List[dict]) -> List[Dict[str, Any]]:
@@ -38,7 +78,7 @@ def normalize_announcements(raw_items: List[dict]) -> List[Dict[str, Any]]:
         created = item.get("created") or item.get("modified") or ""
         out.append({
             "id": item.get("id"),
-            "title": (item.get("title") or "Untitled").strip(),
+            "title": html.unescape((item.get("title") or "Untitled")).strip(),
             "created": created,
             "modified": item.get("modified"),
             "meta": fmt_when(parse_dt(created)),

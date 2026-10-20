@@ -14,6 +14,7 @@ Features:
 - Seamless Discovery: Accepts direct Blackboard URLs, content IDs (from outline/assignments),
   or assignment titles across enrolled courses.
 """
+from __future__ import annotations
 
 import asyncio
 import html
@@ -25,13 +26,15 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from playwright.async_api import Page
 
 from core.config import BLACKBOARD_BASE, SESSION_DIR, load_courses
 from core.output import ensure_output_dir
+
+if TYPE_CHECKING:
+    from playwright.async_api import Page
 
 logger = logging.getLogger("blackboard.scrapers.quiz")
 

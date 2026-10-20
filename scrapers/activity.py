@@ -50,8 +50,11 @@ def _grade_text(details: Dict[str, Any]) -> Optional[str]:
         return str(score)
 
 
-def normalize_entry(entry: Dict[str, Any], courses: Dict[str, str], users: Dict[str, Any]) -> Dict[str, Any]:
-    """One raw stream entry -> a flat record. Absent values are omitted, not blank."""
+def normalize_entry(entry: Dict[str, Any], courses: Dict[str, str], users: Dict[str, Any], full: bool = False) -> Dict[str, Any]:
+    """One raw stream entry -> a flat record. Absent values are omitted, not blank.
+
+    Classmates' names and post text are only kept when ``full`` is set (privacy by default).
+    """
     provider = entry.get("providerId") or ""
     event = (entry.get("extraAttribs") or {}).get("event_type") or provider
     data = entry.get("itemSpecificData") or {}
@@ -70,7 +73,10 @@ def normalize_entry(entry: Dict[str, Any], courses: Dict[str, str], users: Dict[
         category = "discussion"
         disc = data.get("discussionboardDetails") or {}
         title = disc.get("forumName") or disc.get("threadName") or "Discussion post"
-        message = f"{author}: {message}" if author and message else (f"New response by {author}" if author else message)
+        if full:
+            message = f"{author}: {message}" if author and message else (f"New response by {author}" if author else message)
+        else:
+            author, message = None, ""
     elif provider == "bb_mygrades" or event == "GB:GB_GRA_UPDATED":
         category = "grade"
         title = title or "Grade posted"
@@ -143,7 +149,7 @@ def tidy(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-def fetch_activity_rest(limit: Optional[int] = None) -> List[Dict[str, Any]]:
+def fetch_activity_rest(limit: Optional[int] = None, full: bool = False) -> List[Dict[str, Any]]:
     """Newest-first activity from the Ultra stream endpoint. Raises RestError."""
     providers = {
         p: {"sp_provider": p, "sp_newest": -1, "sp_oldest": 9007199254740992, "sp_refreshDate": 0}
@@ -174,7 +180,7 @@ def fetch_activity_rest(limit: Optional[int] = None) -> List[Dict[str, Any]]:
             break
         providers = {p["sp_provider"]: p for p in returned}
 
-    items = tidy([normalize_entry(e, courses, users) for e in raw.values()])
+    items = tidy([normalize_entry(e, courses, users, full) for e in raw.values()])
     return items[:limit] if limit else items
 
 
@@ -201,7 +207,8 @@ def format_activity(items: List[Dict[str, Any]], total: int, source: str = "REST
                 extra.append(f"due {item['due_date']}")
             tail = f"  [{'; '.join(extra)}]" if extra else ""
             if item.get("count", 1) > 1:
-                tail = f"  [{item['count']} responses]"
+                latest = fmt_when(parse_dt(item.get("at")), now)
+                tail = f"  [{item['count']} responses, latest {latest.split(' ', 3)[-1] if latest else '?'}]"
             lines.append(f"  {when:<26}{what:<14}{item['title']}{tail}")
             if item.get("message") and item["message"] != item["title"]:
                 lines.append(f"      {clip(item['message'], 150)}")
@@ -357,13 +364,13 @@ async def scrape_activity_dom_async(page: Any) -> List[Dict[str, Any]]:
     return normalized
 
 
-async def scrape_activity_async(page: Optional[Any] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+async def scrape_activity_async(page: Optional[Any] = None, limit: Optional[int] = None, full: bool = False) -> List[Dict[str, Any]]:
     """
     Activity stream for briefing and the CLI. REST first; the browser only if REST is unavailable.
     Auth failures are not hidden behind a browser attempt: they raise RestError for the CLI to report.
     """
     try:
-        return await asyncio.to_thread(fetch_activity_rest, limit)
+        return await asyncio.to_thread(fetch_activity_rest, limit, full)
     except RestError as exc:
         if exc.kind == "auth":
             raise

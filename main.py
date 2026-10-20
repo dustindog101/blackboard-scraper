@@ -27,8 +27,48 @@ if sys.platform == "win32":
 from core.config import BLACKBOARD_BASE, load_courses
 from core.gradebook import course_label
 from core.export_json import build_composite_schema, build_export_doc
-from core.session import _launch_context, _require_session, _require_session_async, check_session_async, login, login_auto, quick_check_session_http
 from core.async_engine import AsyncSessionManager, AsyncCourseWorkerPool, EngineConfig, TaskProfile, get_optimal_concurrency
+
+
+# core.session imports Playwright, so it is loaded on first use. REST commands with a valid session never load it.
+def _from_session(name: str):
+    import core.session
+    return getattr(core.session, name)
+
+
+def _launch_context(*args, **kwargs):
+    return _from_session("_launch_context")(*args, **kwargs)
+
+
+def _require_session(*args, **kwargs):
+    return _from_session("_require_session")(*args, **kwargs)
+
+
+def login(*args, **kwargs):
+    return _from_session("login")(*args, **kwargs)
+
+
+def login_auto(*args, **kwargs):
+    return _from_session("login_auto")(*args, **kwargs)
+
+
+def quick_check_session_http(*args, **kwargs):
+    return _from_session("quick_check_session_http")(*args, **kwargs)
+
+
+async def check_session_async(*args, **kwargs):
+    return await _from_session("check_session_async")(*args, **kwargs)
+
+
+async def _require_session_async(cdp=None):
+    """True when the saved session works. A quick REST probe first; otherwise the full check (and its login help)."""
+    from core.rest import RestError, get_json
+    try:
+        await asyncio.to_thread(get_json, "/learn/api/public/v1/users/me", 6.0)
+        return True
+    except RestError:
+        return await _from_session("_require_session_async")(cdp)
+
 
 # Scrapers
 from scrapers.calendar import save_calendar, scrape_calendar_async
@@ -905,6 +945,7 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
         epilog="Examples:\n  bb activity\n  bb activity --limit 100\n  bb activity --json",
     )
     act_p.add_argument("--limit", type=int, metavar="N", help="Newest N items (default 40; 0 = everything)")
+    act_p.add_argument("--full", action="store_true", help="Include classmates' names and post excerpts (hidden by default)")
     subparsers.add_parser(
         "profile",
         aliases=["whoami"],
@@ -924,6 +965,7 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
     )
     disc_p.add_argument("--max-posts", type=int, help="Maximum posts to click (browser fallback only)")
     disc_p.add_argument("--max-parts", type=int, help="Maximum participants to click (browser fallback only)")
+    disc_p.add_argument("--full", action="store_true", help="Read posts and replies, including classmates' names and text (hidden by default)")
     disc_p.add_argument("--posts-only", action="store_true", help="Scrape posts only")
     disc_p.add_argument("--participants-only", action="store_true", help="Scrape participants only")
     disc_p.add_argument("--titles-only", action="store_true", help="Scrape thread titles only")
@@ -1702,14 +1744,15 @@ async def main_async(args: argparse.Namespace) -> None:
     # --- discussions ---
     if subcmd in ("discussions", "discuss") or getattr(args, "discussions", False):
         machine = bool(getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None))
-        # Reading every reply costs ~1 request per response; the terminal summary only needs topics.
-        glance = not (machine or args.md or args.titles_only or args.posts_only or args.participants_only)
+        # Classmates' posts are private by default, and reading every reply costs ~1 request per response:
+        # topics, prompts and due dates unless --full (or an explicit posts/participants flag) is given.
+        glance = not (args.full or args.posts_only or args.participants_only or args.titles_only)
         kwargs = {
             "max_post_clicks": getattr(args, "max_posts", None),
             "max_participant_clicks": getattr(args, "max_parts", None),
             "posts_only": getattr(args, "posts_only", False),
             "participants_only": getattr(args, "participants_only", False),
-            "titles_only": getattr(args, "titles_only", False),
+            "titles_only": getattr(args, "titles_only", False) or glance,
         }
         raw_all_disc = await asyncio.to_thread(
             _run_discussions_sync,
@@ -1727,7 +1770,7 @@ async def main_async(args: argparse.Namespace) -> None:
             from scrapers.discussions import format_discussions
             print(format_discussions(raw_all_disc))
             if glance:
-                print("\nTopics only. Add --json (or --md) to read posts and replies.", file=sys.stderr)
+                print("\nTopics only. Add --full to read posts and replies (includes classmates' names).", file=sys.stderr)
         if any(c.get("error") for c in raw_all_disc):
             raise SystemExit(1)
         return

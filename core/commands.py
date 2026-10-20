@@ -88,7 +88,7 @@ async def run_activity(args: Any, emit: Emit) -> None:
 
     limit = args.limit if args.limit is not None else DEFAULT_LIMIT
     try:
-        everything = await scrape_activity_async()
+        everything = await scrape_activity_async(full=args.full)
     except RestError as exc:
         fail(args, emit, exc)
     items = everything[:limit] if limit else everything

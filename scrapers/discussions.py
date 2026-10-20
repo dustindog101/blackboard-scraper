@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 # Courses are fetched concurrently and each fetches topics/replies in small pools; this caps the
 # number of requests in flight overall so --all stays polite to Blackboard.
-_HTTP_SLOTS = threading.BoundedSemaphore(10)
+_HTTP_SLOTS = threading.BoundedSemaphore(6)
 
 
 def _api_get(path: str, cookie_header: str):

@@ -9,6 +9,8 @@ Key Features:
 - Resource-Aware Worker Allocation bounded by CPU cores and memory limits
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
@@ -20,18 +22,20 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Callable, Coroutine, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
-from playwright.async_api import (
-    BrowserContext,
-    Page,
-    Playwright,
-    Route,
-    TimeoutError as PlaywrightTimeout,
-    async_playwright,
-)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # playwright is imported lazily: REST-only commands never load it
+    from playwright.async_api import BrowserContext, Page, Playwright, Route
 
 from core.config import SESSION_DIR
 
 logger = logging.getLogger("blackboard.async_engine")
+
+
+def _playwright_timeout() -> type:
+    """Playwright's TimeoutError, imported only when an exception actually has to be matched."""
+    from playwright.async_api import TimeoutError as PlaywrightTimeout
+    return PlaywrightTimeout
 
 
 # ============================================================================
@@ -279,6 +283,7 @@ class AsyncSessionManager:
             if self._initialized:
                 return
 
+            from playwright.async_api import async_playwright
             self._pw = await async_playwright().start()
 
             if self.config.cdp_url:
@@ -414,7 +419,7 @@ class SmartWorkerPool:
                         self.session_manager.update_concurrency(self.session_manager.config.max_concurrency + 1)
 
                     return cid, res
-            except PlaywrightTimeout:
+            except _playwright_timeout():
                 self.timeout_count += 1
                 logger.warning(f"Timeout scraping {cname} ({cid}). Throttling concurrency.")
                 # Throttle down concurrency on timeout
