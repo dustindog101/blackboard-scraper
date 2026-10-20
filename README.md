@@ -34,7 +34,7 @@ An automated, high-performance headless scraper and academic intelligence engine
 
 ## ⚡ Core Architectural Principles
 
-1. **HTTP REST Fast-Path (<150ms)**: Read-only scrapers (`--due`, `--calendar`, `--announcements`, `--grades`, `--outline`, `--search`, `--profile`) query Blackboard's public REST APIs directly using session cookies, returning sub-second responses with zero browser overhead.
+1. **HTTP REST Fast-Path**: Read-only scrapers query Blackboard's REST APIs using saved session cookies. A valid-session read starts no browser; timing depends on the number of requests and courses.
 2. **Graceful Playwright Fallback**: If an API endpoint is restricted or blocked, scrapers notify the user and seamlessly delegate to Playwright browser DOM extraction.
 3. **Clean CLI Output by Default**: All commands format structured, beautiful output directly to terminal `stdout`. No unwanted Markdown or temporary files are written to disk unless explicitly requested (`--md` or `--out <file>`).
 4. **Task-Aware Smart Concurrency**: The worker pool automatically adjusts concurrency ceilings based on operation complexity—shallow scraping runs fast at 6–8 parallel workers, while deep accordion drawers run safely at 2–3 workers.
@@ -129,7 +129,7 @@ bb login auto
 
 Smart Login also handles an existing UMBC SSO session that skips the credential
 form or Duo. It saves cookies only after Blackboard's HTTP identity check
-succeeds. Failed automatic login exits with status 1; changed or missing SSO
+succeeds. Failed login exits with status 1; changed or missing SSO
 forms produce a bounded error with `bb login --manual` recovery guidance.
 
 ---
@@ -339,7 +339,7 @@ bb assignments --all
 ## 📚 Scraper Feature Reference
 
 ### 1. Composite Daily Briefing (`bb briefing`)
-Runs global activity, calendar, course announcements, and grades concurrently:
+Fetches calendar, course announcements, and grades concurrently, then groups overdue work, upcoming deadlines and items needing attention:
 ```bash
 bb briefing                          # Terminal UI
 bb briefing --json                   # JSON to stdout

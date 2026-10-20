@@ -45,7 +45,7 @@ Every `bb <COMMAND> --help` page ends with copy-pasteable `Examples:`. Unknown c
 ## 🔐 Authentication & Sessions
 
 ### `bb login`
-**Description:** Smart authentication entry point. By default, executes zero-touch automated SSO login with real-time macOS SMS Duo 2FA passcode interception (when available).
+**Description:** Checks the saved session, tries HTTPS renewal when possible, then uses automated SSO and the verification methods offered by Duo. macOS Messages can supply a fresh SMS code when available.
 - Mode syntax: accepts both flags and positionals:
   - `bb login` (Smart automated default on macOS)
   - `bb login auto` or `bb login --auto`
@@ -82,7 +82,7 @@ Chromium-family default browser is preferred; Firefox/Safari defaults fall back 
 installed compatible browser with a short explanation. No browser download is required.
 
 ### `bb check` / `bb session check`
-**Description:** High-speed HTTP REST API probe (<120ms) verifying session token validity without launching a browser. Returns exit code 0 if authenticated, 1 if expired.
+**Description:** HTTP identity probe without a browser. Returns exit code 0 if authenticated and 1 if expired or unavailable; output distinguishes expiry from network/server uncertainty.
 
 ### `bb session info`
 **Description:** Displays session creation timestamp and last-used timestamp.
@@ -128,14 +128,14 @@ run `bb discover` on a fresh installation when needed.
 
 ### `bb courses`
 **Description:** Prints the current active courses configured in `config.json`.
-- `--json`: Emits configured courses as JSON array.
+- `--json`: Emits `{courses: [{course_id, course_name}]}`.
 
 ---
 
 ## 📚 Academic Scrapers
 
 ### `bb briefing`
-**Description:** REST-only morning summary (about 1 s, no browser on the happy path): overdue work, due in the next 48 hours, later this week, a grade line per course (official or calculated), and announcements from the last 7 days. Built from the same Gradable Item status model as `grades`, `due` and `assignments`.
+**Description:** REST-only morning summary (about 1 s, no browser on the happy path): overdue work, work due today/tomorrow, later this week, a grade line per course (official or calculated), and announcements from the last 7 days. Built from the same Gradable Item status model as `grades`, `due` and `assignments`.
 - `--json`: Emits the v2 composite document. Each course has `overall` (same shape as `grades --json`) and `grades` (items with `due_at`, `status`, `score`, `possible`, `percent`); `global.overdue` and `global.urgent` hold the deadline rows.
 - `--out <file>`: Exports JSON directly to specified filepath.
 - `--telegram`: Dispatches formatted summary card to configured Telegram chat.
@@ -143,16 +143,16 @@ run `bb discover` on a fresh installation when needed.
 - An expired session prints `Session expired, run `bb login`.` and exits 1.
 
 ### `bb due [WINDOW]`
-**Description:** Deadlines from each course's gradebook (the status model) reconciled with Blackboard's calendar. Items are keyed by course + title, grouped by day, in local time with the zone (`Tue Oct 21 11:59 PM EDT`).
+**Description:** Deadlines from each course's gradebook (the status model) reconciled with Blackboard's calendar. Distinct gradebook items retain their column/content identities; calendar joins prefer source IDs and use titles only when unambiguous within a course. Deadlines are grouped by day, in local time with the zone (`Tue Oct 21 11:59 PM EDT`).
 - `WINDOW`: `7d` (default), `14d`, `30d`, any `Nd`, `overdue`, `all`.
   - `overdue`: dated, past and not completed (graded, needs grading, submitted and exempt count as completed).
   - `all`: everything, plus `No due date` and `Already done` groups. Undated items appear only here.
 - `--exclude-completed`: Hides completed items.
-- `--json`: List of `{title, course_id, course, due_at (ISO-8601 UTC), status, completed, score, possible, percent, category, source}`.
+- `--json`: List of `{item_id, title, course_id, course, due_at (ISO-8601 UTC), status, completed, score, possible, percent, category, source}`.
 - Legacy: `bb --due 7d`, `bb --upcoming 10` (maps to `bb due 10d`).
 
 ### `bb calendar [COURSE]`
-**Description:** High-speed HTTP REST API scraper (<150ms) for global calendar events with automatic localized date formatting. Automatically falls back to Playwright browser if REST is blocked.
+**Description:** REST-first global calendar events with localized dates. Automatically falls back to Playwright browser if REST is blocked.
 - `COURSE`: Positional course code or keyword (e.g. `bb calendar IS410`).
 - `-c <COURSE>`: Named course flag (e.g. `-c IS410`).
 - `--json`: Emits raw JSON event items.
