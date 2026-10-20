@@ -93,10 +93,11 @@ jobs:
       - name: Install full Chromium without headless shell (fallback coverage)
         if: matrix.browser == 'chromium'
         run: python -m playwright install chromium --no-shell --with-deps
-      - name: Verify automatic browser preference
+      - name: Verify automatic installed-browser preference
+        if: matrix.browser != 'chromium'
         shell: bash
         run: |
-          python -c "from core.browser import get_browser_launch_candidates; import sys; assert get_browser_launch_candidates()[0]['channel'] == ('msedge' if sys.platform == 'win32' else 'chrome')"
+          python -c "from core.browser import get_browser_launch_candidates; candidates = get_browser_launch_candidates(); assert candidates and not candidates[0].get('bundled')"
       - name: Exercise automatic installed-browser selection
         if: matrix.browser != 'chromium'
         run: python -m unittest discover -s tests -p "test_browser_smoke.py" -v

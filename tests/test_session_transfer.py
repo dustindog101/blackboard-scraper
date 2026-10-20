@@ -267,7 +267,8 @@ class TestTransfer(unittest.TestCase):
         stdout = io.StringIO()
         with patch.object(main, "_require_session_async", side_effect=AssertionError("must not login")), redirect_stdout(stdout):
             asyncio.run(main.main_async(main._parse_args(["session", "import", str(self.input)])))
-        self.assertIn("Verified account: synthetic-account", stdout.getvalue())
+        self.assertIn("Account identity verified.", stdout.getvalue())
+        self.assertNotIn("synthetic-account", stdout.getvalue())
         self.assertNotIn("synthetic-import-secret", stdout.getvalue())
 
     def test_cli_failure_has_nonzero_exit_without_traceback(self):
