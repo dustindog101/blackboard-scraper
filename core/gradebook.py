@@ -42,7 +42,7 @@ class GradebookError(Exception):
 
 _STATUS_TEXT = {
     GRADED: "graded", NEEDS_GRADING: "submitted (awaiting grade)", SUBMITTED: "submitted",
-    NOT_SUBMITTED: "not submitted", IN_PROGRESS: "in progress (not submitted)", EXEMPT: "exempt", UNKNOWN: "status unknown",
+    NOT_SUBMITTED: "not submitted", IN_PROGRESS: "in progress", EXEMPT: "exempt", UNKNOWN: "status unknown",
 }
 
 

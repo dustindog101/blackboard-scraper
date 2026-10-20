@@ -116,7 +116,7 @@ class TestGradePointsOutput(unittest.TestCase):
             self.assertNotIn(" A ", rendered)
         detail = grades.format_grades_text([book])
         self.assertIn("10 pts possible", detail)
-        self.assertIn("in progress (not submitted)", detail)
+        self.assertIn("in progress", detail)
         self.assertNotIn("✓", detail)
 
     def test_markdown_export_uses_points_column(self):

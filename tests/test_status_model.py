@@ -311,7 +311,7 @@ class TestStudentWording(unittest.TestCase):
         self.assertEqual(gb.status_text("needs_grading"), "submitted (awaiting grade)")
         self.assertEqual(gb.status_text("graded"), "graded")
         self.assertEqual(gb.status_text("graded", {"possible": 0}), "graded (no points)")
-        self.assertEqual(gb.status_text("in_progress"), "in progress (not submitted)")
+        self.assertEqual(gb.status_text("in_progress"), "in progress")
         self.assertEqual(gb.status_text("unknown"), "status unknown")
         self.assertEqual(gb.status_text("not_submitted"), "not submitted")
 

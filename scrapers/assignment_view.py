@@ -399,7 +399,7 @@ def format_assignment_view(data):
         if submission:
             state = re.sub(r"[^A-Z]", "", str(data.get("status") or "").upper())
             final = state in ("NEEDSGRADING", "COMPLETED", "SUBMITTED", "GRADED")
-            heading = ("Your draft (not submitted):" if state == "INPROGRESS" else
+            heading = ("Your draft:" if state == "INPROGRESS" else
                        "Your submission:" if final else "Your saved work (submission unverified):")
             lines += ["", heading]
             if final and submission.get("submitted_at"):

@@ -226,7 +226,7 @@ By default, **no Markdown files are saved to disk**. Commands print directly to 
 Due in the next 7 days · 3 items
 
 Today, Tue Oct 20
-  1:00 PM EDT  ENGL 100  J#5: Library Research Module  10 pts  in progress (not submitted)
+  1:00 PM EDT  ENGL 100  J#5: Library Research Module  10 pts  in progress
 
 Sun Oct 25
   11:59 PM EDT  AGNG 100  Module 8 Assignment  100 pts  not submitted
@@ -416,14 +416,14 @@ JSON retains its `percent` and `letter` keys for compatibility; inferred
 letters are null.
 
 Submission wording follows the student's verified attempt or post. An
-`IN_PROGRESS` attempt displays `in progress (not submitted)` and remains open
+`IN_PROGRESS` attempt displays `in progress` and remains open
 even when the public gradebook says Needs Grading.
 
 ```text
 IS 410  Intro To Database Design
   18 / 20 pts  (official: Overall Grade) · 1 of 2 graded
   no due date  Quiz              18 / 20 pts  graded
-  no due date  Library Research  10 pts possible  in progress (not submitted)
+  no due date  Library Research  10 pts possible  in progress
 ```
 
 ```bash

@@ -167,7 +167,7 @@ run `bb discover` on a fresh installation when needed.
 ### `bb grades [COURSE]`
 **Description:** Per course: the overall grade, then every Gradable Item sorted by due date with earned / possible points, status and due time (local, with zone). Human-readable text and Markdown omit percentages and letters. Courses run in parallel with two bulk gradebook reads per course; targeted read-only attempt metadata checks verify native assessment states, including active retakes behind posted grades.
 - Overall is labeled `official` when the course has a visible calculated total (`Overall Grade`, `Total Points Earned`), otherwise `calculated` from graded, non-exempt, included item points. An official percentage without actual point totals is labeled `point total unavailable`; it is never presented as earned points out of 100. `N of M graded` counts items that count toward the total.
-- Statuses: `graded`, `needs_grading`, `submitted`, `in_progress`, `not_submitted`, `exempt`, `unknown`. `in_progress` displays as `in progress (not submitted)`. Submission requires the student's completed attempt or post; public Needs Grading alone does not prove submission.
+- Statuses: `graded`, `needs_grading`, `submitted`, `in_progress`, `not_submitted`, `exempt`, `unknown`. `in_progress` displays as `in progress`. Submission requires the student's completed attempt or post; public Needs Grading alone does not prove submission.
 - A posted score remains a real grade even if an active retake is open; it still contributes to graded-point calculations. A posted grade with no online attempt is not called missing, because work can be graded outside an online attempt. Failed attempt verification stays unknown and open.
 - `COURSE`: Positional course code or keyword (e.g. `bb grades IS410`).
 - `-c <COURSE>`: Named course flag.
@@ -343,7 +343,7 @@ fallback uses included, non-exempt graded points and does not assume category we
 
 Submission status is verified against the student's attempt or post when available.
 A public Needs Grading state can coexist with an `IN_PROGRESS` attempt; that work is
-reported as `in progress (not submitted)` and remains open in deadline views.
+reported as `in progress` and remains open in deadline views.
 
 If student-grade records are unreadable, visible items retain `status: "unknown"` and
 `grades --json` includes `records_error`. Text and briefing label this partial data as

@@ -132,7 +132,7 @@ class TestAttemptEvidence(unittest.TestCase):
         data = {"title": "Work", "status": "IN_PROGRESS", "view": "full", "submission": {
             "text": "Saved draft", "files": [{"name": "draft.txt"}], "submitted_at": None}}
         text = format_assignment_view(data)
-        self.assertIn("Your draft (not submitted)", text)
+        self.assertIn("Your draft", text)
         self.assertNotIn("Your submission:", text)
 
 

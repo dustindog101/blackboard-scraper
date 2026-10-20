@@ -46,7 +46,7 @@ Output is the product. Every command must be useful at a glance and easy to pars
 - **Status comes from one model.** `grades`, `due`, `briefing`, `assignments`, Telegram and the menubar use the same
   Gradable Item status helper (graded / needs_grading / submitted / in_progress / not_submitted / exempt / unknown).
   Submission wording requires evidence from the student's actual attempt or post. A started assessment with an
-  `IN_PROGRESS` attempt is `in progress (not submitted)`, even if the public gradebook says Needs Grading.
+  `IN_PROGRESS` attempt is `in progress`, even if the public gradebook says Needs Grading.
   When we don't know, say `unknown`. Never default to a made-up status like `Unopened`.
 
 ## 4. Speed
