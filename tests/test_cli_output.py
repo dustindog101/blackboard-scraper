@@ -402,3 +402,12 @@ class TestIntegratedRequestIdentity(unittest.TestCase):
                 asyncio.run(main.main_async(main._parse_args(['grades', '--json'])))
         self.assertEqual(caught.exception.code, 1)
         self.assertEqual(out.getvalue(), '')
+
+
+class TestSessionCheckExit(unittest.TestCase):
+    def test_expired_check_exits_nonzero(self):
+        with patch('main.load_courses', return_value=COURSES), \
+             patch('main.check_session_async', new=AsyncMock(return_value=False)):
+            with self.assertRaises(SystemExit) as caught:
+                asyncio.run(main.main_async(main._parse_args(['check'])))
+        self.assertEqual(caught.exception.code, 1)

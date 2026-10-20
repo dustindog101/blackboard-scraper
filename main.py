@@ -1347,8 +1347,7 @@ async def main_async(args: argparse.Namespace) -> None:
                     print(f"Exported {count} Blackboard cookies to {Path(args.file).expanduser()}")
                 else:
                     count, user = await asyncio.to_thread(import_session, args.file)
-                    account = user.get("userName") or user.get("studentId") or user.get("id")
-                    print(f"Imported {count} Blackboard cookies. Verified account: {account}")
+                    print(f"Imported {count} Blackboard cookies. Account identity verified.")
             except SessionTransferError as error:
                 print(f"Session {sess_action} failed: {error}", file=sys.stderr)
                 raise SystemExit(1) from None
@@ -1358,12 +1357,15 @@ async def main_async(args: argparse.Namespace) -> None:
             ok = await check_session_async(debug=getattr(args, "debug", False), headless=headless, fast_only=fast_only)
             if not ok and getattr(args, "visible", False):
                 visible_ok = await check_session_async(debug=getattr(args, "debug", False), headless=False, fast_only=False)
+                ok = visible_ok
                 if visible_ok:
                     print(
                         "⚠️  Headless check failed but visible check passed.\n"
                         "   Likely a headless-detection/timing issue; session is probably valid.",
                         file=sys.stderr,
                     )
+            if not ok:
+                raise SystemExit(1)
             return
         if sess_action in ("stats", "telemetry"):
             from core.session_tracker import tracker
