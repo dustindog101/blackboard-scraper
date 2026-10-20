@@ -6,6 +6,7 @@ Errors are distinct (coding standards section 1): 401 is ``auth`` (session expir
 """
 import json
 import re
+import threading
 import urllib.error
 import urllib.request
 from typing import Any, List, Optional
@@ -60,9 +61,15 @@ def xsrf_token() -> Optional[str]:
     return None
 
 
+# This server stalls every burst by ~2 s when more than ~6 requests are in flight (measured), so all
+# REST calls through this client share one cap.
+MAX_CONNECTIONS = 6
+_SLOTS = threading.BoundedSemaphore(MAX_CONNECTIONS)
+
+
 def _open(req: urllib.request.Request, timeout: float) -> bytes:
     """Single network seam (tests replace this)."""
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _SLOTS, urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
 
 
