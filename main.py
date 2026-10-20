@@ -5,7 +5,6 @@ import json
 import os
 import re
 import sys
-import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -26,7 +25,7 @@ if sys.platform == "win32":
 
 from core.config import BLACKBOARD_BASE, load_courses, save_courses
 from core.export_json import build_composite_schema, build_export_doc
-from core.session import _launch_context, _require_session, _require_session_async, check_session_async, login, login_auto, quick_check_session_http
+from core.session import _launch_context, _require_session, _require_session_async, check_session_async, login, _login_auto_async, quick_check_session_http
 from core.async_engine import AsyncSessionManager, AsyncCourseWorkerPool, EngineConfig, TaskProfile, get_optimal_concurrency
 
 # Scrapers
@@ -1247,24 +1246,17 @@ async def main_async(args: argparse.Namespace) -> None:
         if is_manual and not code_file:
             await asyncio.to_thread(login, force_flag, username, password, cdp)
         else:
-            cancel_event = threading.Event()
-            try:
-                success = await asyncio.to_thread(
-                    login_auto,
-                    username=username,
-                    password=password,
-                    headless=headless,
-                    cdp_url=cdp,
-                    auto_exp=True,
-                    force=force_flag,
-                    passcode=getattr(args, "duo_passcode", None),
-                    cancel_event=cancel_event,
-                    code_file=code_file,
-                    code_timeout=getattr(args, "code_timeout", 300.0),
-                )
-            except asyncio.CancelledError:
-                cancel_event.set()
-                raise
+            success = await _login_auto_async(
+                username=username,
+                password=password,
+                headless=headless,
+                cdp_url=cdp,
+                auto_exp=True,
+                force=force_flag,
+                passcode=getattr(args, "duo_passcode", None),
+                code_file=code_file,
+                code_timeout=getattr(args, "code_timeout", 300.0),
+            )
             if not success:
                 raise SystemExit(1)
         return
