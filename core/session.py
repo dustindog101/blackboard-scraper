@@ -919,8 +919,8 @@ def prompt_credentials_tui(default_auto_exp: bool = True) -> tuple[Optional[str]
         return None, None, False, ""
 
 
-@_exclusive_login(None)
-def login(force: bool = False, username: str = None, password: str = None, cdp_url: str = None):
+@_exclusive_login(False)
+def login(force: bool = False, username: str = None, password: str = None, cdp_url: str = None) -> bool:
     """
     Handle the SSO login flow.
     If already logged in, does nothing unless force=True.
@@ -932,7 +932,7 @@ def login(force: bool = False, username: str = None, password: str = None, cdp_u
     if cdp_url:
         print("🔌 Ignoring --login since you are connected to an existing CDP browser.")
         print("   Please login directly in your attached browser window.")
-        return
+        return False
 
     # Ensure config exists
     ensure_config_exists(notify=True)
@@ -954,7 +954,7 @@ def login(force: bool = False, username: str = None, password: str = None, cdp_u
         print("⏳ Checking existing session...")
         if check_session(quiet=True):
             print("✅ You are already logged in! (Use --force to login anyway)")
-            return
+            return True
 
     print("\n🚀 Opening browser for SSO Login...")
     print("   Please complete the UMBC login and Duo 2FA in the window that appears.")
@@ -965,17 +965,19 @@ def login(force: bool = False, username: str = None, password: str = None, cdp_u
             # We NEED a visible context for manual 2FA
             context, page = _launch_context(p, headless=False)
         except SystemExit:
-            return
+            return False
 
         try:
             page.goto(f"{BLACKBOARD_BASE}/ultra/course", wait_until="domcontentloaded", timeout=30_000)
             print("⏳ Waiting for you to complete UMBC login and Duo 2FA...")
             wait_for_blackboard(context, page, BLACKBOARD_BASE, timeout=300_000)
-            _persist_login(context, None, "✨ Session saved successfully.")
+            return _persist_login(context, None, "✨ Session saved successfully.")
         except LoginFlowError as error:
             print(f"❌ {error}")
+            return False
         except PlaywrightError:
             print("❌ Login browser failed. Saved cache preserved; run bb login --manual again.")
+            return False
         finally:
             context.close()
 

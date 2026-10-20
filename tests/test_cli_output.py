@@ -420,3 +420,12 @@ class TestCalendarLazyBrowser(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["items"], [])
         browser.assert_not_called()
+
+
+class TestManualLoginExit(unittest.TestCase):
+    def test_failed_manual_login_exits_nonzero(self):
+        with patch('main.load_courses', return_value=COURSES), \
+             patch('main.login', return_value=False):
+            with self.assertRaises(SystemExit) as caught:
+                asyncio.run(main.main_async(main._parse_args(['login', '--manual'])))
+        self.assertEqual(caught.exception.code, 1)

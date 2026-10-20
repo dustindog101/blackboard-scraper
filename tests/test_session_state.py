@@ -196,7 +196,7 @@ class TestLoginLock(SessionDir):
         with patch.object(session, "login_lock", side_effect=session_state.LoginInProgress("Login already in progress")), \
              patch.object(session, "ensure_config_exists") as config, contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertFalse(session.login_auto())
-            self.assertIsNone(session.login())
+            self.assertFalse(session.login())
         config.assert_not_called()
         self.assertIn("already in progress", out.getvalue())
 

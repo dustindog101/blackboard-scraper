@@ -1314,7 +1314,8 @@ async def main_async(args: argparse.Namespace) -> None:
 
         code_file = getattr(args, "code_file", None)
         if is_manual and not code_file:
-            await asyncio.to_thread(login, force_flag, username, password, cdp)
+            if not await asyncio.to_thread(login, force_flag, username, password, cdp):
+                raise SystemExit(1)
         else:
             success = await _login_auto_async(
                 username=username,

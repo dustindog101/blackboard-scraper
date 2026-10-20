@@ -117,6 +117,20 @@ class TestRefresh(Base):
             self.assertEqual(self.run_chain(self.FULL), hr.REFRESHED)
         probe.assert_not_called()
 
+    def test_cookies_rotated_by_identity_verification_are_the_saved_cookies(self):
+        jar = hr._jar_from([IDP, BB])
+        rotated = list(hr._jar_from([{**BB, "value": "rotated-by-verification"}]))
+        def rotate(_opener):
+            for cookie in rotated:
+                jar.set_cookie(cookie)
+            return hr.VALID
+        with patch.object(hr, "_jar_from", return_value=jar), \
+             patch.object(hr, "_request", return_value=(200, {}, "<html>landing</html>")), \
+             patch.object(hr, "_verify", side_effect=rotate):
+            self.assertEqual(hr.refresh_session_http(), hr.REFRESHED)
+        saved = json.loads((self.dir / "cookies.json").read_text())
+        self.assertEqual(next(c["value"] for c in saved if c["name"] == BB["name"]), "rotated-by-verification")
+
     def test_without_saved_idp_storage_needs_login(self):
         hr.forget_idp_storage()
         self.assertEqual(self.run_chain([]), hr.NEEDS_LOGIN)

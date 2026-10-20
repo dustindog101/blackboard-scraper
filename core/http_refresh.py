@@ -231,6 +231,10 @@ def refresh_session_http(timeout: float = 10.0) -> str:
         return UNKNOWN
     if verified != VALID:
         return NEEDS_LOGIN
+    # Identity verification may rotate or delete cookies too. Save the final jar.
+    merged = _merge_cookies(cookies, jar)
+    if cookie_header(cookies=merged) is None:
+        return NEEDS_LOGIN
     _write_private(Path(SESSION_DIR) / "cookies.json", json.dumps(merged))
     if written:
         save_idp_storage({**storage, **written})

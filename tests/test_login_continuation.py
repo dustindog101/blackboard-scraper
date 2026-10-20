@@ -205,7 +205,7 @@ class TestManualCache(unittest.TestCase):
             stack.enter_context(patch.object(session, 'track_session_usage'))
             stack.enter_context(patch.object(session, 'record_idp_storage'))
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
-            session.login.__wrapped__()
+            self.assertIs(session.login.__wrapped__(), False)
             self.assertEqual(cache.read_text(), '["previous"]')
             context.close.assert_called_once()
 
