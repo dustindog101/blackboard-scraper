@@ -1728,16 +1728,10 @@ async def main_async(args: argparse.Namespace) -> None:
 
     # --- calendar ---
     if subcmd in ("calendar", "cal") or getattr(args, "calendar", False):
-        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp))
-        await session_manager.initialize()
-        try:
-            async with session_manager.acquire_page() as page:
-                target_cid = target_cids[0] if target_cids else None
-                calendar = await scrape_calendar_async(page, target_cid)
-                if getattr(args, "md", False):
-                    save_calendar(calendar, target_cid)
-        finally:
-            await session_manager.close()
+        target_cid = target_cids[0] if target_cids else None
+        calendar = await scrape_calendar_async(None, target_cid)
+        if getattr(args, "md", False):
+            save_calendar(calendar, target_cid)
 
         if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
             _emit_json(args, calendar)

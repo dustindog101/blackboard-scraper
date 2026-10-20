@@ -5,7 +5,7 @@ description: Read UMBC Blackboard through the bb CLI, inspect course work and gr
 
 # Blackboard Assistant
 
-Use this skill with the checkout that supplies the executable. Global `bb` can point to a different checkout: inspect its launcher before relying on worktree-only features. In a selected checkout, run `.venv/bin/python main.py <command>`.
+Use this skill with the checkout that supplies the executable. Global `bb` can point to a different checkout: inspect its launcher before relying on worktree-only features. In a selected checkout, run `main.py <command>` with its project interpreter (`.venv/bin/python` when available).
 
 Read requests stay read-only. Do not start attempts, submit, send notifications, update trackers, download files, or change course configuration unless the request calls for that action. Existing user authorization applies. Keep credentials, cookies, Duo codes and personal identifiers out of output and durable notes.
 
@@ -43,7 +43,7 @@ Run the requested read directly; it already probes the session. Use `bb check` w
 
 Use `bb login --force` only when the user requests a clean reauthentication or concrete recovery requires clearing the saved sign-in. Browser login uses the installed Chromium-family OS default when supported, then installed alternatives with an explanation; bundled Chromium is optional. Do not install a browser to answer a routine read.
 
-Duo methods depend on what the page offers (SMS, push or passcode). Let the existing login process collect the response; do not restart it just to deliver a late code. For an agent-mediated file handoff, start `bb login --code-file <private temporary path>` once, wait for `WAITING_FOR_CODE`, then deliver only the user's fresh code to that path. The login discards a pre-existing file and deletes a consumed code. Keep the same process alive. If the user completes push approval, continue that flow. Use `bb login --manual` when manual browser completion is needed.
+Duo methods depend on what the page offers (SMS, push or passcode). Let the existing login process collect the response; do not restart it just to deliver a late code. For an agent-mediated file handoff, start `bb login --code-file <private temporary path>` once, wait for `WAITING_FOR_CODE`, then deliver only the user's fresh code to that path. The login discards a pre-existing file and deletes a consumed code. Keep the same process alive; a new input flag cannot be attached to a process already running. If the user completes push approval, continue that flow. Use `bb login --manual` when manual browser completion is needed.
 
 ## Details when needed
 

@@ -102,8 +102,11 @@ def format_daily_briefing(briefing_data: Dict[str, Any]) -> List[str]:
 
     # 1. Urgent Items
     def deadline_key(item):
-        return (item.get("course_id") or item.get("course"), item.get("title"),
-                item.get("due_at") or item.get("due_date") or item.get("due"))
+        identity = item.get("item_id") or item.get("column_id") or item.get("content_id") or item.get("id")
+        course = item.get("course_id") or item.get("course")
+        if identity:
+            return (course, identity)
+        return (course, item.get("title"), item.get("due_at") or item.get("due_date") or item.get("due"))
 
     shown = set()
     urgent = []

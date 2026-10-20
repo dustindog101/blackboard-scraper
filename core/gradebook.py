@@ -295,9 +295,11 @@ def _official_overall(column: Dict[str, Any], record: Dict[str, Any], schemas: L
     possible = _number(display.get("possible")) or _possible(column)
     text = display.get("text")
     scale = str(display.get("scaleType") or "").lower()
-    if scale == "percent" and score is not None:
-        percent: Optional[float] = round(score, 1)
-        possible = 100.0
+    display_score = _number(display.get("score"))
+    if scale == "percent" and display_score is not None:
+        # displayGrade is already scaled; top-level record.score may still be raw points.
+        percent: Optional[float] = round(display_score, 1)
+        score, possible = display_score, 100.0
     else:
         percent = _percent(score, possible)
     letter = text if isinstance(text, str) and _LETTER_RE.match(text.strip()) else None

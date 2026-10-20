@@ -411,3 +411,12 @@ class TestSessionCheckExit(unittest.TestCase):
             with self.assertRaises(SystemExit) as caught:
                 asyncio.run(main.main_async(main._parse_args(['check'])))
         self.assertEqual(caught.exception.code, 1)
+
+
+class TestCalendarLazyBrowser(unittest.TestCase):
+    def test_calendar_rest_success_never_initializes_browser(self):
+        with patch('main.AsyncSessionManager.initialize', new=AsyncMock(side_effect=AssertionError('browser opened'))) as browser:
+            code, out, err = run_cli(['calendar', '--json'], [patch('scrapers.calendar.scrape_calendar_api', return_value=[])])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out), [])
+        browser.assert_not_called()

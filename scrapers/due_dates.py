@@ -43,7 +43,7 @@ def _entry(cid: Optional[str], course: str, title: str, due_at: Optional[str], s
 
 
 def reconcile(books: Dict[str, Dict[str, Any]], calendar_items: List[Dict[str, Any]], courses: Dict[str, str]) -> List[Dict[str, Any]]:
-    """Merge gradebook items and calendar entries; the key is course + title, never title alone."""
+    """Keep distinct gradebook identities; join calendar titles only when unique within a course."""
     combined: Dict[Tuple[Optional[str], str], Dict[str, Any]] = {}
     by_title: Dict[tuple, list] = {}
     by_source_id: Dict[Tuple[Optional[str], str], Tuple[Optional[str], str]] = {}
@@ -58,6 +58,7 @@ def reconcile(books: Dict[str, Dict[str, Any]], calendar_items: List[Dict[str, A
             combined[key] = _entry(
                 cid, label, item["name"], item["due_at"], item["status"], "gradebook",
                 score=item["score"], possible=item["possible"], percent=item["percent"], category=item["category"],
+                item_id=item.get("_column_id") or item.get("_content_id") or key[1],
             )
             for ident in (item.get("_column_id"), item.get("_content_id")):
                 if ident:
@@ -88,7 +89,7 @@ def reconcile(books: Dict[str, Dict[str, Any]], calendar_items: List[Dict[str, A
                 existing.update(due_at=due_at, _dt=parse_datetime(due_at))
             continue
         label = course_label(courses.get(cid) if cid else c.get("course"))
-        combined[key] = _entry(cid, label, title, due_at if parse_datetime(due_at) else None, UNKNOWN, "calendar")
+        combined[key] = _entry(cid, label, title, due_at if parse_datetime(due_at) else None, UNKNOWN, "calendar", item_id=key[1])
 
     return list(combined.values())
 

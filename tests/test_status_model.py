@@ -422,3 +422,16 @@ class TestPartialBriefingExport(unittest.TestCase):
         self.assertEqual(data['courses'][0]['records_error'], 'forbidden')
         self.assertIn('grades unavailable', data['notes'][0])
         self.assertEqual(data['global']['attention'][0]['title'], 'Review homework')
+
+
+class TestMixedPercentAndDeadlineIdentity(unittest.TestCase):
+    def test_official_percent_uses_display_score_when_raw_points_also_exist(self):
+        record = {'columnId': 't', 'score': 450, 'displayGrade': {'scaleType': 'Percent', 'score': 90}}
+        book = gb.build_gradebook('c', 'IS 410', [calc('t', possible=500)], [record], [])
+        self.assertEqual(book['overall']['percent'], 90)
+
+    def test_telegram_keeps_distinct_items_with_same_course_title_and_due(self):
+        from telegram.formatter import format_daily_briefing
+        item = {'title': 'Homework', 'course': 'IS 410', 'due_date': 'Today'}
+        text = '\n'.join(format_daily_briefing({'urgent': [{**item, 'item_id': 'a'}, {**item, 'item_id': 'b'}]}))
+        self.assertEqual(text.count('Homework'), 2)
