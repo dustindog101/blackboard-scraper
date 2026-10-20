@@ -1151,6 +1151,12 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 return False
             if force:
                 context.clear_cookies()
+                forget_idp_storage()
+                try:  # the IdP keeps its session in localStorage too; a stale copy confuses a fresh sign-in
+                    page.goto("https://webauth.umbc.edu/idp/status", wait_until="domcontentloaded", timeout=10_000)
+                    page.evaluate("localStorage.clear()")
+                except Exception:
+                    pass
                 print("   🧹 Forced clean re-authentication: session cookies cleared.")
             # Snapshot before navigation: Duo can send a text on arrival.
             start_rowid = get_current_max_rowid() if sms_available else 0

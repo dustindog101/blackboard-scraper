@@ -102,7 +102,8 @@ def wait_for_blackboard(context, page, base, cancel_event=None, timeout=60_000):
             if is_verified(context, base, timeout=remaining):
                 return
         page.wait_for_timeout(250)
-    raise LoginFlowError('Timed out waiting for Blackboard after Duo. No verified session saved. Run bb login --manual.')
+    where = urlsplit(page.url)
+    raise LoginFlowError(f'Timed out waiting for Blackboard after Duo (last page: {where.hostname}{where.path[:60]}). No verified session saved. Run bb login --manual.')
 
 
 def wait_for_sso(context, page, username, password, base, detect_error, cancel_event=None, timeout=30_000):
