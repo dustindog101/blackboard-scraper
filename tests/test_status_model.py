@@ -411,3 +411,14 @@ class TestReviewRegressions(unittest.TestCase):
                                               'calendar': [urgent], 'courses': {}}))
         self.assertIn('Late homework', text)
         self.assertEqual(text.count('Soon homework'), 1)
+
+
+class TestPartialBriefingExport(unittest.TestCase):
+    def test_partial_grade_error_and_attention_survive_json_export(self):
+        from core.export_json import build_composite_schema
+        bundle = {'courses': {'c': {'course_name': 'IS 410', 'records_error': 'forbidden', 'grades': []}},
+                  'notes': ['IS 410: grades unavailable'], 'attention': [{'title': 'Review homework'}]}
+        data = json.loads(build_composite_schema(bundle))
+        self.assertEqual(data['courses'][0]['records_error'], 'forbidden')
+        self.assertIn('grades unavailable', data['notes'][0])
+        self.assertEqual(data['global']['attention'][0]['title'], 'Review homework')

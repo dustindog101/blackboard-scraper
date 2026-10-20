@@ -145,6 +145,8 @@ def build_composite_schema(
             "overall": cdata.get("overall"),
             "grades": grades,
             "announcements": anns,
+            **({"error": cdata["error"]} if cdata.get("error") else {}),
+            **({"records_error": cdata["records_error"]} if cdata.get("records_error") else {}),
         })
 
     doc = {
@@ -159,12 +161,14 @@ def build_composite_schema(
             "unread_announcements_count": unread_announcements,
         },
         "user": user_info or {},
+        "notes": bundle.get("notes", []),
         "courses": courses_list,
         "global": {
             "activity_stream": activity_data,
             "calendar_due_dates": calendar_data,
             "overdue": bundle.get("overdue", []),
             "urgent": bundle.get("urgent", []),
+            "attention": bundle.get("attention", []),
         },
     }
 
