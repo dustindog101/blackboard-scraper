@@ -418,5 +418,5 @@ class TestCalendarLazyBrowser(unittest.TestCase):
         with patch('main.AsyncSessionManager.initialize', new=AsyncMock(side_effect=AssertionError('browser opened'))) as browser:
             code, out, err = run_cli(['calendar', '--json'], [patch('scrapers.calendar.scrape_calendar_api', return_value=[])])
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out), [])
+        self.assertEqual(json.loads(out)["items"], [])
         browser.assert_not_called()
