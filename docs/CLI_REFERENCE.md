@@ -94,11 +94,13 @@ run `bb discover` on a fresh installation when needed.
 ## 🧭 Course Discovery & Term Management
 
 ### `bb discover`
-**Description:** Auto-discovers all enrolled courses from the Blackboard Ultra REST API, filters for the current active semester (e.g. Fall 2026), and updates `config.json`.
+**Description:** Finds the courses of the active term (the term whose date range contains today) and **replaces the course list in `config.json`**; it says so on stderr. Use `bb terms` to look without saving. If the course API is unavailable it falls back to the browser.
+- `--json`: Emits `{term, saved, courses: [{id, name}]}`.
 - `--term <TERM>`: Target a specific term (e.g. `--term FA2026`, `--term SP2026`, or `--term all`).
 
 ### `bb terms`
-**Description:** Lists all lifetime enrolled terms and courses without modifying `config.json`.
+**Description:** Lists every enrolled term and its courses (active term first). Read-only: never touches `config.json`.
+- `--json` / `--out FILE`: a JSON array of `{term, active, courses: [{id, name}]}`.
 
 ### `bb courses`
 **Description:** Prints the current active courses configured in `config.json`.
@@ -131,11 +133,11 @@ run `bb discover` on a fresh installation when needed.
 - `--json`: Emits raw JSON event items.
 
 ### `bb announcements [COURSE]`
-**Description:** Fast REST API announcements extractor (<120ms per course) with HTML-to-Markdown formatting and unread status.
-- `COURSE`: Positional course code or keyword (e.g. `bb announcements MATH215`).
-- `-c <COURSE>`: Named course flag.
-- `--all`: Scrape all configured courses in parallel.
-- `--json`: Emits structured JSON.
+**Description:** Announcements for all current courses (or one), **newest first**, grouped by course with local time, age and a clipped body preview. REST only (about 0.4 s for all courses); posts from before the course's term start are marked `(older term)`.
+- `COURSE` / `-c <COURSE>`: limit to one course. Omitted means all current courses.
+- `--since 14d|2w|2026-09-01`, `--limit N` (per course): applied after sorting.
+- `--unread`: only posts verified unread. The REST API has no read state, so this opens the browser (read-only) and joins by title; unknown state is excluded, with a warning on stderr.
+- `--json`: `[{course_id, course_name, announcements: [{title, created, modified, body, unread, older_term}], error?}]`. `unread` is `true`, `false` or `null` (unknown); it is `null` unless `--unread` verified it.
 
 ### `bb grades [COURSE]`
 **Description:** Fast REST API gradebook extractor (<150ms per course) retrieving assessment titles, points possible, earned scores, due dates, and running grades.
@@ -157,7 +159,7 @@ run `bb discover` on a fresh installation when needed.
 - `--json`: Emits clean, streamlined JSON outline.
 
 ### `bb assignments [COURSE]`
-List gradable items for discovery. Use `--filter <text>` to narrow the list, then `bb assignment` to inspect one. Supports `-c`, `--all` and `--json`.
+List gradable items for discovery. With no course it lists all current courses (fetched concurrently); text output is one table per course sorted by due time in local time with zone, and JSON adds `due_at` (ISO-8601). Use `--filter <text>` to narrow the list, then `bb assignment` to inspect one. Supports `-c`, `--all` and `--json`.
 
 ### `bb assignment <TARGET> [-c COURSE]`
 Aliases: `quiz`, `asmt`, `assessment`. `TARGET` accepts a title, content ID or Blackboard URL. Exact matches win; ambiguous title matches return candidates.
@@ -183,7 +185,7 @@ Native rubric previews require `displayBefore: true`; hidden rubric definitions 
 - `--start-attempt` (`--begin-attempt`) permits starting a new attempt; `--force-start` additionally confirms a timed assessment.
 
 ### `bb search <QUERY>`
-**Description:** Omnisearch across all courses for files, assignments, and documents matching keyword query.
+**Description:** Omnisearch across all courses for files, assignments, and documents matching keyword query. Text output is grouped by course.
 - `QUERY`: Positional search string (e.g. `bb search "Syllabus"`).
 - `-c <COURSE>`: Restrict search to specific course.
 
@@ -191,13 +193,16 @@ Native rubric previews require `displayBefore: true`; hidden rubric definitions 
 **Description:** Downloads specific Blackboard content item, attachment, or search query directly to `downloads/<CourseName>/`.
 - `ITEM_OR_QUERY`: Positional target (e.g. `bb download "Worksheet_1.pdf"` or `bb download _8825690_1`).
 - `-c <COURSE>`: Restrict target course.
-- `--out-dir <dir>`: Custom destination directory (default: `./downloads`).
+- `--out-dir <dir>`: Custom destination directory (default: `./downloads`). It is only created when a file is written.
+- A name that matches a **folder** is not downloaded: the command lists the files inside (and exits 0). A name that matches several items lists them and exits 1. Items that are not files (assignments, links) say so.
 
 ### `bb activity`
-**Description:** Global activity stream feed showing recent updates, grades, and announcements.
+**Description:** Recent activity (grades, due dates, announcements, new content, discussion posts) grouped by course, newest first. Reads the Ultra stream REST endpoint (about 0.3 s); the browser is only a fallback when REST is unavailable. Repeated entries are merged and a discussion thread's responses collapse into one row.
+- `--limit N`: newest N items (default 40, `0` for everything).
+- `--json`: items with `category`, `course`, `title`, `at` and `due_at` (ISO-8601 with offset), `grade`, `message`.
 
 ### `bb profile`
-**Description:** Retrieves student profile information (<150ms).
+**Description:** Shows your name, role and pronouns (<250ms). Student ID, username and email are deliberately not printed.
 
 ---
 
@@ -218,7 +223,7 @@ Single course targets can be passed directly as positional arguments or with `-c
 
 ## 📦 Output Formats & File Export
 
-- `--json`: Emits standardized JSON to terminal stdout (zero disk writes).
+- `--json`: Emits standardized JSON to terminal stdout (zero disk writes). **stdout is exactly one JSON document; progress, warnings and fallback notices go to stderr.** Failures print `{"error": kind, "message": ...}` and exit non-zero.
 - `--out <file>`: Exports JSON directly to specified file.
 - `--compact`: Emits minified JSON.
 - `--md`, `--save`: Saves Markdown report into `output/` directory.

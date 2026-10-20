@@ -1,32 +1,225 @@
+"""Homepage activity stream: REST first (``/learn/api/v1/streams/ultra``), browser DOM only as fallback.
+
+The stream endpoint is a POST, but it is a read-only "retrieve" call (``retrieveOnly``); nothing is
+marked read, dismissed or changed.
+"""
 import asyncio
+import html
+import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from core.config import BLACKBOARD_BASE
-from core.output import ensure_output_dir
-from core.async_engine import AdaptiveDOM
+from core.config import BLACKBOARD_BASE, load_courses
+from core.display import clip, fmt_when, parse_dt, short_course
+from core.output import ensure_output_dir, status
+from core.rest import RestError, post_json
+
+logger = logging.getLogger("blackboard.scrapers.activity")
+
+STREAM_PATH = "/learn/api/v1/streams/ultra"
+STREAM_PROVIDERS = [
+    "bb-nautilus", "bb_mygrades", "bb_disc", "bb_calendar", "bb-announcement", "bb_blog",
+    "bb_Wiki", "bb_ach_stream", "bb_tel", "bb_deployment", "bb-evidence-collection",
+]
+MAX_PAGES = 4
+DEFAULT_LIMIT = 40
 
 
-async def scrape_activity_async(page: Optional[Any] = None) -> List[Dict[str, Any]]:
-    """Scrapes activity stream asynchronously directly from Blackboard Ultra web UI with Adaptive DOM."""
-    if page is None:
-        from core.async_engine import AsyncSessionManager, EngineConfig
-        session_manager = AsyncSessionManager(EngineConfig(headless=True))
-        await session_manager.initialize()
-        try:
-            async with session_manager.acquire_page() as p:
-                return await scrape_activity_async(p)
-        finally:
-            await session_manager.close()
+def _snippet(raw_text: Optional[str]) -> str:
+    """Strip HTML tags and entities from a stream snippet."""
+    if not raw_text:
+        return ""
+    text = html.unescape(re.sub(r"<[^>]+>", " ", raw_text))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _grade_text(details: Dict[str, Any]) -> Optional[str]:
+    score = details.get("displayGradeScore")
+    if score is None:
+        score = details.get("grade")
+    points = details.get("pointsPossible")
+    if score is None:
+        return None
+    try:
+        if points:
+            return f"{float(score):g}/{float(points):g} ({float(score) / float(points) * 100:.0f}%)"
+        return f"{float(score):g}"
+    except (TypeError, ValueError):
+        return str(score)
+
+
+def normalize_entry(entry: Dict[str, Any], courses: Dict[str, str], users: Dict[str, Any]) -> Dict[str, Any]:
+    """One raw stream entry -> a flat record. Absent values are omitted, not blank."""
+    provider = entry.get("providerId") or ""
+    event = (entry.get("extraAttribs") or {}).get("event_type") or provider
+    data = entry.get("itemSpecificData") or {}
+    course_id = entry.get("se_courseId") or ""
+    when = parse_dt(entry.get("se_timestamp"))
+    due = parse_dt((data.get("notificationDetails") or {}).get("dueDate"))
+    user = users.get(entry.get("se_userId") or "") or {}
+    author = user.get("sx_name") if isinstance(user, dict) else None
+
+    title = data.get("title") or ""
+    message = _snippet(data.get("contentExtract"))
+    category = "other"
+    grade = None
+
+    if provider == "bb_disc":
+        category = "discussion"
+        disc = data.get("discussionboardDetails") or {}
+        title = disc.get("forumName") or disc.get("threadName") or "Discussion post"
+        message = f"{author}: {message}" if author and message else (f"New response by {author}" if author else message)
+    elif provider == "bb_mygrades" or event == "GB:GB_GRA_UPDATED":
+        category = "grade"
+        title = title or "Grade posted"
+        details = data.get("gradeDetails") or {}
+        grade = _grade_text(details)
+        feedback = _snippet(((details.get("instructorFeedback") or {}).get("displayText")))
+        message = " | ".join(p for p in (f"Feedback: {feedback}" if feedback else "",) if p)
+    elif "AN_AVAIL" in str(event):
+        category, title = "announcement", title or "Announcement"
+    elif "CO_AVAIL" in str(event):
+        category, title = "content", title or "New course content"
+        message = ""
+    elif "ATT_UPDATED" in str(event):
+        category, title, message = "submission", title or "Submission updated", ""
+    elif provider == "bb_blog":
+        category, title = "blog", (data.get("blogDetails") or {}).get("blogTitle") or title or "Blog update"
+    elif provider == "bb_Wiki":
+        category, title = "wiki", (data.get("wikiDetails") or {}).get("wikiTitle") or title or "Wiki update"
+    elif provider == "bb_ach_stream":
+        category, title = "achievement", title or "Achievement earned"
+    elif "CR_AVAIL" in str(event):
+        category, title = "course", title or "Course available"
+    elif "DUE" in str(event) or due is not None or data.get("assessmentStreamEntryDetails"):
+        category, title = "due_date", title or "Due date"
+    elif "GRA" in str(event):
+        category = "grade"
+
+    if category == "due_date":
+        message = ""
+
+    url = entry.get("se_rhs") or ""
+    if url and not url.startswith("http"):
+        url = f"{BLACKBOARD_BASE}{url}"
+    record = {
+        "id": entry.get("se_id"),
+        "category": category,
+        "course_id": course_id,
+        "course": courses.get(course_id) or "General",
+        "title": (title or "Course update").strip(),
+        "date": fmt_when(when),
+        "at": when.astimezone().isoformat() if when else None,
+        "due_date": fmt_when(due),
+        "due_at": due.astimezone().isoformat() if due else None,
+        "grade": grade,
+        "author": author,
+        "message": message,
+        "url": url,
+    }
+    return {k: v for k, v in record.items() if v not in (None, "")}
+
+
+def tidy(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Newest-first list without repeats: identical entries merge, and a discussion thread's many
+    responses collapse into one row (``count`` responses, newest message)."""
+    items = sorted(items, key=lambda i: i.get("at") or "", reverse=True)
+    graded = {(i["course_id"], i["title"]) for i in items if i["category"] == "grade" and i.get("grade")}
+    out: List[Dict[str, Any]] = []
+    seen: Dict[tuple, Dict[str, Any]] = {}
+    for item in items:
+        if item["category"] == "grade" and not item.get("grade") and (item.get("course_id"), item["title"]) in graded:
+            continue
+        key = (item["category"], item.get("course_id"), item["title"],
+               "" if item["category"] == "discussion" else item.get("due_at", ""), item.get("grade", ""))
+        if key in seen:
+            if item["category"] == "discussion":
+                seen[key]["count"] = seen[key].get("count", 1) + 1
+            continue
+        seen[key] = item
+        out.append(item)
+    return out
+
+
+def fetch_activity_rest(limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Newest-first activity from the Ultra stream endpoint. Raises RestError."""
+    providers = {
+        p: {"sp_provider": p, "sp_newest": -1, "sp_oldest": 9007199254740992, "sp_refreshDate": 0}
+        for p in STREAM_PROVIDERS
+    }
+    raw: Dict[str, Dict[str, Any]] = {}
+    courses: Dict[str, str] = dict(load_courses())
+    users: Dict[str, Any] = {}
+
+    for _ in range(MAX_PAGES):
+        page = post_json(STREAM_PATH, {
+            "providers": providers, "forOverview": False, "retrieveOnly": True, "flushCache": False,
+        })
+        extras = page.get("sv_extras") or {}
+        for course in extras.get("sx_courses", []):
+            if course.get("id") and course.get("name"):
+                courses[course["id"]] = course["name"]
+        for user in extras.get("sx_users", []):
+            if user.get("sx_id"):
+                users[user["sx_id"]] = user
+        added = 0
+        for entry in page.get("sv_streamEntries", []):
+            if entry.get("se_id") and entry["se_id"] not in raw:
+                raw[entry["se_id"]] = entry
+                added += 1
+        returned = page.get("sv_providers") or []
+        if not page.get("sv_moreData") or not added or not returned:
+            break
+        providers = {p["sp_provider"]: p for p in returned}
+
+    items = tidy([normalize_entry(e, courses, users) for e in raw.values()])
+    return items[:limit] if limit else items
+
+
+def format_activity(items: List[Dict[str, Any]], total: int, source: str = "REST") -> str:
+    """Grouped-by-course text: newest first within a course, one line per item, no mid-word cuts."""
+    if not items:
+        return "No recent activity."
+    now = datetime.now(timezone.utc).astimezone()
+    by_course: Dict[str, List[Dict[str, Any]]] = {}
+    for item in items:
+        by_course.setdefault(short_course(item.get("course")), []).append(item)
+    shown = f"{len(items)} of {total}" if total > len(items) else str(len(items))
+    lines = [f"Activity: {shown} items across {len(by_course)} course{'s' if len(by_course) != 1 else ''} ({source}), newest first"]
+    for label in sorted(by_course, key=lambda c: (c == "General", c)):
+        lines.append("")
+        lines.append(f"{label}  ({len(by_course[label])})")
+        for item in by_course[label]:
+            when = fmt_when(parse_dt(item.get("at")), now) or item.get("date") or "no date"
+            what = item.get("category", "other").replace("_", " ")
+            extra = []
+            if item.get("grade"):
+                extra.append(item["grade"])
+            if item.get("due_date"):
+                extra.append(f"due {item['due_date']}")
+            tail = f"  [{'; '.join(extra)}]" if extra else ""
+            if item.get("count", 1) > 1:
+                tail = f"  [{item['count']} responses]"
+            lines.append(f"  {when:<26}{what:<14}{item['title']}{tail}")
+            if item.get("message") and item["message"] != item["title"]:
+                lines.append(f"      {clip(item['message'], 150)}")
+    if total > len(items):
+        lines.append("")
+        lines.append(f"Showing the newest {len(items)}; use --limit N for more.")
+    return "\n".join(lines)
+
+
+async def scrape_activity_dom_async(page: Any) -> List[Dict[str, Any]]:
+    """Browser DOM fallback: scrapes /ultra/stream when the REST stream endpoint is unavailable."""
+    from core.async_engine import AdaptiveDOM
 
     url = f"{BLACKBOARD_BASE}/ultra/stream"
-    print("🌊 Scraping Activity Stream...")
 
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
     except Exception as e:
-        print(f"   ⚠️ Navigation error for activity stream: {e}")
+        status(f"Could not open the activity stream: {e}")
         return []
 
     matched_sel, _ = await AdaptiveDOM.wait_for_any_selector(
@@ -36,7 +229,6 @@ async def scrape_activity_async(page: Optional[Any] = None) -> List[Dict[str, An
     )
 
     if not matched_sel or "empty-state" in matched_sel or "No recent activity" in matched_sel:
-        print("   ℹ️  No stream activity items found.")
         return []
 
     # Adaptive infinite scroll to load all stream items as semester fills up
@@ -161,8 +353,30 @@ async def scrape_activity_async(page: Optional[Any] = None) -> List[Dict[str, An
 
         normalized.append(item_dict)
 
-    print(f"   ✅ Extracted {len(normalized)} activity items.")
     return normalized
+
+
+async def scrape_activity_async(page: Optional[Any] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """
+    Activity stream for briefing and the CLI. REST first; the browser only if REST is unavailable.
+    Auth failures are not hidden behind a browser attempt: they raise RestError for the CLI to report.
+    """
+    try:
+        return await asyncio.to_thread(fetch_activity_rest, limit)
+    except RestError as exc:
+        if exc.kind == "auth":
+            raise
+        status(f"Activity REST unavailable ({exc.kind}); reading the stream in the browser instead.")
+    if page is not None:
+        return await scrape_activity_dom_async(page)
+    from core.async_engine import AsyncSessionManager, EngineConfig
+    session_manager = AsyncSessionManager(EngineConfig(headless=True))
+    await session_manager.initialize()
+    try:
+        async with session_manager.acquire_page() as p:
+            return await scrape_activity_dom_async(p)
+    finally:
+        await session_manager.close()
 
 
 def scrape_activity(page: Any = None) -> list[dict]:
@@ -203,4 +417,4 @@ def save_activity(activity: list[dict]):
             lines.append("")
 
     filepath.write_text("\n".join(lines))
-    print(f"   💾 Saved to: {filepath.name}")
+    status(f"Saved activity to {filepath}")

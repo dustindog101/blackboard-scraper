@@ -1,15 +1,13 @@
-import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
+from typing import TYPE_CHECKING, Optional
 
 from core.config import BLACKBOARD_BASE, load_courses
-from core.output import ensure_output_dir
-from scrapers.base import _navigate_and_check_page
+from core.output import ensure_output_dir, status as _status
 from scrapers.quiz import (
-    _api_get,
+    _api_get as _quiz_api_get,
     _clean_html_text,
     _extract_links,
     _format_local_datetime,
@@ -17,9 +15,17 @@ from scrapers.quiz import (
 )
 
 
-def _status(message: str) -> None:
-    # Progress goes to stderr so `bb discussions --json` stdout stays valid JSON.
-    print(message, file=sys.stderr)
+if TYPE_CHECKING:
+    from playwright.sync_api import Page
+
+# Courses are fetched concurrently and each fetches topics/replies in small pools; this caps the
+# number of requests in flight overall so --all stays polite to Blackboard.
+_HTTP_SLOTS = threading.BoundedSemaphore(10)
+
+
+def _api_get(path: str, cookie_header: str):
+    with _HTTP_SLOTS:
+        return _quiz_api_get(path, cookie_header)
 
 
 def _api_pages(path: str, cookie_header: str, max_pages: int = 10) -> Optional[list[dict]]:
@@ -71,7 +77,7 @@ def _fetch_thread_posts(course_id: str, discussion_id: str, cookie_header: str) 
         return _api_pages(f"{base}/{message['id']}/replies?limit=100", cookie_header) or []
 
     # Replies live behind one request per response; fetch them in parallel.
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=4) as pool:
         reply_lists = list(pool.map(replies_for, responses))
 
     posts: list[dict] = []
@@ -129,7 +135,7 @@ def scrape_discussions_http(
         })
 
     if include_posts:
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        with ThreadPoolExecutor(max_workers=3) as pool:
             thread_posts = list(pool.map(
                 lambda disc: _fetch_thread_posts(course_id, disc["id"], cookie_header) if disc["id"] else None,
                 results,
@@ -145,17 +151,20 @@ def scrape_discussions_http(
     return results
 
 
-def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, max_participant_clicks: int = None,
+def scrape_discussions(course_id: str, page: 'Page', max_post_clicks: int = None, max_participant_clicks: int = None,
                        posts_only: bool = False, participants_only: bool = False,
                        titles_only: bool = False) -> list[dict]:
     """
     Scrape discussions from a Blackboard Ultra course engagement page.
     Finds discussions, clicks into each, and grabs top posts + participation.
     """
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+    from scrapers.base import _navigate_and_check_page
+
     outline_url = f"{BLACKBOARD_BASE}/ultra/courses/{course_id}/outline"
     courses = load_courses()
     name = courses.get(course_id, course_id)
-    _status(f"💬 Scraping discussions for {name}...")
+    _status(f"Reading discussions for {name} in the browser...")
 
     results = []
 
@@ -170,8 +179,7 @@ def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, 
         page.wait_for_selector(".js-course-discussion-tool", timeout=15_000)
         page.locator(".js-course-discussion-tool").first.click()
     except PlaywrightTimeout:
-        _status("   ⚠️  Timed out finding discussion tool link.")
-        return []
+        raise TimeoutError("timed out finding the Discussions tool")
 
     # Wait for either discussions or the 'No discussions' message to appear
     # The empty state typically has an h1 containing "Participate in a discussion"
@@ -181,8 +189,7 @@ def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, 
             timeout=15_000
         )
     except PlaywrightTimeout:
-        _status("   ⚠️  Timed out waiting for discussions list.")
-        return []
+        raise TimeoutError("timed out waiting for the discussions list")
 
     if page.locator("h1:has-text('Participate in a discussion')").count() > 0:
         _status("   No discussions found for course (Empty State detected).")
@@ -365,6 +372,26 @@ def scrape_discussions(course_id: str, page: Page, max_post_clicks: int = None, 
 
     _status(f"   ✅ Extracted {len(results)} fully scraped discussions")
     return results
+
+def format_discussions(courses: list[dict]) -> str:
+    """Per-course text: topics in course order, with due dates, post counts and prompt links."""
+    from core.display import clip, short_course
+
+    lines: list[str] = []
+    for course in sorted(courses, key=lambda c: short_course(c["course_name"])):
+        topics = course["discussions"]
+        lines.append(f"{short_course(course['course_name'])}  ({len(topics)} topic{'s' if len(topics) != 1 else ''})")
+        if course.get("error"):
+            lines.append(f"  could not read discussions: {course['error']}")
+        for topic in topics:
+            posts = f"  [{len(topic['posts'])} posts]" if topic.get("posts") else ""
+            due = f"  due {topic['due_date']}" if topic.get("due_date") else ""
+            lines.append(f"  {clip(topic.get('title', ''), 60)}{due}{posts}")
+            for link in topic.get("links") or []:
+                lines.append(f"      {clip(link['text'], 40)}: {link['url']}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
 
 def save_discussions(discussions: list[dict], course_id: str, titles_only: bool = False):
     """Save discussion threads as markdown."""

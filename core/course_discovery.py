@@ -1,101 +1,63 @@
-import json
 import logging
 import re
-import urllib.error
-import urllib.request
-from datetime import datetime
-from typing import Dict, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
-from core.config import BLACKBOARD_BASE, SESSION_DIR, save_courses
+from core.config import save_courses
+from core.display import parse_dt, short_course
+from core.output import status
+from core.rest import RestError, get_json, get_pages
 
 logger = logging.getLogger("blackboard.course_discovery")
 
 
-def get_cookie_header() -> Optional[str]:
-    """Extract Cookie header string from .session/cookies.json."""
-    cookie_file = SESSION_DIR / "cookies.json"
-    if not cookie_file.exists():
-        return None
-    try:
-        cookies_list = json.loads(cookie_file.read_text())
-        return "; ".join([
-            f"{c['name']}={c['value']}"
-            for c in cookies_list
-            if "blackboard.umbc.edu" in c.get("domain", "") or "umbc.edu" in c.get("domain", "")
-        ])
-    except Exception:
-        return None
+def _discover(now: Optional[datetime] = None) -> Tuple[Dict[str, Dict[str, str]], Optional[str]]:
+    """Fetch enrolled courses grouped by term. Returns (courses_by_term, active_term_name).
 
-
-def discover_courses_via_api() -> Dict[str, Dict[str, str]]:
+    Raises RestError (auth/forbidden/unknown). The active term is the one whose date range contains
+    ``now``; None when the terms endpoint gives no usable dates.
     """
-    High-speed course discovery via Blackboard Learn REST API (< 200ms).
-    Retrieves user memberships, terms, and resolves merged parent/child sections.
-    Returns: Dict[term_name, Dict[course_id, course_title]]
-    """
-    cookie_header = get_cookie_header()
-    if not cookie_header:
-        raise RuntimeError("No session cookies found. Please run `bb login` first.")
-
-    headers = {
-        "Cookie": cookie_header,
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-    }
-
-    # 1. Fetch User Identity
-    req_me = urllib.request.Request(f"{BLACKBOARD_BASE}/learn/api/public/v1/users/me", headers=headers)
-    with urllib.request.urlopen(req_me, timeout=6) as resp:
-        user_data = json.loads(resp.read().decode("utf-8"))
-    user_id = user_data.get("id")
+    now = now or datetime.now(timezone.utc)
+    user_id = get_json("/learn/api/public/v1/users/me", timeout=6).get("id")
     if not user_id:
-        raise RuntimeError("Could not retrieve user ID from Blackboard API.")
+        raise RestError("unknown", None, "no user id in /users/me")
 
-    # 2. Fetch Academic Terms Map
     term_map: Dict[str, str] = {}
+    windows: Dict[str, Tuple[Optional[datetime], Optional[datetime]]] = {}
     try:
-        req_terms = urllib.request.Request(f"{BLACKBOARD_BASE}/learn/api/public/v1/terms", headers=headers)
-        with urllib.request.urlopen(req_terms, timeout=8) as resp:
-            terms_data = json.loads(resp.read().decode("utf-8"))
-            for t in terms_data.get("results", []):
-                term_map[t["id"]] = t.get("name", "Unknown Term")
-    except Exception as e:
-        logger.debug(f"Terms fetch warning: {e}")
+        for t in get_pages("/learn/api/public/v1/terms"):
+            name = t.get("name", "Unknown Term")
+            term_map[t["id"]] = name
+            duration = (t.get("availability") or {}).get("duration") or {}
+            windows[name] = (parse_dt(duration.get("start")), parse_dt(duration.get("end")))
+    except RestError as exc:
+        logger.debug(f"Terms fetch warning: {exc}")
 
-    # 3. Fetch Course Memberships
-    req_courses = urllib.request.Request(
-        f"{BLACKBOARD_BASE}/learn/api/public/v1/users/{user_id}/courses?expand=course",
-        headers=headers,
-    )
-    with urllib.request.urlopen(req_courses, timeout=12) as resp:
-        memberships_data = json.loads(resp.read().decode("utf-8"))
-
-    raw_memberships = memberships_data.get("results", [])
-
-    # Group by term and deduplicate merged sections
+    memberships = get_pages(f"/learn/api/public/v1/users/{user_id}/courses?expand=course", timeout=12)
     courses_by_term: Dict[str, Dict[str, str]] = {}
-
-    for m in raw_memberships:
-        # Skip disabled or revoked memberships
+    for m in memberships:
         if m.get("availability", {}).get("available") == "Disabled":
             continue
-
         course = m.get("course", {})
         cid = m.get("courseId") or course.get("id")
         cname = course.get("name") or "Untitled Course"
-        term_id = course.get("termId")
-        term_name = term_map.get(term_id) or _guess_term_from_title(cname) or "Other Courses"
+        term_name = term_map.get(course.get("termId")) or _guess_term_from_title(cname) or "Other Courses"
+        courses_by_term.setdefault(term_name, {})[cid] = cname
 
-        if term_name not in courses_by_term:
-            courses_by_term[term_name] = {}
-
-        courses_by_term[term_name][cid] = cname
-
-    # Clean up merged child duplicates per term
-    for tname in list(courses_by_term.keys()):
+    for tname in list(courses_by_term):
         courses_by_term[tname] = _deduplicate_merged_sections(courses_by_term[tname])
 
-    return courses_by_term
+    active = next(
+        (n for n in courses_by_term if windows.get(n, (None, None))[0] and windows[n][0] <= now
+         and (windows[n][1] is None or now <= windows[n][1])),
+        None,
+    )
+    return courses_by_term, active
+
+
+def discover_courses_via_api() -> Dict[str, Dict[str, str]]:
+    """Course discovery via the REST API: Dict[term_name, Dict[course_id, course_title]]."""
+    return _discover()[0]
 
 
 def _guess_term_from_title(title: str) -> Optional[str]:
@@ -171,63 +133,67 @@ def get_current_term_name(courses_by_term: Dict[str, Dict[str, str]]) -> str:
     return sorted_terms[0] if sorted_terms else "Current Term"
 
 
-def handle_discover_courses_cli(term_filter: Optional[str] = None, list_only: bool = False) -> Dict[str, str]:
-    """
-    CLI handler for intelligent course discovery.
-    """
-    print("\n🔍 Querying Blackboard Learn API for enrolled course terms (<200ms)...")
-    try:
-        courses_by_term = discover_courses_via_api()
-    except Exception as e:
-        print(f"❌ API discovery error: {e}")
-        print("   Falling back to browser-based course scraper...")
-        return {}
+def terms_view(courses_by_term: Dict[str, Dict[str, str]], active: str) -> List[Dict[str, Any]]:
+    """JSON-friendly term list: [{term, active, courses: [{id, name}]}], active term first, then newest."""
+    def order(name: str) -> tuple:
+        year = re.search(r"\d{4}", name)
+        return (name != active, -(int(year.group(0)) if year else 0), name)
 
-    current_term = get_current_term_name(courses_by_term)
-    print(f"✨ Detected Active Academic Term: \033[1m\033[32m{current_term}\033[0m\n")
+    return [
+        {"term": t, "active": t == active, "courses": [{"id": cid, "name": n} for cid, n in courses_by_term[t].items()]}
+        for t in sorted(courses_by_term, key=order)
+    ]
 
-    # Display all discovered terms
+
+def select_courses(courses_by_term: Dict[str, Dict[str, str]], active: str, term_filter: Optional[str]) -> Tuple[str, Dict[str, str]]:
+    """Courses `discover` would save: (label, courses). Raises ValueError for an unknown term."""
+    if not term_filter:
+        return active, courses_by_term.get(active, {})
+    wanted = term_filter.strip().lower().replace(" ", "")
+    wanted = {"fa": "fall", "sp": "spring", "su": "summer", "wi": "winter"}.get(wanted[:2], "") + wanted[2:] \
+        if re.fullmatch(r"(fa|sp|su|wi)\d{4}", wanted) else wanted
+    if wanted in ("all", "every"):
+        merged: Dict[str, str] = {}
+        for clist in courses_by_term.values():
+            merged.update(clist)
+        return "all terms", merged
     for tname, clist in courses_by_term.items():
-        is_current_indicator = " ⭐ [ACTIVE SEMESTER]" if tname == current_term else ""
-        print(f"🗓️  \033[1m{tname}\033[0m ({len(clist)} courses){is_current_indicator}:")
-        for cid, cname in clist.items():
-            print(f"   • \033[36m{cid}\033[0m: {cname}")
-        print("")
+        clean = tname.lower().replace(" ", "")
+        if wanted in clean or clean in wanted:
+            return tname, clist
+    raise ValueError(f"No enrolled term matches '{term_filter}'. Run `bb terms` to see them.")
 
-    if list_only:
-        return courses_by_term.get(current_term, {})
 
-    # Determine which courses to save
-    selected_courses: Dict[str, str] = {}
+def load_terms() -> Tuple[Dict[str, Dict[str, str]], str]:
+    """(courses_by_term, active_term). Raises RestError."""
+    courses_by_term, active = _discover()
+    return courses_by_term, active or get_current_term_name(courses_by_term)
 
-    if term_filter:
-        term_filter_clean = term_filter.strip().lower()
-        if term_filter_clean in ("all", "every"):
-            for clist in courses_by_term.values():
-                selected_courses.update(clist)
-            print(f"💾 Selected ALL terms ({len(selected_courses)} courses).")
-        else:
-            # Fuzzy match term name (e.g. 'fa2026' -> 'Fall 2026', 'sp2026' -> 'Spring 2026')
-            matched_term = None
-            for tname in courses_by_term:
-                clean_t = tname.lower().replace(" ", "")
-                if term_filter_clean in clean_t or clean_t in term_filter_clean:
-                    matched_term = tname
-                    break
 
-            if matched_term:
-                selected_courses = courses_by_term[matched_term]
-                print(f"💾 Selected term '{matched_term}' ({len(selected_courses)} courses).")
-            else:
-                print(f"⚠️ Term '{term_filter}' not found. Defaulting to active semester ({current_term}).")
-                selected_courses = courses_by_term.get(current_term, {})
-    else:
-        # Default: Select and save ONLY the current active semester courses
-        selected_courses = courses_by_term.get(current_term, {})
+def format_terms(terms: List[Dict[str, Any]]) -> str:
+    lines = []
+    for t in terms:
+        n = len(t["courses"])
+        lines.append(f"{t['term']}  ({n} course{'s' if n != 1 else ''}){'  <- active' if t['active'] else ''}")
+        lines.extend(f"  {short_course(c['name']):<10}{c['id']}" for c in t["courses"])
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
-    if selected_courses:
-        save_courses(selected_courses, overwrite=True)
-        print(f"✅ \033[32mSaved {len(selected_courses)} active courses to config.json!\033[0m")
-        print("   All briefings, due dates, grade lookups, and Telegram alerts are now focused on your active term.\n")
 
-    return selected_courses
+def save_selected(label: str, selected: Dict[str, str]) -> None:
+    """Write the selected courses to config.json (the one place `discover` changes anything)."""
+    save_courses(selected, overwrite=True)
+    status(f"Saved {len(selected)} course{'s' if len(selected) != 1 else ''} ({label}) to config.json, replacing the previous list.")
+
+
+def handle_discover_courses_cli(term_filter: Optional[str] = None, list_only: bool = False) -> Dict[str, str]:
+    """Programmatic discovery used by the menubar app: saves the selected term unless list_only."""
+    try:
+        courses_by_term, active = load_terms()
+        label, selected = select_courses(courses_by_term, active, term_filter)
+    except (RestError, ValueError) as exc:
+        status(f"Course discovery failed: {exc}")
+        return {}
+    if selected and not list_only:
+        save_selected(label, selected)
+    return selected

@@ -1,14 +1,16 @@
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from playwright.async_api import Page
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from core.config import BLACKBOARD_BASE, load_courses
 from core.output import ensure_output_dir
 from core.async_engine import AdaptiveDOM
 from scrapers.quiz import _api_get, _get_cookie_header, _clean_html_text
+
+if TYPE_CHECKING:
+    from playwright.async_api import Page
 
 logger = logging.getLogger("blackboard.scrapers.assignments")
 
@@ -135,7 +137,7 @@ def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, An
 
 async def scrape_course_assignments_async(
     course_id: str,
-    page: Optional[Page] = None,
+    page: Optional['Page'] = None,
     safe_only: bool = True,
 ) -> List[Dict[str, Any]]:
     """
@@ -336,43 +338,25 @@ async def scrape_course_assignments_async(
 
 
 def format_assignments_summary(assignments: List[Dict[str, Any]], course_name: str, course_id: str = "") -> str:
-    """Formats assignments into a rich, structured CLI string with IDs and quick inspect hints."""
-    header = f"📝 Assignments & Assessments: {course_name} ({course_id})" if course_id else f"📝 Assignments & Assessments: {course_name}"
-    lines = [
-        header,
-        "━" * len(header),
-    ]
+    """One aligned table per course: due time (local, with zone), type, points, status, title."""
+    from core.display import align, clip, fmt_when, parse_dt, short_course
 
+    count = len(assignments)
+    lines = [f"{short_course(course_name)}  ({count} item{'s' if count != 1 else ''})"]
     if not assignments:
-        lines.append("  (No assignments found or course is currently closed)")
+        lines.append("  none found (or the course is closed)")
         return "\n".join(lines)
 
-    for idx, a in enumerate(assignments, 1):
-        item_type = a.get("item_type", "Assignment")
-        timed = " ⏱️ [TIMED]" if a.get("is_timed_test") else ""
-        item_id = a.get("id") or a.get("content_id") or a.get("column_id") or ""
-        
-        lines.append(f"\n{idx}. [{item_type}] {a['title']}{timed}")
-        if item_id:
-            lines.append(f"   ├ 🆔 Unique ID: {item_id}")
-        if a.get("due_date"):
-            lines.append(f"   ├ ⏰ Due Date:  {a['due_date']}")
-        if a.get("points_possible"):
-            lines.append(f"   ├ 🎯 Points:    {a['points_possible']}")
-        if a.get("submission_status"):
-            lines.append(f"   ├ 📊 Status:    {a['submission_status']}")
-        if a.get("attempts"):
-            lines.append(f"   ├ 🔄 Attempts:  {a['attempts']}")
-        if a.get("instructions"):
-            snippet = a['instructions'].replace("\n", " ").strip()
-            if len(snippet) > 120:
-                snippet = snippet[:117] + "..."
-            lines.append(f"   ├ 📖 Prompt:    {snippet}")
-        for att in a.get("attachments", []):
-            lines.append(f"   ├ 📎 File:      {att['filename']} ({att['url']})")
-        if item_id:
-            lines.append(f"   └ 💡 Inspect:   bb assignment {item_id}")
-
+    far = datetime.max.replace(tzinfo=timezone.utc)
+    ordered = sorted(assignments, key=lambda a: parse_dt(a.get("due_date")) or far)
+    rows = []
+    for a in ordered:
+        due = fmt_when(parse_dt(a.get("due_date"))) or "no due date"
+        points = str(a.get("points_possible") or "").replace(" points", "").replace(".0", "")
+        state = str(a.get("submission_status") or "unknown").lower().replace("_", " ")
+        timed = " (timed)" if a.get("is_timed_test") else ""
+        rows.append((due, a.get("item_type", "Assignment"), points, state, clip(a["title"], 60) + timed))
+    lines.extend(align(rows))
     return "\n".join(lines)
 
 

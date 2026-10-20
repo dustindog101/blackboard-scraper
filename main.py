@@ -24,14 +24,12 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from core.config import BLACKBOARD_BASE, load_courses, save_courses
+from core.config import BLACKBOARD_BASE, load_courses
 from core.export_json import build_composite_schema, build_export_doc
 from core.session import _launch_context, _require_session, _require_session_async, check_session_async, login, login_auto, quick_check_session_http
 from core.async_engine import AsyncSessionManager, AsyncCourseWorkerPool, EngineConfig, TaskProfile, get_optimal_concurrency
 
 # Scrapers
-from scrapers.activity import save_activity, scrape_activity_async
-from scrapers.announcements import save_announcements, scrape_announcements_async
 from scrapers.calendar import save_calendar, scrape_calendar_async
 from scrapers.discussions import (
     save_discussions,
@@ -39,7 +37,6 @@ from scrapers.discussions import (
     scrape_discussions_http,
 )
 from scrapers.grades import save_grades, scrape_grades_async
-from scrapers.profile import save_profile, scrape_profile_async
 from scrapers.briefing import run_briefing_async, format_briefing_cli
 from scrapers.outline import (
     scrape_course_outline_async,
@@ -58,7 +55,7 @@ from scrapers.assignments import (
 from scrapers.quiz import scrape_assessment_attempt_async, save_assessment_attempt, format_assessment_attempt_cli
 from scrapers.assignment_view import prepare_assignment_view, format_assignment_view
 from scrapers.due_dates import aggregate_due_dates_async, save_due_dates, format_due_dates_table
-from scrapers.search import find_items_async, grab_item_async
+from scrapers.search import find_items_async, format_download_result, format_search_results, grab_item_async
 
 
 # ---------------------------------------------------------------------------
@@ -95,24 +92,34 @@ def _emit_json(args: argparse.Namespace, data: Any, source: str = "blackboard-sc
         print(payload)
 
 
-def _print_profile(data: dict) -> None:
-    if not data:
-        print("No profile data found.")
-        return
-    print("\n👤 Blackboard Profile")
-    print(f"  Name: {data.get('name', 'N/A')}")
-    print(f"  Email: {data.get('email', 'N/A')}")
-    print(f"  Student ID: {data.get('student_id', 'N/A')}")
-    print(f"  Pronouns: {data.get('pronouns', 'N/A')}")
-    print(f"  System Role: {data.get('system_role', 'N/A')}")
-    print(f"  Privacy: {data.get('privacy', 'N/A')}\n")
-
-
 # ---------------------------------------------------------------------------
 # Smart Course Selection & Fuzzy Matching
 # ---------------------------------------------------------------------------
 
 _COURSE_CODE_RE = re.compile(r"\s*\([^)]*\)\s*(?:SP|FA|SU|WI)\d{4}\s*\([^)]*\)\s*$")
+
+
+_REQUIRES_COURSE = ("outline", "discussions", "discuss")
+_TAKES_COURSE = (
+    "outline", "discussions", "discuss", "assignments", "assign", "assignment", "quiz", "asmt", "assessment",
+    "grades", "announcements", "announce", "news", "search", "find", "download", "grab", "get", "calendar", "cal",
+)
+
+
+def _usage_error(message: str, *hints: str) -> None:
+    print(f"bb: {message}", file=sys.stderr)
+    for hint in hints:
+        print(f"  {hint}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def _example_code(courses: Dict[str, str]) -> str:
+    return next(iter(_short_label(n).replace(" ", "") for n in courses.values()), "IS410")
+
+
+def _short_label(name: str) -> str:
+    from core.display import short_course
+    return short_course(name)
 
 
 def _short_course_name(raw: str | None) -> str | None:
@@ -792,14 +799,17 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
         description="Scrape a course gradebook.",
         epilog="Examples:\n  bb grades IS410\n  bb grades -c IS410 --json\n  bb grades --all",
     )
-    subparsers.add_parser(
+    ann_p = subparsers.add_parser(
         "announcements",
         aliases=["announce", "news"],
         parents=[course_parent, output_parent, engine_parent],
-        help="Course announcements",
-        description="Scrape course announcements.",
-        epilog="Examples:\n  bb announcements IS410\n  bb announcements --all",
+        help="Course announcements (newest first)",
+        description="Announcements for all current courses (or one), newest first. Read state is not in the REST API, so --unread checks it in the browser.",
+        epilog="Examples:\n  bb announcements\n  bb announcements IS410 --limit 3\n  bb announcements --since 14d\n  bb announcements --unread",
     )
+    ann_p.add_argument("--since", metavar="WHEN", help="Only posts since 14d, 2w or a date (2026-09-01)")
+    ann_p.add_argument("--limit", type=int, metavar="N", help="At most N posts per course")
+    ann_p.add_argument("--unread", action="store_true", help="Only posts verified unread in the browser (unknown state is excluded)")
 
     # --- course content ---
     outline_p = subparsers.add_parser(
@@ -821,8 +831,8 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
         aliases=["assign"],
         parents=[course_parent, output_parent, engine_parent],
         help="List assignments and their status",
-        description="List Gradable Items for discovery; inspect one with bb assignment.",
-        epilog="Examples:\n  bb assignments IS410\n  bb assignments IS410 --json\n  bb assignments --all",
+        description="List Gradable Items for all current courses (or one); inspect one with bb assignment.",
+        epilog="Examples:\n  bb assignments\n  bb assignments IS410\n  bb assignments IS410 --json",
     )
     assign_p.add_argument("--filter", dest="keyword_filter", help="Filter assignments by keyword")
 
@@ -887,13 +897,14 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
         description="Scrape calendar due dates.",
         epilog="Examples:\n  bb calendar\n  bb calendar IS410\n  bb calendar --json",
     )
-    subparsers.add_parser(
+    act_p = subparsers.add_parser(
         "activity",
         parents=[output_parent, engine_parent],
         help="Homepage activity stream",
-        description="Scrape the Blackboard homepage activity stream.",
-        epilog="Examples:\n  bb activity\n  bb activity --json",
+        description="Recent activity (grades, due dates, posts, new content) grouped by course, newest first.",
+        epilog="Examples:\n  bb activity\n  bb activity --limit 100\n  bb activity --json",
     )
+    act_p.add_argument("--limit", type=int, metavar="N", help="Newest N items (default 40; 0 = everything)")
     subparsers.add_parser(
         "profile",
         aliases=["whoami"],
@@ -911,8 +922,8 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
         description="Scrape course discussions.",
         epilog="Examples:\n  bb discussions IS410\n  bb discussions IS410 --titles-only",
     )
-    disc_p.add_argument("--max-posts", type=int, help="Maximum posts to click")
-    disc_p.add_argument("--max-parts", type=int, help="Maximum participants to click")
+    disc_p.add_argument("--max-posts", type=int, help="Maximum posts to click (browser fallback only)")
+    disc_p.add_argument("--max-parts", type=int, help="Maximum participants to click (browser fallback only)")
     disc_p.add_argument("--posts-only", action="store_true", help="Scrape posts only")
     disc_p.add_argument("--participants-only", action="store_true", help="Scrape participants only")
     disc_p.add_argument("--titles-only", action="store_true", help="Scrape thread titles only")
@@ -931,17 +942,17 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
     discover_p = subparsers.add_parser(
         "discover",
         parents=[output_parent, engine_parent],
-        help="Discover current semester courses",
-        description="Auto-discover and save current active semester courses.",
-        epilog="Examples:\n  bb discover\n  bb discover --term FA2026",
+        help="Find your courses and SAVE them to config.json",
+        description="Find the courses of the active term (or --term) and replace the course list in config.json. Use 'bb terms' to look without saving.",
+        epilog="Examples:\n  bb terms                 # look, changes nothing\n  bb discover\n  bb discover --term FA2026",
     )
     discover_p.add_argument("--term", metavar="TERM", help="Filter academic term (e.g. current, FA2026, all)")
 
     subparsers.add_parser(
         "terms",
         parents=[output_parent, engine_parent],
-        help="List all enrolled terms",
-        description="List all lifetime enrolled academic terms and courses.",
+        help="List enrolled terms (read-only)",
+        description="List every enrolled term and its courses. Read-only; 'bb discover' saves the list.",
         epilog="Examples:\n  bb terms",
     )
 
@@ -1002,6 +1013,15 @@ def _parse_args(args_list: Optional[List[str]] = None) -> argparse.Namespace:
             parser.error("--overwrite is only supported for session export")
         if transfer and args.cdp:
             parser.error("session export/import uses the saved session; --cdp is not supported")
+    if args.subcommand in ("announcements", "announce", "news"):
+        from scrapers.announcements import parse_since
+        try:
+            if args.since:
+                parse_since(args.since)
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.limit is not None and args.limit < 0:
+            parser.error("--limit must be 0 or more")
     if getattr(args, "start_attempt", False) and getattr(args, "assignment_view", "default") in ("instructions", "rubric"):
         parser.error("--start-attempt cannot be combined with --instructions or --rubric; use --full")
     return args
@@ -1012,49 +1032,40 @@ def _parse_args(args_list: Optional[List[str]] = None) -> argparse.Namespace:
 # Discovery Subcommand
 # ---------------------------------------------------------------------------
 
-def _handle_discover_courses(term_filter: str | None = None, list_only: bool = False, headless: bool = True, cdp: str | None = None) -> None:
-    from core.course_discovery import handle_discover_courses_cli
-    res = handle_discover_courses_cli(term_filter=term_filter, list_only=list_only)
-    if not res and not list_only:
-        if not _require_session(cdp):
-            return
-        print("🔍 Attempting fallback browser course discovery...", file=sys.stderr)
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            ctx, page = _launch_context(p, headless, cdp)
-            from scrapers.base import _navigate_and_check_page
+def _discover_via_browser(headless: bool = True, cdp: str | None = None) -> None:
+    """Browser fallback for `bb discover` when the course REST API is unavailable. Saves config.json."""
+    if not _require_session(cdp):
+        return
+    from playwright.sync_api import sync_playwright
+    from scrapers.base import _navigate_and_check_page
 
-            url = f"{BLACKBOARD_BASE}/ultra/course"
-            if not _navigate_and_check_page(page, url):
-                ctx.close()
+    with sync_playwright() as p:
+        ctx, page = _launch_context(p, headless, cdp)
+        try:
+            if not _navigate_and_check_page(page, f"{BLACKBOARD_BASE}/ultra/course"):
                 return
-
-            page.wait_for_timeout(3000)
             page.wait_for_selector(".course-element-card", timeout=15_000)
-
             discovered = page.evaluate(
                 """() => {
                     const results = {};
                     document.querySelectorAll('.course-element-card').forEach(el => {
                         const titleEl = el.querySelector('.js-course-title-element');
                         const courseId = el.getAttribute('data-course-id');
-                        if (titleEl && courseId) {
-                            results[courseId] = titleEl.innerText.trim();
-                        }
+                        if (titleEl && courseId) results[courseId] = titleEl.innerText.trim();
                     });
                     return results;
                 }"""
             )
-
-            if discovered:
-                print(f"   ✅ Found {len(discovered)} courses via browser:", file=sys.stderr)
-                for cid, cname in discovered.items():
-                    print(f"      {cid}: {cname}", file=sys.stderr)
-                save_courses(discovered, overwrite=True)
-                print("   💾 Saved to config.json", file=sys.stderr)
-            else:
-                print("   ❌ No courses found.", file=sys.stderr)
+        finally:
             ctx.close()
+    if discovered:
+        from core.course_discovery import save_selected
+        save_selected("browser", discovered)
+        print(f"Saved {len(discovered)} courses to config.json:")
+        for cid, cname in discovered.items():
+            print(f"  {cid}  {cname}")
+    else:
+        print("bb: no courses found in the browser either; config.json left unchanged.", file=sys.stderr)
 
 
 def _run_discussions_sync(
@@ -1066,24 +1077,28 @@ def _run_discussions_sync(
     md: bool,
     titles_only: bool,
 ) -> list[dict]:
-    # 1. REST Fast-Path: topics, prompts, links and (unless --titles-only) posts. No browser.
+    # 1. REST Fast-Path, all courses at once (each course bounds its own per-topic pool).
     data_by_cid: dict[str, list[dict]] = {}
-    for cid in target_cids:
-        rest = scrape_discussions_http(
+    errors: dict[str, str] = {}
+
+    def _rest(cid: str):
+        return scrape_discussions_http(
             cid,
             include_posts=not titles_only,
             posts_only=kwargs.get("posts_only", False),
             participants_only=kwargs.get("participants_only", False),
         )
-        if rest is not None:
-            post_count = sum(len(d["posts"]) for d in rest)
-            print(f"💬 {courses.get(cid, cid)}: {len(rest)} discussion topics, {post_count} posts (REST Fast-Path)", file=sys.stderr)
-            data_by_cid[cid] = rest
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(6, max(1, len(target_cids)))) as pool:
+        for cid, rest in zip(target_cids, pool.map(_rest, target_cids)):
+            if rest is not None:
+                data_by_cid[cid] = rest
 
     # 2. Playwright Fallback for courses where the REST API was unavailable.
     browser_cids = [cid for cid in target_cids if cid not in data_by_cid]
     if browser_cids:
-        print("   ↳ REST unavailable, falling back to browser scraping.", file=sys.stderr)
+        print("REST discussions unavailable; reading them in the browser.", file=sys.stderr)
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
             ctx, _ = _launch_context(p, headless, cdp)
@@ -1092,7 +1107,8 @@ def _run_discussions_sync(
                 try:
                     data_by_cid[course_id] = scrape_discussions(course_id, page, **kwargs)
                 except Exception as exc:
-                    print(f"   ⚠️  Browser scrape failed: {exc}", file=sys.stderr)
+                    errors[course_id] = str(exc) or type(exc).__name__
+                    print(f"bb: browser read of {_short_label(courses.get(course_id, course_id))} failed: {errors[course_id]}", file=sys.stderr)
                     data_by_cid[course_id] = []
                 finally:
                     page.close()
@@ -1103,11 +1119,14 @@ def _run_discussions_sync(
         data = data_by_cid.get(course_id, [])
         if md:
             save_discussions(data, course_id, titles_only=titles_only)
-        raw_all_disc.append({
+        entry = {
             "course_id": course_id,
             "course_name": courses.get(course_id, course_id),
             "discussions": data,
-        })
+        }
+        if course_id in errors:
+            entry["error"] = errors[course_id]
+        raw_all_disc.append(entry)
     return raw_all_disc
 
 
@@ -1218,22 +1237,22 @@ async def main_async(args: argparse.Namespace) -> None:
 
     # --- course listing & discovery ---
     if subcmd in ("courses", "discover", "terms") or getattr(args, "courses", False) or getattr(args, "discover", False) or getattr(args, "list_terms", False):
+        from core import commands
         c_action = getattr(args, "action", "list") if subcmd == "courses" else ("discover" if subcmd == "discover" or getattr(args, "discover", False) else ("terms" if subcmd == "terms" or getattr(args, "list_terms", False) else "list"))
+        emit = lambda data: _emit_json(args, data)  # noqa: E731
         if c_action == "discover":
-            await asyncio.to_thread(_handle_discover_courses, term_filter=getattr(args, "term", None), list_only=False, headless=headless, cdp=cdp)
+            if not await commands.run_discover(args, emit):
+                await asyncio.to_thread(_discover_via_browser, headless, cdp)
             return
         if c_action == "terms":
-            await asyncio.to_thread(_handle_discover_courses, term_filter=None, list_only=True, headless=headless, cdp=cdp)
+            await commands.run_terms(args, emit)
             return
-        # list courses
-        if getattr(args, "json", False) or getattr(args, "out", None):
-            course_list = [{"course_id": cid, "course_name": name} for cid, name in courses.items()]
-            _emit_json(args, {"courses": course_list})
+        # list configured courses
+        if commands.machine_mode(args):
+            _emit_json(args, {"courses": [{"course_id": cid, "course_name": name} for cid, name in courses.items()]})
         else:
-            print("\n📚 Configured Courses:")
             for cid, name in courses.items():
-                print(f"  • {cid}: {name}")
-            print("")
+                print(f"{_short_label(name):<10}{cid}  {name}")
         return
 
     # --- login & logout ---
@@ -1328,23 +1347,15 @@ async def main_async(args: argparse.Namespace) -> None:
     all_courses_flag = getattr(args, "all", False)
     target_cids = resolve_target_courses(target_course_arg, all_courses_flag, courses)
 
-    _NEEDS_COURSE_EXAMPLE = {
-        "outline": "bb outline IS410",
-        "assignments": "bb assignments IS410",
-        "assign": "bb assignments IS410",
-        "discussions": "bb discussions IS410",
-        "discuss": "bb discussions IS410",
-    }
-    if subcmd in _NEEDS_COURSE_EXAMPLE and not target_cids:
-        print(f"❌ Specify course (e.g. '{_NEEDS_COURSE_EXAMPLE[subcmd]}' or '-c IS410') or '--all'", file=sys.stderr)
-        sys.exit(1)
-
-    # A supplied-but-unmatched course token must never silently fan out to
-    # all courses (grades/announcements/search/download default to all only
-    # when NO course argument was given at all).
-    if subcmd in ("grades", "announcements", "announce", "news", "search", "find", "download", "grab", "get") and target_course_arg and not target_cids:
-        print(f"❌ No courses matched '{target_course_arg}'. Check the course code or use '--all'.", file=sys.stderr)
-        sys.exit(1)
+    # Usage errors are short, exit 2, and name the fix. They run before any network or session probe.
+    if subcmd in _REQUIRES_COURSE and not target_cids:
+        _usage_error(f"{subcmd} needs a course.", f"Try: bb {subcmd} {_example_code(courses)}   (or --all)", "List yours: bb courses")
+    if target_course_arg and not target_cids and subcmd in _TAKES_COURSE:
+        _usage_error(
+            f"no course matches '{target_course_arg}'.",
+            "Yours: " + ", ".join(_short_label(n) for n in courses.values()),
+            "Use a code like IS410, part of a title, a course ID, or --all.",
+        )
 
     # From here down, academic commands require an active session
     if not await _require_session_async(cdp):
@@ -1482,19 +1493,24 @@ async def main_async(args: argparse.Namespace) -> None:
     # --- assignments list scraper (HTTP REST fast-path + Playwright fallback) ---
     if subcmd in ("assignments", "assign"):
         if not target_cids:
-            print("❌ Specify course (e.g. 'bb assignments IS410' or '-c IS410') or '--all'", file=sys.stderr)
-            return
+            target_cids = list(courses.keys())  # no course given: all current courses, like due/announcements
+        if not target_cids:
+            _usage_error("no courses configured.", "Run: bb discover")
 
         raw_all_assign: dict[str, list[dict]] = {}
 
-        # 1. High-speed HTTP REST Fast-Path (<150ms)
+        # 1. REST Fast-Path, all courses at once
         if not getattr(args, "visible", False):
-            for cid in target_cids:
-                data = scrape_course_assignments_http(cid)
+            def _filter(data):
+                if args.keyword_filter:
+                    kw = args.keyword_filter.lower()
+                    data = [item for item in data if kw in item.get("title", "").lower() or kw in item.get("instructions", "").lower()]
+                return data
+
+            rest_results = await asyncio.gather(*(asyncio.to_thread(scrape_course_assignments_http, cid) for cid in target_cids))
+            for cid, data in zip(target_cids, rest_results):
                 if data is not None:
-                    if args.keyword_filter:
-                        kw = args.keyword_filter.lower()
-                        data = [item for item in data if kw in item.get("title", "").lower() or kw in item.get("instructions", "").lower()]
+                    data = _filter(data)
                     if args.md:
                         save_assignments(data, cid)
                     raw_all_assign[cid] = data
@@ -1502,6 +1518,7 @@ async def main_async(args: argparse.Namespace) -> None:
         # 2. Playwright Browser Fallback (if REST unavailable for any course)
         missing_cids = [cid for cid in target_cids if cid not in raw_all_assign]
         if missing_cids:
+            print("REST unavailable for some courses; using the browser.", file=sys.stderr)
             concurrency = get_optimal_concurrency(TaskProfile.HEAVY, args.concurrency)
             session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=concurrency))
             await session_manager.initialize()
@@ -1523,6 +1540,12 @@ async def main_async(args: argparse.Namespace) -> None:
                 await session_manager.close()
 
         if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
+            from core.display import parse_dt
+            for data in raw_all_assign.values():
+                for item in data if isinstance(data, list) else []:
+                    due = parse_dt(item.get("due_date"))
+                    if due:
+                        item.setdefault("due_at", due.isoformat())
             formatted_json = [
                 {
                     "course_id": cid,
@@ -1589,21 +1612,7 @@ async def main_async(args: argparse.Namespace) -> None:
         if getattr(args, "json", False) or getattr(args, "out", None):
             _emit_json(args, matches)
         else:
-            print(f"\n🔎 Search Results for '{search_query}':")
-            print("━" * 50)
-            if not matches:
-                print("  (No matching items found across courses)")
-            for m in matches:
-                due_str = f" (Due: {m['due_date']})" if m.get("due_date") else ""
-                dl_str = " 💾 [File Ready]" if m.get("is_downloadable") else ""
-                path_str = f" [{ ' > '.join(m.get('parent_path', [])) }]" if m.get("parent_path") else ""
-                print(f"• [{m['course_name']}]{path_str} {m['title']} [{m['content_type']}]{dl_str}{due_str}")
-                if m.get("description"):
-                    print(f"  > 💬 {m['description'][:130]}")
-                if m.get("download_url"):
-                    print(f"  └ 📥 ID: {m.get('content_id')}")
-                elif m.get("external_url"):
-                    print(f"  └ 🔗 {m['external_url']}")
+            print(format_search_results(matches, search_query))
         return
 
     # --- download / grab ---
@@ -1619,6 +1628,10 @@ async def main_async(args: argparse.Namespace) -> None:
         )
         if getattr(args, "json", False) or getattr(args, "out", None):
             _emit_json(args, item)
+        else:
+            print(format_download_result(item))
+        if item.get("status") in ("not_found", "multiple_matches"):
+            raise SystemExit(1)
         return
 
     # --- announcements ---
@@ -1626,48 +1639,9 @@ async def main_async(args: argparse.Namespace) -> None:
         if not target_cids:
             target_cids = list(courses.keys())
         if not target_cids:
-            print("❌ No courses configured. Run 'bb courses discover' first.", file=sys.stderr)
-            return
-
-        concurrency = get_optimal_concurrency(TaskProfile.LIGHT, getattr(args, "concurrency", None))
-        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp, max_concurrency=concurrency))
-        await session_manager.initialize()
-        raw_ann: dict[str, list[dict]] = {}
-        try:
-            pool = AsyncCourseWorkerPool(session_manager, task_profile=TaskProfile.LIGHT)
-            async def _worker(cid, cname, page):
-                data = await scrape_announcements_async(cid, page)
-                if getattr(args, "md", False):
-                    save_announcements(data, cid)
-                return data
-
-            target_dict = {cid: courses.get(cid, cid) for cid in target_cids}
-            raw_ann = await pool.execute_task_per_course(target_dict, _worker)
-        finally:
-            await session_manager.close()
-
-        if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
-            formatted_json = [
-                {
-                    "course_id": cid,
-                    "course_name": courses.get(cid, cid),
-                    "announcements": data if isinstance(data, list) else [],
-                }
-                for cid, data in raw_ann.items()
-            ]
-            _emit_json(args, formatted_json)
-        else:
-            for cid, data in raw_ann.items():
-                cname = courses.get(cid, cid)
-                print(f"\n📢 Announcements: {cname}")
-                print("━" * 50)
-                if not data:
-                    print("  (No announcements found)")
-                for ann in data:
-                    unread = "[UNREAD] " if ann.get("unread") else ""
-                    print(f"• {unread}{ann['title']} ({ann.get('meta','')})")
-                    if ann.get("body"):
-                        print(f"  > {ann['body'][:140]}")
+            _usage_error("no courses configured.", "Run: bb discover")
+        from core import commands
+        await commands.run_announcements(args, courses, target_cids, lambda data: _emit_json(args, data))
         return
 
     # --- grades ---
@@ -1739,49 +1713,21 @@ async def main_async(args: argparse.Namespace) -> None:
 
     # --- activity ---
     if subcmd == "activity" or getattr(args, "activity", False):
-        session_manager = AsyncSessionManager(EngineConfig(headless=headless, cdp_url=cdp))
-        await session_manager.initialize()
-        try:
-            async with session_manager.acquire_page() as page:
-                activity = await scrape_activity_async(page)
-                if getattr(args, "md", False):
-                    save_activity(activity)
-        finally:
-            await session_manager.close()
-
-        if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
-            _emit_json(args, activity)
-        else:
-            print("\n🌊 Activity Stream:")
-            print("━" * 60)
-            if not activity:
-                print("  (No recent activity found)")
-            for item in activity:
-                date_label = f" — {item['date']}" if item.get('date') else ""
-                due_label = f" [Due: {item['due_date']}]" if item.get('due_date') else ""
-                cname = item.get('course') or 'General'
-                print(f"• [{cname}] {item['title']}{due_label}{date_label}")
-                if item.get("message") and item.get("message") != item.get("title"):
-                    print(f"  > {item['message'][:160]}")
+        from core import commands
+        await commands.run_activity(args, lambda data: _emit_json(args, data))
         return
 
     # --- profile ---
     if subcmd in ("profile", "whoami") or getattr(args, "profile", False):
-        data = await scrape_profile_async()
-        if data:
-            if getattr(args, "json", False) or getattr(args, "out", None):
-                _emit_json(args, data)
-            else:
-                _print_profile(data)
-            if getattr(args, "md", False):
-                save_profile(data)
+        from core import commands
+        await commands.run_profile(args, lambda data: _emit_json(args, data))
         return
 
     # --- discussions ---
     if subcmd in ("discussions", "discuss") or getattr(args, "discussions", False):
-        if not target_cids:
-            print("❌ Specify course (e.g. 'bb discussions IS410' or '-c IS410') or '--all'", file=sys.stderr)
-            sys.exit(1)
+        machine = bool(getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None))
+        # Reading every reply costs ~1 request per response; the terminal summary only needs topics.
+        glance = not (machine or args.md or args.titles_only or args.posts_only or args.participants_only)
         kwargs = {
             "max_post_clicks": getattr(args, "max_posts", None),
             "max_participant_clicks": getattr(args, "max_parts", None),
@@ -1797,19 +1743,17 @@ async def main_async(args: argparse.Namespace) -> None:
             cdp=cdp,
             kwargs=kwargs,
             md=getattr(args, "md", False),
-            titles_only=getattr(args, "titles_only", False),
+            titles_only=getattr(args, "titles_only", False) or glance,
         )
-        if getattr(args, "raw", False) or getattr(args, "json", False) or getattr(args, "out", None):
+        if machine:
             _emit_json(args, raw_all_disc)
-            return
-        for course in raw_all_disc:
-            for disc in course["discussions"]:
-                due_str = f" (Due: {disc['due_date']})" if disc.get("due_date") else ""
-                posts_str = f" [{len(disc['posts'])} posts]" if disc.get("posts") else ""
-                print(f"• {disc.get('title', '')}{due_str}{posts_str}")
-                for link in disc.get("links") or []:
-                    print(f"  └ 🔗 {link['text']}: {link['url']}")
-        print(f"Scraped discussions for {len(target_cids)} courses.")
+        else:
+            from scrapers.discussions import format_discussions
+            print(format_discussions(raw_all_disc))
+            if glance:
+                print("\nTopics only. Add --json (or --md) to read posts and replies.", file=sys.stderr)
+        if any(c.get("error") for c in raw_all_disc):
+            raise SystemExit(1)
         return
 
     print("No subcommand or scraper action selected. Run 'bb --help' to see commands.", file=sys.stderr)

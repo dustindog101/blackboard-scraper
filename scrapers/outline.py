@@ -572,12 +572,13 @@ def download_course_file(
         "Cookie": cookie_header,
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         req = urllib.request.Request(download_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=30) as resp, open(destination_path, "wb") as f:
-            f.write(resp.read())
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            content = resp.read()
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        destination_path.write_bytes(content)
         return True
     except Exception as e:
         logger.error(f"Failed to download file from {download_url} to {destination_path}: {e}")
@@ -590,12 +591,14 @@ def download_content_item_files(
     destination_dir: Path,
     default_filename: str = "downloaded_file",
     cookie_header: Optional[str] = None,
+    allow_default_endpoint: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Resolves true attachment IDs for an item and downloads all associated files.
-    Returns list of downloaded file info dicts.
+    Returns list of downloaded file info dicts. The directory is only created when a file is written.
+    ``allow_default_endpoint`` is False for items that are not plain files (folders, documents), so the
+    single-attachment endpoint is never tried for them.
     """
-    destination_dir.mkdir(parents=True, exist_ok=True)
     attachments = fetch_item_attachments(course_id, content_id, cookie_header)
     downloaded = []
 
@@ -610,8 +613,8 @@ def download_content_item_files(
                     "saved_to": str(dest),
                     "size_bytes": dest.stat().st_size if dest.exists() else 0,
                 })
-    else:
-        # Fallback to direct content attachment download endpoint
+    elif allow_default_endpoint:
+        # Plain file items: direct content attachment download endpoint
         fallback_url = f"{BLACKBOARD_BASE}/learn/api/public/v1/courses/{course_id}/contents/{content_id}/attachments/default/download"
         dest = destination_dir / default_filename
         success = download_course_file(fallback_url, dest, cookie_header)
