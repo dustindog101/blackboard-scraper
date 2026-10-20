@@ -56,7 +56,7 @@ class TestRealBrowserTransfer(unittest.TestCase):
                 old = [dict(active[0], value="fixture-old"), dict(active[0], name="old_extra", value="stale")]
                 saved.write_text(json.dumps(active), encoding="utf-8")
                 exported = root / "session ü with spaces.json"
-                with patch.dict(os.environ, {"BLACKBOARD_BROWSER": "chromium", "BLACKBOARD_BROWSER_PATH": ""}), \
+                with patch.dict(os.environ, {"BLACKBOARD_BROWSER": "auto", "BLACKBOARD_BROWSER_PATH": ""}), \
                      patch.object(session_transfer, "SESSION_DIR", profile), \
                      patch.object(session_transfer, "BLACKBOARD_BASE", base), \
                      patch.object(session, "SESSION_DIR", profile), \

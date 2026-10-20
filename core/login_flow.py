@@ -197,3 +197,44 @@ def wait_for_sso(context, page, username, password, base, detect_error, cancel_e
             last_state = 'UMBC authentication response'
         page.wait_for_timeout(min(100, max(1, (deadline - time.monotonic()) * 1000)))
     raise LoginFlowError(f'Timed out waiting for {last_state}. No verified session saved. Run bb login --manual to inspect the page.')
+
+
+# Duo methods bb can drive, with the visible labels Duo uses for each.
+DUO_METHOD_LABELS = {
+    'sms': ('Text message passcode', 'Text message', 'Text me'),
+    'push': ('Duo Push', 'Send Duo Push', 'Send me a Push'),
+    'passcode': ('Duo Mobile passcode', 'Mobile passcode', 'Enter a passcode', 'Passcode', 'Other passcode'),
+    'call': ('Phone call', 'Call me'),
+}
+_DUO_PUSH_ACTIVE = re.compile(r'check (?:your phone|for a duo push)|duo push|push notification|sent a push', re.I)
+
+
+def _label_pattern(labels):
+    return re.compile(r'^\s*(?:' + '|'.join(re.escape(label) for label in labels) + r')\b', re.I)
+
+
+def duo_methods(page):
+    """Verification methods Duo shows right now, preferred first: sms, push, passcode, call.
+
+    A method counts only when a control for it is visible (or, for push, when
+    Duo says one was already sent). Nothing here clicks.
+    """
+    found = set()
+    for frame in page.frames:
+        if not is_duo(frame.url):
+            continue
+        try:
+            for method, labels in DUO_METHOD_LABELS.items():
+                pattern = _label_pattern(labels)
+                for locator in (frame.get_by_role('button', name=pattern), frame.get_by_role('link', name=pattern),
+                                frame.get_by_text(pattern)):
+                    if any(locator.nth(i).is_visible() for i in range(min(locator.count(), 5))):
+                        found.add(method)
+                        break
+            if _visible(frame, "input[name='passcode'], input[id*='passcode']") is not None:
+                found.add('passcode')
+            if 'push' not in found and frame.get_by_text(_DUO_PUSH_ACTIVE).count():
+                found.add('push')
+        except PlaywrightError:
+            continue
+    return [method for method in ('sms', 'push', 'passcode', 'call') if method in found]

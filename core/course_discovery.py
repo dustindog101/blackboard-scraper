@@ -6,25 +6,15 @@ import urllib.request
 from datetime import datetime
 from typing import Dict, Optional
 
-from core.config import BLACKBOARD_BASE, SESSION_DIR, save_courses
+from core.config import BLACKBOARD_BASE, save_courses
+from core.session_state import cookie_header, user_agent
 
 logger = logging.getLogger("blackboard.course_discovery")
 
 
 def get_cookie_header() -> Optional[str]:
-    """Extract Cookie header string from .session/cookies.json."""
-    cookie_file = SESSION_DIR / "cookies.json"
-    if not cookie_file.exists():
-        return None
-    try:
-        cookies_list = json.loads(cookie_file.read_text())
-        return "; ".join([
-            f"{c['name']}={c['value']}"
-            for c in cookies_list
-            if "blackboard.umbc.edu" in c.get("domain", "") or "umbc.edu" in c.get("domain", "")
-        ])
-    except Exception:
-        return None
+    """Cookie header for the REST API from .session/cookies.json (domain, path, expiry filtered)."""
+    return cookie_header()
 
 
 def discover_courses_via_api() -> Dict[str, Dict[str, str]]:
@@ -39,7 +29,7 @@ def discover_courses_via_api() -> Dict[str, Dict[str, str]]:
 
     headers = {
         "Cookie": cookie_header,
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": user_agent(),
         "Accept": "application/json",
     }
 

@@ -148,9 +148,8 @@ class TestLoginSafety(unittest.TestCase):
     def test_async_refresh_and_sync_refresh_use_login_and_reprobe(self):
         for asynchronous in (False, True):
             with self.subTest(asynchronous=asynchronous), contextlib.ExitStack() as stack:
-                stack.enter_context(patch.object(session, 'quick_check_session_http', side_effect=[(False, None), (True, {'id': 'fixture'})]))
-                stack.enter_context(patch.object(session, 'check_session', return_value=False))
-                stack.enter_context(patch.object(session, 'check_session_async', new_callable=AsyncMock, return_value=False))
+                stack.enter_context(patch.object(session, 'check_session_state', return_value=('expired', None)))
+                stack.enter_context(patch.object(session, 'quick_check_session_http', return_value=(True, {'id': 'fixture'})))
                 stack.enter_context(patch.object(session, 'ensure_config_exists', return_value=(False, {'auto_login': {'username': 'fixture', 'password': 'fixture'}})))
                 login = stack.enter_context(patch.object(session, 'login_auto', return_value=True))
                 stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
@@ -161,7 +160,7 @@ class TestLoginSafety(unittest.TestCase):
 
     def test_known_profile_lock_never_tries_second_browser(self):
         for message in ('ProcessSingleton', 'SingletonLock', 'profile is already in use', 'Target directory is in use'):
-            with self.subTest(message=message), patch.object(session, 'get_browser_launch_candidates', return_value=[{'name': 'first'}, {'name': 'second'}]), contextlib.redirect_stdout(io.StringIO()):
+            with self.subTest(message=message), patch('core.browser.get_browser_launch_candidates', return_value=[{'name': 'first'}, {'name': 'second'}]), contextlib.redirect_stdout(io.StringIO()):
                 pw = MagicMock()
                 pw.chromium.launch_persistent_context.side_effect = RuntimeError(message)
                 with self.assertRaises(SystemExit):

@@ -26,6 +26,7 @@ if sys.platform == "win32":
 from core.config import BLACKBOARD_BASE, load_courses, save_courses
 from core.export_json import build_composite_schema, build_export_doc
 from core.session import _launch_context, _require_session, _require_session_async, check_session_async, login, _login_auto_async, quick_check_session_http
+from core.browser import BrowserProfileLockedError, BrowserUnavailableError
 from core.async_engine import AsyncSessionManager, AsyncCourseWorkerPool, EngineConfig, TaskProfile, get_optimal_concurrency
 
 # Scrapers
@@ -1819,6 +1820,9 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nCancelled.", file=sys.stderr)
         raise SystemExit(130) from None
+    except (BrowserProfileLockedError, BrowserUnavailableError) as error:
+        print(f"\n{error}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
