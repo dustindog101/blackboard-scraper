@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from core.config import BLACKBOARD_BASE, load_courses
-from core.display import clip, fmt_when, parse_dt, short_course
+from core.display import clip, fmt_when, parse_dt
+from core.gradebook import course_label
 from core.output import ensure_output_dir, status
 from core.rest import RestError, post_json
 
@@ -184,7 +185,7 @@ def format_activity(items: List[Dict[str, Any]], total: int, source: str = "REST
     now = datetime.now(timezone.utc).astimezone()
     by_course: Dict[str, List[Dict[str, Any]]] = {}
     for item in items:
-        by_course.setdefault(short_course(item.get("course")), []).append(item)
+        by_course.setdefault(course_label(item.get("course")), []).append(item)
     shown = f"{len(items)} of {total}" if total > len(items) else str(len(items))
     lines = [f"Activity: {shown} items across {len(by_course)} course{'s' if len(by_course) != 1 else ''} ({source}), newest first"]
     for label in sorted(by_course, key=lambda c: (c == "General", c)):

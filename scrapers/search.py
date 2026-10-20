@@ -3,7 +3,8 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from core.display import align, clip, short_course
+from core.display import align, clip
+from core.gradebook import course_label
 from core.output import status
 from scrapers.discussions import scrape_discussions_http
 from scrapers.outline import (
@@ -124,7 +125,7 @@ def format_search_results(matches: List[Dict[str, Any]], query: str) -> str:
         return f"No items matching '{query}'."
     by_course: Dict[str, List[Dict[str, Any]]] = {}
     for m in matches:
-        by_course.setdefault(short_course(m.get("course_name")), []).append(m)
+        by_course.setdefault(course_label(m.get("course_name")), []).append(m)
     lines = [f"Search '{query}': {len(matches)} match{'es' if len(matches) != 1 else ''} in {len(by_course)} course{'s' if len(by_course) != 1 else ''}"]
     for label in sorted(by_course):
         lines.append("")
@@ -249,8 +250,8 @@ async def grab_item_async(
 
     downloaded: List[Dict[str, Any]] = []
     if download_dir:
-        safe_course = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in short_course(cname)).strip("_")
-        status(f"Downloading '{target_item['title']}' from {short_course(cname)}...")
+        safe_course = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in course_label(cname)).strip("_")
+        status(f"Downloading '{target_item['title']}' from {course_label(cname)}...")
         downloaded = await asyncio.to_thread(
             download_content_item_files,
             course_id=cid,
@@ -269,9 +270,9 @@ def format_download_result(result: Dict[str, Any]) -> str:
         return f"No item named '{result.get('query')}' found. Try: bb search \"{result.get('query')}\""
     if st == "multiple_matches":
         lines = [f"'{result['query']}' matches {len(result['matches'])} items; be more specific or pass the ID:"]
-        rows = [(short_course(m["course_name"]), m.get("content_type", "item"), clip(m["title"], 52), m["content_id"]) for m in result["matches"]]
+        rows = [(course_label(m["course_name"]), m.get("content_type", "item"), clip(m["title"], 52), m["content_id"]) for m in result["matches"]]
         return "\n".join(lines + align(rows))
-    label = f"{short_course(result.get('course_name'))}: {result.get('title')}"
+    label = f"{course_label(result.get('course_name'))}: {result.get('title')}"
     if st == "folder":
         files = result["files"]
         if not files:

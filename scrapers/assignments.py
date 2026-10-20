@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -7,12 +9,17 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from core.config import BLACKBOARD_BASE, load_courses
 from core.output import ensure_output_dir
 from core.async_engine import AdaptiveDOM
+from core.gradebook import MAX_CONNECTIONS, course_label, due_iso, is_calculated, item_status, status_text, student_records
+from core.time import format_local, parse_datetime, to_iso
 from scrapers.quiz import _api_get, _get_cookie_header, _clean_html_text
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
 
 logger = logging.getLogger("blackboard.scrapers.assignments")
+
+# Shared by all courses fetched at once.
+_SLOTS = threading.BoundedSemaphore(MAX_CONNECTIONS)
 
 
 def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, Any]]]:
@@ -29,22 +36,31 @@ def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, An
     if not cols or "results" not in cols:
         return None
 
-    me = _api_get("/learn/api/v1/users/me", cookie_header)
-    user_id = me.get("id") if me and "_http_status" not in me else None
+    # Content details (one request per item) and the student's records are independent: fetch them together.
+    # Total requests in flight stay below the server's stall threshold (see core.gradebook.MAX_CONNECTIONS).
+    content_ids = [c["contentId"] for c in cols["results"] if c.get("contentId") and not is_calculated(c)]
+
+    def _detail(content_id: str):
+        with _SLOTS:
+            return _api_get(f"/learn/api/v1/courses/{course_id}/contents/{content_id}?expand=gradebookCategory", cookie_header)
+
+    with ThreadPoolExecutor(max_workers=MAX_CONNECTIONS) as pool:
+        records_future = pool.submit(student_records, course_id, cols["results"], cookie_header)
+        details = dict(zip(content_ids, pool.map(_detail, content_ids)))
+        status_inputs = records_future.result()
 
     assignments: List[Dict[str, Any]] = []
 
     for c in cols["results"]:
         name = c.get("name", "")
-        # Skip total score rollups
-        if name in ("Overall Grade", "Weighted Total", "Total"):
+        if is_calculated(c):  # totals are never items
             continue
 
         col_id = c.get("id")
         content_id = c.get("contentId")
         possible = c.get("score", {}).get("possible")
         handler = c.get("scoreProviderHandle", "")
-        due_raw = c.get("dueDate")
+        due_raw = c.get("dueDate") or (c.get("grading") or {}).get("due")
 
         item_type = "Assignment"
         if "forum" in handler or "discussion" in handler:
@@ -66,7 +82,7 @@ def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, An
 
         # If content_id exists, inspect content detail
         if content_id:
-            c_info = _api_get(f"/learn/api/v1/courses/{course_id}/contents/{content_id}?expand=gradebookCategory", cookie_header)
+            c_info = details.get(content_id)
             if c_info and "_http_status" not in c_info:
                 cdetail = c_info.get("contentDetail", {})
                 test_block = cdetail.get("resource/x-bb-asmt-test-link", {}).get("test", {})
@@ -109,13 +125,11 @@ def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, An
                         except Exception:
                             due_formatted = raw_c_due
 
-        # Check user grade / attempt status
-        status = "NOT_ATTEMPTED"
-        if user_id and col_id:
-            grades = _api_get(f"/learn/api/v1/courses/{course_id}/gradebook/columns/{col_id}/grades?userId={user_id}", cookie_header)
-            if grades and "results" in grades and len(grades["results"]) > 0:
-                g = grades["results"][0]
-                status = g.get("status", status)
+        # One shared status model (core.gradebook); `submission_status` keeps the raw gradebook value.
+        records = status_inputs["records"]
+        record = (records or {}).get(col_id)
+        status = (record or {}).get("status") or "NOT_ATTEMPTED"
+        model_status = item_status(c, record, status_inputs["posts"].get(col_id)) if records is not None else "unknown"
 
         assignments.append({
             "id": content_id or col_id,
@@ -125,7 +139,9 @@ def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, An
             "item_type": item_type,
             "due_date": due_formatted,
             "points_possible": f"{possible} points" if possible is not None else "",
+            "due_at": due_iso(c) or to_iso(due_formatted),
             "submission_status": status,
+            "status": model_status,
             "attempts": attempts,
             "is_timed_test": is_timed,
             "instructions": instructions,
@@ -339,23 +355,23 @@ async def scrape_course_assignments_async(
 
 def format_assignments_summary(assignments: List[Dict[str, Any]], course_name: str, course_id: str = "") -> str:
     """One aligned table per course: due time (local, with zone), type, points, status, title."""
-    from core.display import align, clip, fmt_when, parse_dt, short_course
+    from core.display import align, clip
 
     count = len(assignments)
-    lines = [f"{short_course(course_name)}  ({count} item{'s' if count != 1 else ''})"]
+    lines = [f"{course_label(course_name)}  ({count} item{'s' if count != 1 else ''})"]
     if not assignments:
         lines.append("  none found (or the course is closed)")
         return "\n".join(lines)
 
     far = datetime.max.replace(tzinfo=timezone.utc)
-    ordered = sorted(assignments, key=lambda a: parse_dt(a.get("due_date")) or far)
+    ordered = sorted(assignments, key=lambda a: parse_datetime(a.get("due_at")) or far)
     rows = []
     for a in ordered:
-        due = fmt_when(parse_dt(a.get("due_date"))) or "no due date"
+        due_dt = parse_datetime(a.get("due_at"))
+        due = format_local(due_dt) if due_dt else "no due date"
         points = str(a.get("points_possible") or "").replace(" points", "").replace(".0", "")
-        state = str(a.get("submission_status") or "unknown").lower().replace("_", " ")
         timed = " (timed)" if a.get("is_timed_test") else ""
-        rows.append((due, a.get("item_type", "Assignment"), points, state, clip(a["title"], 60) + timed))
+        rows.append((due, a.get("item_type", "Assignment"), points, status_text(a.get("status", "unknown")), clip(a["title"], 60) + timed))
     lines.extend(align(rows))
     return "\n".join(lines)
 
@@ -385,14 +401,15 @@ def save_assignments(assignments: List[Dict[str, Any]], course_id: str) -> Path:
             lines.append(f"## 📝 {a['title']} [{item_type}]{timed_badge}")
             if item_id:
                 lines.append(f"**ID:** `{item_id}`")
-            if a.get("due_date"):
-                lines.append(f"**Due Date:** `{a['due_date']}`")
+            if a.get("due_at") or a.get("due_date"):
+                due = format_local(parse_datetime(a.get("due_at"))) if a.get("due_at") else a["due_date"]
+                lines.append(f"**Due Date:** `{due}`")
             if a.get("points_possible"):
                 lines.append(f"**Points:** {a['points_possible']}")
             if a.get("attempts"):
                 lines.append(f"**Attempts:** {a['attempts']}")
-            if a.get("submission_status"):
-                lines.append(f"**Status:** `{a['submission_status']}`")
+            if a.get("status") or a.get("submission_status"):
+                lines.append(f"**Status:** `{a['status'].replace('_', ' ') if a.get('status') else a['submission_status']}`")
 
             if a.get("instructions"):
                 lines.append("\n### Instructions / Prompt:")

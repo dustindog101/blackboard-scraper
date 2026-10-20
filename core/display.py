@@ -1,51 +1,22 @@
-"""Shared text-output helpers: course labels, local times with zone, relative ages, clipping."""
-import re
+"""Text-layout helpers (relative age, clipping, aligned columns). Dates use core.time, labels core.gradebook."""
 from datetime import datetime, timezone
 from typing import Any, Iterable, List, Optional, Sequence
 
-_CODE_RE = re.compile(r"^\s*([A-Za-z]{2,6})\s*(\d{3,4}[A-Za-z]?)\b")
-_SECTION_RE = re.compile(r"\s*\([^)]*\)\s*(?:SP|FA|SU|WI)\d{4}\s*\([^)]*\)\s*$|\s*\([0-9A-Za-z./]+\)\s*(?:SP|FA|SU|WI)\d{4}\s*$")
-
-
-def short_course(name: Optional[str]) -> str:
-    """'IS 410 Intro To Database Design (03.1520) FA2026' -> 'IS 410'. Falls back to the cleaned name."""
-    if not name:
-        return "General"
-    match = _CODE_RE.match(name)
-    if match:
-        return f"{match.group(1).upper()} {match.group(2).upper()}"
-    return _SECTION_RE.sub("", name).strip() or name
-
-
-def course_title(name: Optional[str]) -> str:
-    """Course name without the trailing section/term codes."""
-    return _SECTION_RE.sub("", name or "").strip() or (name or "")
-
+from core.time import format_local, parse_datetime
 
 def parse_dt(value: Any) -> Optional[datetime]:
-    """ISO-8601 string or epoch milliseconds -> timezone-aware datetime, else None."""
-    if value in (None, ""):
-        return None
-    try:
-        if isinstance(value, (int, float)):
+    """Epoch milliseconds or any string core.time understands -> aware datetime, else None."""
+    if isinstance(value, (int, float)):
+        try:
             return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
-        text = str(value).strip()
-        if text.endswith(" UTC"):  # "2026-09-08 20:30 UTC" as the assignments scraper formats it
-            return datetime.strptime(text[:-4], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
-        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        return dt if dt.tzinfo else dt.astimezone()
-    except (ValueError, OverflowError, OSError):
-        return None
+        except (OverflowError, OSError, ValueError):
+            return None
+    return parse_datetime(value) if isinstance(value, str) else None
 
 
 def fmt_when(dt: Optional[datetime], now: Optional[datetime] = None) -> str:
-    """Local time with zone, e.g. 'Tue Oct 21 11:59 PM EDT' (year added when not the current year)."""
-    if dt is None:
-        return ""
-    local = dt.astimezone()
-    now = (now or datetime.now().astimezone())
-    year = "" if local.year == now.year else f" {local.year}"
-    return f"{local:%a %b} {local.day}{year} {local:%I:%M %p %Z}".replace(" 0", " ")
+    """core.time.format_local, but blank (not 'TBD') when there is no time."""
+    return format_local(dt) if dt else ""
 
 
 def ago(dt: Optional[datetime], now: Optional[datetime] = None) -> str:

@@ -11,7 +11,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.config import BLACKBOARD_BASE, load_courses
-from core.display import ago, clip, fmt_when, parse_dt, short_course
+from core.display import ago, clip, fmt_when, parse_dt
+from core.gradebook import course_label
 from core.output import ensure_output_dir, status
 from core.rest import RestError, get_json, get_pages
 
@@ -89,6 +90,12 @@ def fetch_course_announcements(course_id: str) -> Tuple[List[Dict[str, Any]], Op
     return sort_newest_first(normalize_announcements(raw)), None
 
 
+def scrape_announcements_api(course_id: str) -> Optional[List[Dict[str, Any]]]:
+    """Briefing's entry point: items newest first, [] when the course is closed to students, None when unknown."""
+    items, error = fetch_course_announcements(course_id)
+    return None if error in ("auth", "unknown") else items
+
+
 def fetch_term_starts(course_ids: List[str]) -> Dict[str, Optional[datetime]]:
     """Start of each course's academic term (from /terms), or None when unknown."""
     from concurrent.futures import ThreadPoolExecutor
@@ -158,11 +165,11 @@ def format_announcements(
     """Per-course text: short label, newest first, local time + age, a clipped preview of each body."""
     now = now or datetime.now(timezone.utc)
     lines: List[str] = []
-    for group in sorted(groups, key=lambda g: short_course(g["course_name"])):
+    for group in sorted(groups, key=lambda g: course_label(g["course_name"])):
         items = group["announcements"]
         total = group.get("total", len(items))
         count = f"{len(items)} of {total}" if total != len(items) else f"{len(items)}"
-        lines.append(f"{short_course(group['course_name'])}  ({count} announcement{'s' if total != 1 else ''})")
+        lines.append(f"{course_label(group['course_name'])}  ({count} announcement{'s' if total != 1 else ''})")
         if group.get("error"):
             lines.append(f"  not available: {_ERROR_TEXT.get(group['error'], group['error'])}")
         elif not items:
@@ -192,13 +199,13 @@ async def scrape_announcements_playwright_async(course_id: str, page: Any) -> Li
 
     courses = load_courses()
     name = courses.get(course_id, course_id)
-    status(f"Reading announcements for {short_course(name)} in the browser...")
+    status(f"Reading announcements for {course_label(name)} in the browser...")
 
     outline_url = f"{BLACKBOARD_BASE}/ultra/courses/{course_id}/outline"
     try:
         await page.goto(outline_url, wait_until="domcontentloaded", timeout=20_000)
     except Exception as e:
-        status(f"  could not load {short_course(name)}: {e}")
+        status(f"  could not load {course_label(name)}: {e}")
         return []
 
     # Check if course is unavailable
@@ -213,7 +220,7 @@ async def scrape_announcements_playwright_async(course_id: str, page: Any) -> Li
     )
 
     if not matched_sel or "You can't access" in matched_sel:
-        status(f"  {short_course(name)} is unavailable or closed.")
+        status(f"  {course_label(name)} is unavailable or closed.")
         return []
 
     # Click announcements navigation
@@ -279,7 +286,7 @@ async def scrape_announcements_async(course_id: str, page: Optional[Any] = None)
     if error in ("forbidden", "not_found"):
         return []
     name = load_courses().get(course_id, course_id)
-    status(f"Announcements API unavailable for {short_course(name)} ({error}); using the browser.")
+    status(f"Announcements API unavailable for {course_label(name)} ({error}); using the browser.")
     if page:
         return await scrape_announcements_playwright_async(course_id, page)
     from core.async_engine import AsyncSessionManager, EngineConfig

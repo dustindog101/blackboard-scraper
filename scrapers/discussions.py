@@ -375,12 +375,13 @@ def scrape_discussions(course_id: str, page: 'Page', max_post_clicks: int = None
 
 def format_discussions(courses: list[dict]) -> str:
     """Per-course text: topics in course order, with due dates, post counts and prompt links."""
-    from core.display import clip, short_course
+    from core.display import clip
+    from core.gradebook import course_label
 
     lines: list[str] = []
-    for course in sorted(courses, key=lambda c: short_course(c["course_name"])):
+    for course in sorted(courses, key=lambda c: course_label(c["course_name"])):
         topics = course["discussions"]
-        lines.append(f"{short_course(course['course_name'])}  ({len(topics)} topic{'s' if len(topics) != 1 else ''})")
+        lines.append(f"{course_label(course['course_name'])}  ({len(topics)} topic{'s' if len(topics) != 1 else ''})")
         if course.get("error"):
             lines.append(f"  could not read discussions: {course['error']}")
         for topic in topics:

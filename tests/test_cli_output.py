@@ -13,7 +13,8 @@ from unittest.mock import AsyncMock, patch
 
 import main
 from core import rest
-from core.display import ago, clip, fmt_when, parse_dt, short_course
+from core.display import ago, clip, fmt_when, parse_dt
+from core.gradebook import course_label
 from scrapers import activity, announcements
 from scrapers.search import choose_download_target, files_within, grab_item_async
 
@@ -68,8 +69,8 @@ class TestRest(unittest.TestCase):
 
 class TestDisplay(unittest.TestCase):
     def test_short_course(self):
-        self.assertEqual(short_course(COURSES["_1_1"]), "IS 410")
-        self.assertEqual(short_course("ECON122 Accounting"), "ECON 122")
+        self.assertEqual(course_label(COURSES["_1_1"]), "IS 410")
+        self.assertEqual(course_label("ECON122 Accounting"), "ECON 122")
 
     def test_clip_never_cuts_mid_word(self):
         self.assertEqual(clip("alpha beta gamma delta", 14), "alpha beta…")
@@ -314,10 +315,10 @@ class TestJsonStdoutIsOneDocument(unittest.TestCase):
 
         def fake(cid):
             calls.append(cid)
-            return [{"title": "HW", "due_date": "2026-09-08 20:30 UTC"}]
+            return [{"title": "HW", "due_at": "2026-09-08T20:30:00Z", "status": "graded"}]
         out, _ = self.check(["assignments"], [patch("main.scrape_course_assignments_http", side_effect=fake)])
         self.assertEqual(sorted(calls), sorted(COURSES))
-        self.assertTrue(json.loads(out)[0]["assignments"][0]["due_at"].startswith("2026-09-08T20:30"))
+        self.assertEqual(json.loads(out)[0]["assignments"][0]["due_at"], "2026-09-08T20:30:00Z")
 
     def test_download_not_found_is_json(self):
         async def outline(*_a, **_k):

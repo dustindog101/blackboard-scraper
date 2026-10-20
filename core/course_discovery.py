@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.config import save_courses
-from core.display import parse_dt, short_course
+from core.display import parse_dt
+from core.gradebook import course_label
 from core.output import status
 from core.rest import RestError, get_json, get_pages
 
@@ -175,7 +176,7 @@ def format_terms(terms: List[Dict[str, Any]]) -> str:
     for t in terms:
         n = len(t["courses"])
         lines.append(f"{t['term']}  ({n} course{'s' if n != 1 else ''}){'  <- active' if t['active'] else ''}")
-        lines.extend(f"  {short_course(c['name']):<10}{c['id']}" for c in t["courses"])
+        lines.extend(f"  {course_label(c['name']):<10}{c['id']}" for c in t["courses"])
         lines.append("")
     return "\n".join(lines).rstrip()
 

@@ -1,71 +1,59 @@
+"""`bb briefing`: overdue, urgent, upcoming, grades and announcements from the reconciled status model.
+
+REST only on the happy path (no browser): gradebooks, calendar and announcements are fetched concurrently.
+"""
 import asyncio
 import logging
-from datetime import datetime
-from typing import Any, Dict, Optional
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
 
 from core.config import load_courses
+from core.gradebook import FORBIDDEN, GRADED, NOT_FOUND, NOT_SUBMITTED, UNKNOWN, course_label
 from core.output import OUTPUT_BASE
-from core.async_engine import AsyncSessionManager, AsyncCourseWorkerPool, EngineConfig
-from scrapers.activity import scrape_activity_async, save_activity
-from scrapers.calendar import scrape_calendar_async, save_calendar
-from scrapers.announcements import scrape_announcements_async, save_announcements
-from scrapers.grades import scrape_grades_async, save_grades
+from core.time import format_local, local_zone, parse_datetime
+from scrapers.announcements import scrape_announcements_api
+from scrapers.calendar import scrape_calendar_async
+from scrapers.due_dates import public_item, reconcile, rows, select
+from scrapers.grades import _num, fetch_gradebooks_async, save_grades, summary_lines
 
 logger = logging.getLogger("blackboard.scrapers.briefing")
 
+LOW_SCORE_PERCENT = 60
+LOW_SCORE_DAYS = 21
+UPCOMING_DAYS = 7
+ANNOUNCEMENT_DAYS = 7
+RECENT_GRADE_DAYS = 14
 
-def format_briefing_cli(bundle: Dict[str, Any]) -> str:
-    """Formats composite briefing into readable CLI Markdown text."""
-    now = datetime.now()
-    lines = [
-        f"📋 Blackboard Daily Briefing — {now.strftime('%A, %b %d • %I:%M %p')}",
-        "━" * 60,
-        "",
+
+def _grade_string(item: Dict[str, Any]) -> str:
+    if item["score"] is None or not item["possible"]:
+        return ""
+    return f"{_num(item['score'])} / {_num(item['possible'])}"
+
+
+def _recent_announcements(raw: List[Dict[str, Any]], now: datetime) -> List[Dict[str, Any]]:
+    """Announcements from the last week, newest first. REST carries no read state, so none is claimed."""
+    recent = []
+    for a in raw:
+        created = parse_datetime(a.get("created"))
+        if created and now - created <= timedelta(days=ANNOUNCEMENT_DAYS):
+            recent.append({"title": a.get("title"), "created": a.get("created"), "meta": a.get("meta"), "body": a.get("body", "")})
+    recent.sort(key=lambda a: a["created"], reverse=True)
+    return recent
+
+
+def _course_block(cid: str, name: str, book: Dict[str, Any], announcements: Optional[List[Dict[str, Any]]], now: datetime) -> Dict[str, Any]:
+    block: Dict[str, Any] = {"course_name": name, "course_label": course_label(name), "announcements": announcements or [],
+                             "announcements_available": announcements is not None}
+    if book.get("error"):
+        block.update(grades=[], overall=None, error=book["error"])
+        return block
+    block["overall"] = book["overall"]
+    block["grades"] = [
+        {**{k: v for k, v in i.items() if not k.startswith("_")}, "grade": _grade_string(i)}
+        for i in book["items"]
     ]
-    activity = bundle.get("activity", [])
-    calendar = bundle.get("calendar", [])
-    courses = bundle.get("courses", {})
-
-    urgent = [a for a in activity if "due" in a.get("title", "").lower() or a.get("due_date")]
-    if urgent:
-        lines.append("🚨 URGENT & OVERDUE:")
-        for a in urgent:
-            lines.append(f"  • {a['title']} ({a.get('course', '')}) — Due: {a.get('due_date', 'Today')}")
-        lines.append("")
-
-    if calendar:
-        lines.append("📅 UPCOMING ASSIGNMENTS:")
-        for item in calendar[:10]:
-            lines.append(f"  • {item['title']} ({item.get('course', '')}) — Due: {item.get('due', 'TBD')}")
-        lines.append("")
-
-    lines.append("📚 COURSE UPDATES:")
-    any_course_updates = False
-    for course_id, course_data in courses.items():
-        if not isinstance(course_data, dict):
-            continue
-        course_name = course_data.get("course_name", course_id)
-        announcements = course_data.get("announcements", [])
-        unread_ann = [a for a in announcements if a.get("unread")]
-        grades = course_data.get("grades", [])
-        graded = [g for g in grades if g.get("grade") and g["grade"] not in ("Not graded", "-- %", "")]
-
-        if unread_ann or graded:
-            any_course_updates = True
-            lines.append(f"\n▶ {course_name}")
-            if unread_ann:
-                lines.append(f"  📢 Announcements ({len(unread_ann)} unread):")
-                for a in unread_ann:
-                    lines.append(f"    • {a['title']} ({a.get('meta','')})")
-            if graded:
-                lines.append("  📊 Graded Items:")
-                for g in graded:
-                    lines.append(f"    • {g['name']}: {g['grade']} (Due: {g.get('dueDate','')})")
-
-    if not any_course_updates:
-        lines.append("  (No active unread announcements or new grades across enrolled courses)")
-
-    return "\n".join(lines)
+    return block
 
 
 async def run_briefing_async(
@@ -74,129 +62,119 @@ async def run_briefing_async(
     write_markdown: bool = False,
     concurrency: int = 4,
 ) -> Dict[str, Any]:
-    """
-    High-speed concurrent daily briefing orchestrator.
-    Runs global activity + calendar in parallel, and scrapes all courses concurrently via Async Worker Pool.
-    """
+    """Build the briefing bundle. Raises scrapers.grades.SessionExpired on a 401."""
     courses = load_courses()
-    now = datetime.now()
-    lines = [
-        "# Blackboard Daily Briefing",
-        f"_Generated: {now.strftime('%Y-%m-%d %H:%M')}_",
-        "",
-        "---",
-        "",
-    ]
-    per_course_data: Dict[str, Any] = {}
+    now = datetime.now(local_zone())
 
-    engine_config = EngineConfig(headless=headless, cdp_url=cdp_url, max_concurrency=concurrency)
-    session_manager = AsyncSessionManager(engine_config)
-    await session_manager.initialize()
+    books_task = fetch_gradebooks_async(courses)
+    calendar_task = scrape_calendar_async(None)
+    announcement_tasks = [asyncio.to_thread(scrape_announcements_api, cid) for cid in courses]
+    books, calendar, *announcements = await asyncio.gather(books_task, calendar_task, *announcement_tasks, return_exceptions=True)
+    if isinstance(books, BaseException):
+        raise books
+    calendar_items = calendar if isinstance(calendar, list) else []
+    ann_by_course = {cid: (a if isinstance(a, list) else None) for cid, a in zip(courses, announcements)}
 
-    try:
-        # Step 1: Global scrapers (Activity & Calendar) concurrently
-        async def _get_activity():
-            async with session_manager.acquire_page() as p:
-                return await scrape_activity_async(p)
+    entries = reconcile(books, calendar_items, courses)
+    overdue = select(entries, "overdue", False, now)
+    upcoming = [e for e in select(entries, f"{UPCOMING_DAYS}d", False, now) if not e["completed"]]
+    tomorrow = now.date() + timedelta(days=1)
+    urgent = [e for e in upcoming if e["_dt"].astimezone(local_zone()).date() <= tomorrow]
+    soon = [e for e in upcoming if e not in urgent]
 
-        async def _get_calendar():
-            async with session_manager.acquire_page() as p:
-                return await scrape_calendar_async(p)
+    per_course: Dict[str, Any] = {}
+    notes: List[str] = []
+    for cid, name in courses.items():
+        announcements_here = ann_by_course.get(cid)
+        block = _course_block(cid, name, books.get(cid, {"error": "unavailable"}), None if announcements_here is None else _recent_announcements(announcements_here, now), now)
+        per_course[cid] = block
+        if block.get("error") in (FORBIDDEN, NOT_FOUND):
+            notes.append(f"{block['course_label']}: gradebook not visible to students")
+        elif block.get("error"):
+            notes.append(f"{block['course_label']}: grades unavailable")
+        if announcements_here is None:
+            notes.append(f"{block['course_label']}: announcements unavailable")
 
-        activity_res, calendar_res = await asyncio.gather(
-            _get_activity(),
-            _get_calendar(),
-            return_exceptions=False,
-        )
+    def legacy(e: Dict[str, Any]) -> Dict[str, Any]:
+        text = format_local(e["_dt"]) if e["_dt"] else "TBD"
+        return {**public_item(e), "due_date": text, "due": text}
 
-        activity = activity_res if isinstance(activity_res, list) else []
-        calendar = calendar_res if isinstance(calendar_res, list) else []
+    low = []
+    for cid, block in per_course.items():
+        for g in block["grades"]:
+            dt = parse_datetime(g["due_at"])
+            if (g["status"] == GRADED and g["possible"] and g["percent"] is not None and g["percent"] < LOW_SCORE_PERCENT
+                    and dt and now - timedelta(days=LOW_SCORE_DAYS) <= dt <= now):
+                low.append({**g, "title": g["name"], "course": block["course_label"], "course_id": cid})
+    low.sort(key=lambda g: g["due_at"], reverse=True)
+    open_urgent = [e for e in urgent if e["status"] in (NOT_SUBMITTED, UNKNOWN)]
 
-        if write_markdown:
-            save_activity(activity)
-            save_calendar(calendar)
-
-        # Step 2: Course Workers - scrape announcements & grades concurrently
-        worker_pool = AsyncCourseWorkerPool(session_manager)
-
-        async def _scrape_course(cid: str, cname: str, page: Any) -> Dict[str, Any]:
-            ann_data = await scrape_announcements_async(cid, page)
-            grade_data = await scrape_grades_async(cid, page)
-
-            if write_markdown:
-                save_announcements(ann_data, cid)
-                save_grades(grade_data, cid)
-
-            return {
-                "course_name": cname,
-                "announcements": ann_data,
-                "grades": grade_data,
-            }
-
-        per_course_data = await worker_pool.execute_task_per_course(courses, _scrape_course)
-
-        # Step 3: Build Consolidated Briefing Document
-        urgent = [a for a in activity if "due" in a.get("title", "").lower() or a.get("due_date")]
-        if urgent:
-            lines.append("## 🚨 Urgent & Overdue")
-            for a in urgent:
-                lines.append(f"- **{a['title']}** ({a['course']}) — _Due: {a.get('due_date', 'Today')}_")
-            lines.append("")
-
-        if calendar:
-            lines.append("## 📅 Upcoming Assignments (Global Calendar)")
-            for item in calendar[:10]:
-                lines.append(f"- **{item['title']}** ({item['course']}) — _Due: {item['due']}_")
-            lines.append("")
-
-        lines.append("## 📚 Course Updates")
-        for course_id, course_data in per_course_data.items():
-            if not isinstance(course_data, dict):
-                continue
-            course_name = course_data.get("course_name", courses.get(course_id, course_id))
-            lines.append(f"### {course_name}")
-
-            announcements = course_data.get("announcements", [])
-            unread_ann = [a for a in announcements if a.get("unread")]
-            if unread_ann:
-                lines.append(f"#### 📢 Announcements ({len(unread_ann)} unread)")
-                for a in unread_ann:
-                    lines.append(f"- **{a['title']}** _{a['meta']}_")
-                    snippet = a["body"].split("\n")[0][:140]
-                    if snippet:
-                        if len(a["body"]) > 140:
-                            snippet += "..."
-                        lines.append(f"> {snippet}")
-                    lines.append("")
-
-            grades = course_data.get("grades", [])
-            graded = [g for g in grades if g.get("grade") and g["grade"] not in ("Not graded", "-- %", "")]
-            if graded:
-                lines.append("#### 📊 Recent Grades")
-                lines.append("| Assignment | Due | Grade |")
-                lines.append("|---|---|---|")
-                for g in graded:
-                    lines.append(f"| {g['name']} | {g.get('dueDate','')} | {g['grade']} |")
-                lines.append("")
-
-            lines.append("---\n")
-
-    finally:
-        await session_manager.close()
-
-    filepath = OUTPUT_BASE / "briefing.md"
-    if write_markdown:
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-        filepath.write_text("\n".join(lines))
-
-    return {
-        "briefing_path": filepath,
-        "activity": activity,
-        "calendar": calendar,
-        "courses": per_course_data,
+    bundle = {
+        "briefing_path": OUTPUT_BASE / "briefing.md",
+        "generated_at": now.isoformat(),
+        "overdue": [legacy(e) for e in overdue],
+        "attention": low + [legacy(e) for e in open_urgent],
+        "urgent": [legacy(e) for e in urgent],
+        "upcoming": [legacy(e) for e in soon],
+        "calendar": [legacy(e) for e in urgent + soon],  # kept for Telegram / menubar
+        "activity": [],
+        "courses": per_course,
+        "notes": notes,
     }
+    if write_markdown:
+        for cid, book in books.items():
+            if not book.get("error"):
+                save_grades(book, cid)
+        path = bundle["briefing_path"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("```\n" + format_briefing_cli(bundle) + "\n```\n")
+    return bundle
 
 
-def run_briefing(headless: bool = True, cdp_url: str = None, write_markdown: bool = False) -> Dict[str, Any]:
-    """Synchronous entrypoint wrapper."""
+def run_briefing(headless: bool = True, cdp_url: Optional[str] = None, write_markdown: bool = False) -> Dict[str, Any]:
     return asyncio.run(run_briefing_async(headless=headless, cdp_url=cdp_url, write_markdown=write_markdown))
+
+
+def format_briefing_cli(bundle: Dict[str, Any]) -> str:
+    now = datetime.now(local_zone())
+    lines = [f"Briefing · {format_local(now)}"]
+
+    def section(title: str, items: List[Dict[str, Any]], full_date: bool):
+        if items:
+            lines.extend(["", f"{title} ({len(items)})"] + rows(items, full_date=full_date))
+
+    section("NEEDS ATTENTION", bundle["attention"], True)
+    section("OVERDUE", bundle["overdue"], True)
+    section("DUE TODAY / TOMORROW", bundle["urgent"], True)
+    section("LATER THIS WEEK", bundle["upcoming"], True)
+    if not (bundle["overdue"] or bundle["urgent"] or bundle["upcoming"]):
+        lines.extend(["", f"Nothing overdue or due in the next {UPCOMING_DAYS} days."])
+
+    graded_blocks = [(b["course_label"], b) for b in bundle["courses"].values() if b.get("overall")]
+    if graded_blocks:
+        lines.extend(["", "GRADES"])
+        lines.extend("  " + line for line in summary_lines([(label, b["overall"]) for label, b in graded_blocks]))
+        recent = []
+        cutoff = now - timedelta(days=RECENT_GRADE_DAYS)
+        for b in bundle["courses"].values():
+            for g in b["grades"]:
+                dt = parse_datetime(g["due_at"])
+                if g["status"] == GRADED and dt and cutoff <= dt <= now:
+                    recent.append({**g, "title": g["name"], "course": b["course_label"], "_dt": dt})
+        if recent:
+            recent.sort(key=lambda g: g["_dt"], reverse=True)
+            lines.append("  Recently graded:")
+            lines.extend("  " + r for r in rows(recent[:5], full_date=True))
+
+    anns = [(b["course_label"], a) for b in bundle["courses"].values() for a in b["announcements"]]
+    if anns:
+        anns.sort(key=lambda x: x[1]["created"], reverse=True)
+        lines.extend(["", f"ANNOUNCEMENTS, last {ANNOUNCEMENT_DAYS} days ({len(anns)})"])
+        width = max(len(label) for label, _ in anns)
+        for label, a in anns[:8]:
+            lines.append(f"  {format_local(parse_datetime(a['created']), with_zone=False):<18}  {label:<{width}}  {(a['title'] or '')[:60]}")
+        if len(anns) > 8:
+            lines.append(f"  +{len(anns) - 8} more: bb announcements")
+    if bundle["notes"]:
+        lines.extend(["", "partial: " + "; ".join(bundle["notes"])])
+    return "\n".join(lines)

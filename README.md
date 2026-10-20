@@ -177,11 +177,17 @@ By default, **no Markdown files are saved to disk**. Commands print directly to 
 └── 📎 Database Schema Template.sql [file] [ID: _105747_1]
 ```
 
-### Deadline Table View (`bb due 7d`):
+### Deadline View (`bb due 7d`):
 ```text
-📅 Upcoming Deadlines & Due Dates (7D)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Course                    | Assignment                          | Due Date             | Status
+Due in the next 7 days · 3 items
+
+Today, Tue Oct 20
+  1:00 PM EDT  ENGL 100  J#5: Library Research Module  10 pts  needs grading
+
+Sun Oct 25
+  11:59 PM EDT  AGNG 100  Module 8 Assignment  100 pts  not submitted
+```
+
 --------------------------+-------------------------------------+----------------------+-----------
 IS 410 Database Design    | Homework 1: ER Diagrams             | Sep 15, 2026 11:59PM | Upcoming
 MATH 215 Finite Math      | Problem Set 1                       | Sep 16, 2026 11:59PM | Upcoming
