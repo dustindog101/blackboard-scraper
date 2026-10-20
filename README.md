@@ -363,6 +363,16 @@ bb outline --all --type document     # Lecture docs only
 bb outline --all --filter "Homework" # Search keyword
 ```
 
+### Save answers without submitting (`bb answers`)
+
+`bb answers "Practice Quiz" -c DEMO100` reads an existing in-progress Ultra test.
+Export with `--export answers.json`, edit `changes[]`, preview with
+`--file answers.json`, then explicitly add `--apply` to save. It never starts or
+submits an attempt. Safety metadata must be known; saves confirm each question before
+sending the next and verify every requested answer in a final snapshot. Inspect
+Blackboard after partial/unknown results. See the [CLI reference](docs/CLI_REFERENCE.md#bb-answers-target--c-course)
+for safety limits, transport order, receipt files and exit codes.
+
 ### 3. Assignment Discovery (`bb assignments`)
 List gradable items and their status, then inspect one by title or ID:
 ```bash

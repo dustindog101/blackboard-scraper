@@ -451,3 +451,36 @@ class TestHelpUX(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_legacy_flag_value_answers_is_not_a_subcommand():
+    argv, hint = _intercept_legacy_args(["--json", "--search", "answers", "-c", "ENGL"])
+    assert hint == "search answers"
+    parsed = _parse_args(argv)
+    assert parsed.subcommand == "search"
+    assert parsed.query == "answers"
+    assert parsed.json is True
+
+
+def test_answers_json_parser_error_is_versioned(capsys):
+    import json
+    import pytest
+    with pytest.raises(SystemExit) as exc:
+        _parse_args(["answers", "--json"])
+    assert exc.value.code == 2
+    result = json.loads(capsys.readouterr().out)
+    assert result["schema_version"] == 1
+    assert result["error"] == "invalid_input"
+
+
+def test_answers_json_course_error_is_versioned(monkeypatch, capsys):
+    import asyncio
+    import json
+    import pytest
+    import main
+    monkeypatch.setattr(main, "load_courses", lambda: {"_1_1": "ENGL100 Synthetic"})
+    args = _parse_args(["answers", "_2_1", "-c", "NO_SUCH_COURSE", "--json"])
+    with pytest.raises(SystemExit) as exc:
+        asyncio.run(main.main_async(args))
+    assert exc.value.code == 2
+    assert json.loads(capsys.readouterr().out)["error"] == "invalid_input"

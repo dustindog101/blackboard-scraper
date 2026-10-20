@@ -33,6 +33,26 @@ Recent announcements are not necessarily unread. REST read state is unknown unle
 
 `bb discover` replaces the configured course list. Use it for requested discovery/term changes, not merely to list enrollments. Derive courses and terms live instead of using fixed semester lists or example IDs.
 
+## Save chosen answers (explicit request only)
+
+Use `bb answers "<test>" -c <COURSE>` to show an existing attempt; export with
+`--export answers.json`, then edit only `changes[]`. **Always preview first** with
+`--file answers.json`. Only the student's explicit request to save those changes
+authorizes adding `--apply`. Saved answers may be visible to course staff. This command
+never starts or submits an attempt; review and submission stay with the student.
+
+Only single-choice, multiple-answer and true/false are supported. Baseline re-reads
+are not CAS and cannot prevent browser/other-host races; avoid concurrent editing.
+Safety settings and deadlines fail closed; do not infer no timer from an omitted
+`timeLimit` or `timerCompletion: CONTINUAL`. Each PATCH reconciles before the next;
+all requests are verified again in one final snapshot under an OS lock. Ctrl-C stops
+further dispatches and still reports dispatched writes. Exit 3 means no PATCH sent;
+exit 4 means a PATCH was sent but the run did not fully succeed. HTTP 401 rejects
+without persistence and permits browser fallback only before any HTTP save persisted;
+403/5xx/timeouts never permit fallback. On partial/unknown results, inspect Blackboard
+before retrying. See the checkout's
+CLI reference for schema, expiry, transport order and exit codes.
+
 ## Session and login
 
 Run the requested read directly; it already probes the session. Use `bb check` when session health itself is the question. Verify `/users/me` identity when choosing between accounts; a successful request alone does not identify the intended account.

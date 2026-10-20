@@ -1,6 +1,23 @@
 # Save answers to an existing Assessment Attempt
 
-Status: proposed; review before implementation. This PR contains documentation only.
+Status: implementation exists on `feat/save-draft-answers`. No provider CAS was observed;
+the student authorized fresh baseline re-reads instead (a weaker guard with a remaining
+GET/PATCH race) and HTTP-first browser fallback. These deviations supersede the CAS
+blocker/browser-write ban below; see [ADR-0006](../adr/0006-explicit-answer-save-without-submit.md)
+and the [observed protocol](save-draft-answers-protocol.md). Remaining text records the original proposal.
+
+## Implemented review safeguards
+
+The implementation now revalidates full question definitions and fresh choice order
+immediately before each dispatch, checks each PATCH with bounded GET polling before
+the next, and verifies all requested values together in a final IN_PROGRESS snapshot.
+A held fcntl/msvcrt lock covers reconciliation; no PID-file expiry or unlink is used.
+Safety metadata fails closed, deadline/settings are refreshed before dispatch, GETs
+block redirects/cross-origin pagination, and cooperative cancellation stops further
+writes while retaining a receipt. Only missing session/XSRF before dispatch or explicit
+HTTP 401 rejection (no persistence) can trigger browser fallback, and never after HTTP
+has persisted another answer. Output/input validation and exit-code details are in the
+[CLI reference](../CLI_REFERENCE.md#bb-answers-target--c-course).
 
 ## Outcome and current evidence
 
