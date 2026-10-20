@@ -2,9 +2,9 @@
 
 import contextlib
 import io
-import queue
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -145,17 +145,16 @@ class TestLoginCacheSafety(unittest.TestCase):
         self.assertEqual(cache.read_bytes(), original)
         self.assertEqual(list(cache.parent.glob(".cookies.json.*.tmp")), [])
 
-    def test_rejected_cli_code_without_retry_source_does_not_wait_on_empty_queue(self):
-        waiting_queue = MagicMock()
-        waiting_queue.get.side_effect = queue.Empty
-        with patch("queue.Queue", return_value=waiting_queue):
-            result, output, cache, original, context, _ = self.invoke_login(
-                outcome_results=["rejected"],
-            )
+    def test_rejected_code_without_other_source_reports_what_was_tried_and_does_not_wait(self):
+        started = time.monotonic()
+        result, output, cache, original, context, _ = self.invoke_login(outcome_results=["rejected"])
 
         self.assertFalse(result)
-        self.assertIn("No passcode input is available for another attempt", output)
-        waiting_queue.get.assert_not_called()
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertIn("Duo rejected that passcode", output)
+        self.assertIn("No passcode received. Tried ->", output)
+        self.assertIn("Telegram: not configured", output)
+        self.assertIn("terminal: not an interactive terminal", output)
         context.cookies.assert_not_called()
         self.assertEqual(cache.read_bytes(), original)
 

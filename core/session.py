@@ -34,6 +34,8 @@ from core.login_flow import (
     wait_for_sso,
 )
 
+from core.passcodes import Source, TerminalSource, collect_passcode, file_source, immediate_source
+from core.http_refresh import NEEDS_LOGIN, REFRESHED, forget_idp_storage, record_idp_storage, refresh_session_http
 from core.session_state import (
     NETWORK_MESSAGE,
     UNKNOWN,
@@ -347,6 +349,41 @@ def _read_terminal_passcodes(result_queue, stop_event, automatic_capture: bool =
                 return
 
 
+def _sms_passcode_source(available, reason, start_rowid, sent_at, wait_seconds, excluded):
+    """macOS Messages reader; only codes that arrive after the SMS was requested count."""
+    if not available:
+        return Source("sms", "macOS Messages", unavailable=reason or ("only available on macOS" if sys.platform != "darwin" else "unavailable"))
+
+    def run(emit, stop):
+        code = wait_for_duo_sms_passcode(
+            start_rowid=start_rowid, after_unix_timestamp=sent_at, timeout_seconds=wait_seconds,
+            excluded_codes=excluded, stop_event=stop, access_checked=True,
+        )
+        if code:
+            emit(code, time.time())
+            return None
+        return f"no new SMS in {wait_seconds}s"
+    return Source("sms", "macOS Messages", run)
+
+
+def _telegram_passcode_source(notifier, attempt, max_attempts, hint):
+    """Ask the owner on Telegram and accept the reply."""
+    if notifier is None:
+        return Source("telegram", "Telegram", unavailable="not configured")
+
+    def run(emit, stop):
+        notifier.send_raw_message(
+            f"🔐 <b>UMBC Duo passcode needed (attempt {attempt}/{max_attempts})</b>\n"
+            f"Duo sent a text{hint}. Reply with the 6–8 digit code."
+        )
+        code = None if stop.is_set() else notifier.poll_for_passcode(timeout_sec=120, stop_event=stop)
+        if code:
+            emit(code, time.time())
+            return None
+        return "no reply"
+    return Source("telegram", "Telegram", run)
+
+
 def _approve_duo_push(page, notifier, cancelled, timeout: float = 90.0) -> bool:
     """Send (if needed) a Duo Push and wait for the user to approve it on their phone."""
     # Duo usually sends the push by itself on arrival; only press an explicit send button.
@@ -582,6 +619,7 @@ def logout(keep_config_creds: bool = True):
     if cookies_file.exists():
         cookies_file.unlink()
         print("   ✅ Cleared saved cookies")
+    forget_idp_storage()
 
     # Clear session metadata
     meta_file = SESSION_DIR / "session_metadata.json"
@@ -640,6 +678,26 @@ def track_session_usage(event_type: str = "usage"):
     data["last_used_time_human"] = now_human
 
     meta_file.write_text(json.dumps(data, indent=2))
+
+
+def _http_refresh() -> bool | None:
+    """Renew the Blackboard session over HTTPS through the still-valid IdP session.
+
+    True = refreshed (done), False = a person is needed (use the browser login),
+    None = network trouble (change nothing, do not start a login).
+    """
+    print("🔄 Session expired; trying a browserless refresh (no browser, no Duo)...")
+    started = time.monotonic()
+    result = refresh_session_http()
+    if result == REFRESHED:
+        track_session_usage("usage")
+        print(f"✅ Session refreshed over HTTPS in {time.monotonic() - started:.1f}s.")
+        return True
+    if result == NEEDS_LOGIN:
+        print("   ↳ The UMBC sign-in itself has expired; a full login is needed.")
+        return False
+    print(f"⚠️ {NETWORK_MESSAGE}", file=sys.stderr)
+    return None
 
 
 def check_session_state(timeout: float = 3.5) -> tuple[str, dict | None]:
@@ -936,6 +994,7 @@ def login(force: bool = False, username: str = None, password: str = None, cdp_u
                 import json
                 cookies = context.cookies()
                 (Path(SESSION_DIR) / "cookies.json").write_text(json.dumps(cookies))
+                record_idp_storage(context)
             except Exception:
                 print("✅ Session saved (window closed early).")
 
@@ -965,7 +1024,6 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
     When passcode is provided, submits the supplied 6–8 digit code directly on the first attempt.
     Returns True if login succeeds, False otherwise.
     """
-    import queue
     import threading
 
     login_stop_event = cancel_event if cancel_event is not None else threading.Event()
@@ -1038,6 +1096,9 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
         if valid:
             print("✅ You are already logged in! (Use 'bb login --force' to re-authenticate)")
             return True
+        refreshed = _http_refresh()
+        if refreshed is not False:
+            return bool(refreshed)
 
     if auto_exp:
         if is_mac:
@@ -1063,15 +1124,15 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
         pass
 
     sms_available = False
+    sms_reason = "only available on macOS"
     if is_mac:
-        sms_available, reason = check_sms_access()
+        sms_available, sms_reason = check_sms_access()
         if not sms_available:
-            print(f"   ⚠️ SMS auto-capture unavailable: {reason}")
+            print(f"   ⚠️ SMS auto-capture unavailable: {sms_reason}")
         elif not ensure_messages_sync():
             print("   ⚠️ Messages could not be started. Open Messages to enable SMS syncing, or enter the code manually.")
     if _cancelled():
         return False
-    result_queue = queue.Queue()
     attempt_events = []
 
     with sync_playwright() as p:
@@ -1212,143 +1273,39 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                 login_stage = "submitting Duo passcode"
                 if _cancelled():
                     return False
-                if code_file:
-                    print("WAITING_FOR_CODE", flush=True)
-                    file_deadline = time.monotonic() + float(code_timeout)
-                    file_code = None
-                    warned_invalid = False
-                    while file_code is None and time.monotonic() < file_deadline and not login_stop_event.is_set():
-                        try:
-                            raw = Path(code_file).read_text(encoding="utf-8", errors="ignore").strip()
-                        except OSError:
-                            raw = ""
-                        if raw:
-                            try:
-                                Path(code_file).unlink(missing_ok=True)
-                            except OSError:
-                                pass
-                            file_code = normalize_passcode(raw)
-                            if file_code is None and not warned_invalid:
-                                print("   ⚠️ Code file did not contain a 6–8 digit code; still waiting.", flush=True)
-                                warned_invalid = True
-                            continue
-                        page.wait_for_timeout(500)
-                    if _cancelled():
-                        return False
-                    if file_code is None:
-                        print("   ❌ Timed out waiting for the code file.", flush=True)
-                        return False
-                    print("   ↳ Code received from file; submitting.", flush=True)
-                    previous_error = _visible_duo_error(page)
-                    passcode_input.fill(file_code)
-                    if not _click_exact_text_in_any_frame(page, "Verify", timeout=1000):
-                        passcode_input.press("Enter", timeout=2000, no_wait_after=True)
-                    outcome = _wait_for_passcode_outcome(page, previous_error=previous_error)
-                    if outcome != "accepted":
-                        print("   ❌ Duo did not accept the code. Run the login again for a fresh SMS.", flush=True)
-                        return False
-                    print("   ✅ Duo passcode accepted!", flush=True)
-                    max_attempts = 0
-                    passcode_accepted = True
-                else:
-                    max_attempts = 3
-                if not code_file and not (sms_available or sys.stdin.isatty() or tg_notifier or passcode):
-                    print("❌ No passcode input is available. Use 'bb login --manual' or run in a terminal.")
-                    return False
-                passcode_accepted = bool(code_file)
+                max_attempts = 3
                 tried_codes = set()
                 sms_recovery_used = False
                 sms_wait_seconds = 25
-                terminal_available = sys.stdin.isatty()
-                terminal_started = False
+                terminal = TerminalSource(_read_terminal_passcodes, login_stop_event, sms_available) if sys.stdin.isatty() else None
+                passcode_accepted = False
 
                 for attempt in range(1, max_attempts + 1):
                     if _cancelled():
                         return False
-                    stop_event = threading.Event()
-                    attempt_events.append(stop_event)
-                    code = passcode if attempt == 1 else None
-                    if code is None:
-                        active_sources = set()
-                        if terminal_available:
-                            active_sources.add("cli")
-                        if sms_available:
-                            active_sources.add("sms")
-                            def _sms_worker(event=stop_event, excluded=frozenset(tried_codes)):
-                                try:
-                                    captured = wait_for_duo_sms_passcode(
-                                        start_rowid=start_rowid, after_unix_timestamp=trigger_time,
-                                        timeout_seconds=sms_wait_seconds, excluded_codes=excluded, stop_event=event,
-                                        access_checked=True,
-                                    )
-                                    if captured and not event.is_set():
-                                        result_queue.put(("sms", captured, event))
-                                except Exception:
-                                    pass
-                                finally:
-                                    if not event.is_set():
-                                        result_queue.put(("sms-finished", None, event))
-                            threading.Thread(target=_sms_worker, daemon=True).start()
-                        if tg_notifier:
-                            active_sources.add("telegram")
-                            def _tg_worker(event=stop_event, attempt_number=attempt):
-                                try:
-                                    tg_notifier.send_raw_message(
-                                        f"🔐 <b>UMBC Duo passcode needed (attempt {attempt_number}/{max_attempts})</b>\n"
-                                        f"Enter the 6–8 digit passcode from your phone{sent_to_hint}."
-                                    )
-                                    if not event.is_set():
-                                        captured = tg_notifier.poll_for_passcode(timeout_sec=120, stop_event=event)
-                                        if captured and not event.is_set():
-                                            result_queue.put(("telegram", captured, event))
-                                except Exception:
-                                    pass
-                                finally:
-                                    if not event.is_set():
-                                        result_queue.put(("telegram-finished", None, event))
-                            threading.Thread(target=_tg_worker, daemon=True).start()
-                        if not active_sources:
-                            print("   ❌ No passcode input is available for another attempt. Use 'bb login --manual' or run in a terminal.")
-                            return False
+                    attempt_stop = threading.Event()
+                    attempt_events.append(attempt_stop)
+                    if passcode and attempt == 1:
+                        sources = [immediate_source(passcode)]
+                        window = 5.0
+                    else:
+                        sources = [_sms_passcode_source(sms_available, sms_reason, start_rowid, trigger_time, sms_wait_seconds, frozenset(tried_codes)),
+                                   _telegram_passcode_source(tg_notifier, attempt, max_attempts, sent_to_hint),
+                                   terminal.source() if terminal else Source("cli", "terminal", unavailable="not an interactive terminal")]
+                        if code_file:
+                            sources.append(file_source(code_file))
+                            print("WAITING_FOR_CODE", flush=True)
+                        window = max(120.0, float(code_timeout)) if code_file else 120.0
                         if attempt > 1:
                             print("   ⚠️ Enter a different passcode, or request a new one in Duo. The rejected code will be ignored.")
                         print(f"   📲 Waiting for your Duo passcode{sent_to_hint} (attempt {attempt}/{max_attempts}).")
-                        if terminal_available and not terminal_started:
-                            threading.Thread(
-                                target=_read_terminal_passcodes,
-                                args=(result_queue, login_stop_event, sms_available), daemon=True,
-                            ).start()
-                            terminal_started = True
-                        deadline = time.monotonic() + 120.0
-                        while code is None and time.monotonic() < deadline and not login_stop_event.is_set():
-                            try:
-                                message = result_queue.get(timeout=min(0.2, max(0.001, deadline - time.monotonic())))
-                            except queue.Empty:
-                                continue
-                            source, entered = message[:2]
-                            if len(message) == 3 and message[2] is not stop_event:
-                                continue
-                            if source in ("sms-finished", "telegram-finished", "terminal-closed"):
-                                finished = {"sms-finished": "sms", "telegram-finished": "telegram", "terminal-closed": "cli"}[source]
-                                active_sources.discard(finished)
-                                if source == "terminal-closed":
-                                    terminal_available = False
-                                if not active_sources or (source == "sms-finished" and not sms_recovery_used):
-                                    break
-                                continue
-                            candidate = normalize_passcode(entered)
-                            if candidate is None:
-                                print("   ⚠️ Passcodes must contain 6–8 digits. Try again.")
-                            elif candidate in tried_codes:
-                                print("   ⚠️ That passcode was already tried; waiting for a different code.")
-                            else:
-                                code = candidate
-                                print(f"   ↳ Passcode received via {source}; submitting.")
-                        stop_event.set()
+                    race = collect_passcode(sources, tried=tried_codes, sent_at=trigger_time, timeout=window, cancel=login_stop_event)
+                    attempt_stop.set()
                     if _cancelled():
                         return False
+                    code = race.code
                     if code is None:
-                        if sms_available and not sms_recovery_used and attempt < max_attempts:
+                        if sms_available and not sms_recovery_used and attempt < max_attempts and not code_file:
                             sms_recovery_used = True
                             sms_wait_seconds = 65
                             resend_rowid = get_current_max_rowid()
@@ -1361,8 +1318,10 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                             else:
                                 print("   ↳ Duo is not ready to resend; continuing to wait for the original SMS.")
                             continue
-                        print("   ❌ No new passcode received. Use 'bb login --manual' to continue in a browser.")
+                        print(f"   ❌ No passcode received. Tried -> {race.summary()}.")
+                        print("   Use 'bb login --manual' to continue in a browser.")
                         return False
+                    print(f"   ↳ Passcode received via {race.source}; submitting.", flush=True)
                     tried_codes.add(code)
                     previous_error = _visible_duo_error(page)
                     if _cancelled():
@@ -1384,10 +1343,11 @@ def login_auto(username: str = None, password: str = None, headless: bool = Fals
                     if outcome == "timeout":
                         print("   ❌ Duo did not confirm the result. Use 'bb login --manual'; the code will not be resubmitted.")
                         return False
-                    print("   ⚠️ Duo rejected the passcode.")
+                    print("   ⚠️ Duo rejected that passcode (wrong or expired).")
                     if attempt == max_attempts:
                         print("   ❌ Maximum passcode attempts reached.")
                         return False
+                    print("   ↳ Waiting for another code; the rejected one will be ignored.")
 
                 if not passcode_accepted:
                     return False
@@ -1469,6 +1429,7 @@ def _persist_login(context, cancel_event, success_message: str) -> bool:
         record_user_agent(context.pages[0].evaluate("navigator.userAgent"))
     except Exception:
         pass
+    record_idp_storage(context)
     track_session_usage("login")
     print(success_message)
     return True
@@ -1526,6 +1487,10 @@ async def _require_session_async(cdp_url: str = None) -> bool:
         print(f"⚠️ {NETWORK_MESSAGE}", file=sys.stderr)
         return False
 
+    # Expired: the HTTPS refresh needs no browser and no Duo text, so it goes first.
+    if await asyncio.to_thread(_http_refresh):
+        return True
+
     # Session missing or expired -> check config & credentials
     print("\n⚠️ No active Blackboard session detected.")
     created_blank, cfg = ensure_config_exists(notify=True)
@@ -1582,6 +1547,9 @@ def _require_session(cdp_url: str = None) -> bool:
     if state == UNKNOWN:
         print(f"⚠️ {NETWORK_MESSAGE}", file=sys.stderr)
         return False
+
+    if _http_refresh():
+        return True
 
     print("\n⚠️ No active Blackboard session detected.")
     created_blank, cfg = ensure_config_exists(notify=True)
