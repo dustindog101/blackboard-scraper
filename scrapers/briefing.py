@@ -49,6 +49,8 @@ def _course_block(cid: str, name: str, book: Dict[str, Any], announcements: Opti
         block.update(grades=[], overall=None, error=book["error"])
         return block
     block["overall"] = book["overall"]
+    if book.get("records_error"):
+        block["records_error"] = book["records_error"]
     block["grades"] = [
         {**{k: v for k, v in i.items() if not k.startswith("_")}, "grade": _grade_string(i)}
         for i in book["items"]
@@ -92,6 +94,8 @@ async def run_briefing_async(
             notes.append(f"{block['course_label']}: gradebook not visible to students")
         elif block.get("error"):
             notes.append(f"{block['course_label']}: grades unavailable")
+        if block.get("records_error"):
+            notes.append(f"{block['course_label']}: grades unavailable ({block['records_error']}); item statuses unknown")
         if announcements_here is None:
             notes.append(f"{block['course_label']}: announcements unavailable")
 

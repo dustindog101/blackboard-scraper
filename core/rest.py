@@ -12,11 +12,8 @@ import urllib.request
 from typing import Any, List, Optional
 
 from core.config import BLACKBOARD_BASE, SESSION_DIR
+from core.session_state import cookie_header as filtered_cookie_header, user_agent
 
-USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
 
 
 class RestError(Exception):
@@ -39,17 +36,13 @@ def _cookies() -> list[dict]:
 
 def cookie_header() -> Optional[str]:
     """Cookie header for Blackboard requests, or None when there is no saved session."""
-    pairs = [
-        f"{c['name']}={c['value']}"
-        for c in _cookies()
-        if "umbc.edu" in c.get("domain", "")
-    ]
-    return "; ".join(pairs) or None
+    return filtered_cookie_header(cookies=_cookies())
 
 
 def xsrf_token() -> Optional[str]:
     """XSRF token Blackboard requires on POSTs (XSRF-TOKEN or BbRouter cookie of the umbc.edu host)."""
-    cookies = [c for c in _cookies() if "umbc.edu" in c.get("domain", "")]
+    header = cookie_header() or ""
+    cookies = [c for c in _cookies() if f"{c.get('name')}={c.get('value')}" in header.split("; ")]
     for c in cookies:
         if c.get("name") == "XSRF-TOKEN" and c.get("value"):
             return c["value"]
@@ -78,7 +71,7 @@ def _request(path: str, *, body: Optional[dict], timeout: float) -> Any:
     if not cookies:
         raise RestError("auth", 401, "no saved session")
     url = path if path.startswith("http") else f"{BLACKBOARD_BASE}{path}"
-    headers = {"Cookie": cookies, "User-Agent": USER_AGENT, "Accept": "application/json"}
+    headers = {"Cookie": cookies, "User-Agent": user_agent(), "Accept": "application/json"}
     data = None
     if body is not None:
         token = xsrf_token()

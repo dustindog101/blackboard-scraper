@@ -101,7 +101,17 @@ def format_daily_briefing(briefing_data: Dict[str, Any]) -> List[str]:
     ]
 
     # 1. Urgent Items
-    urgent = briefing_data.get("urgent", [])
+    def deadline_key(item):
+        return (item.get("course_id") or item.get("course"), item.get("title"),
+                item.get("due_at") or item.get("due_date") or item.get("due"))
+
+    shown = set()
+    urgent = []
+    for item in briefing_data.get("overdue", []) + briefing_data.get("urgent", []):
+        key = deadline_key(item)
+        if key not in shown:
+            shown.add(key)
+            urgent.append(item)
     if urgent:
         lines.append("🚨 <b>URGENT & OVERDUE:</b>")
         for u in urgent:
@@ -110,7 +120,7 @@ def format_daily_briefing(briefing_data: Dict[str, Any]) -> List[str]:
         lines.append("")
 
     # 2. Upcoming Due Dates
-    calendar = briefing_data.get("calendar", [])
+    calendar = [item for item in briefing_data.get("calendar", []) if deadline_key(item) not in shown]
     if calendar:
         lines.append("📅 <b>UPCOMING ASSIGNMENTS:</b>")
         for item in calendar[:8]:

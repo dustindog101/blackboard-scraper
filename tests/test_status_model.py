@@ -364,3 +364,50 @@ class TestBriefing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReviewRegressions(unittest.TestCase):
+    def test_category_subtotal_is_not_the_official_course_grade(self):
+        book = gb.build_gradebook('c', 'IS 410', [col('hw', 'Homework'), calc('quiz', 'Quiz average')],
+                                  [rec('hw', score=5), rec('quiz', score=90)], [])
+        self.assertEqual(book['overall']['source'], 'calculated')
+        self.assertEqual(book['overall']['percent'], 50)
+
+    def test_percent_overall_does_not_use_column_points_as_denominator(self):
+        book = gb.build_gradebook('c', 'IS 410', [calc('total', possible=500)],
+                                  [{'columnId': 'total', 'displayGrade': {'scaleType': 'Percent', 'score': 90}}], [])
+        self.assertEqual(book['overall']['percent'], 90)
+
+    def test_duplicate_assignment_titles_keep_both_deadlines(self):
+        book = gb.build_gradebook('c', 'IS 410',
+                                  [col('a', 'Homework', due='2026-10-01T12:00:00Z'),
+                                   col('b', 'Homework', due='2026-10-02T12:00:00Z')],
+                                  [rec('b', score=9)], [])
+        rows = due_dates.reconcile({'c': book}, [], {'c': 'IS 410'})
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({r['status'] for r in rows}, {gb.GRADED, gb.NOT_SUBMITTED})
+
+    def test_unreadable_student_records_are_explicitly_partial(self):
+        gb._user_cache.clear()
+        api = FakeApi({'c': [col('a', 'Homework')]}, {'c': []}, status={'/gradebook/users/': 403})
+        book = gb.fetch_gradebooks({'c': 'IS 410'}, 'synthetic-cookie', api_get=api)['c']
+        self.assertEqual(book['records_error'], gb.FORBIDDEN)
+        self.assertEqual(gb.public_view(book)['records_error'], gb.FORBIDDEN)
+        self.assertIn('grades unavailable', grades.format_grades_text([book]))
+
+    def test_assignment_auth_failure_does_not_request_browser_fallback(self):
+        from scrapers import assignments
+        with patch('scrapers.assignments._get_cookie_header', return_value='synthetic-cookie'), \
+             patch('scrapers.assignments._api_get', return_value={'_http_status': 401}):
+            with self.assertRaises(gb.GradebookError) as caught:
+                assignments.scrape_course_assignments_http('c')
+        self.assertEqual(caught.exception.kind, gb.EXPIRED)
+
+    def test_telegram_briefing_keeps_overdue_and_deduplicates_urgent(self):
+        from telegram.formatter import format_daily_briefing
+        overdue = {'title': 'Late homework', 'course': 'IS 410', 'due_date': 'Yesterday'}
+        urgent = {'title': 'Soon homework', 'course': 'IS 410', 'due_date': 'Today'}
+        text = '\n'.join(format_daily_briefing({'overdue': [overdue], 'urgent': [urgent],
+                                              'calendar': [urgent], 'courses': {}}))
+        self.assertIn('Late homework', text)
+        self.assertEqual(text.count('Soon homework'), 1)

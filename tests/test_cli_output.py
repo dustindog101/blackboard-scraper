@@ -380,3 +380,25 @@ class TestAnnouncementPreview(unittest.TestCase):
                    '<h2>Rock &amp;amp; Roll</h2><p>Next&nbsp;line</p>')
         text = announcements._clean_html_body(html_in)
         self.assertEqual(text.splitlines(), ["Poof! Gone!", "Hello all,", "Rock & Roll", "Next line"])
+
+
+class TestIntegratedRequestIdentity(unittest.TestCase):
+    def test_rest_reuses_cookie_filter_and_excludes_idp_or_expired_cookies(self):
+        cookies = [
+            {'name': 'session', 'value': 'synthetic-bb', 'domain': 'blackboard.umbc.edu', 'path': '/'},
+            {'name': 'idp', 'value': 'synthetic-idp', 'domain': 'webauth.umbc.edu', 'path': '/'},
+            {'name': 'expired', 'value': 'old', 'domain': 'blackboard.umbc.edu', 'path': '/', 'expires': 1},
+        ]
+        with patch('core.rest._cookies', return_value=cookies):
+            self.assertEqual(rest.cookie_header(), 'session=synthetic-bb')
+
+    def test_session_requirement_failure_exits_nonzero_without_json_noise(self):
+        from unittest.mock import AsyncMock
+        out, err = io.StringIO(), io.StringIO()
+        with patch('main.load_courses', return_value=COURSES), \
+             patch('main._require_session_async', new=AsyncMock(return_value=False)), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as caught:
+                asyncio.run(main.main_async(main._parse_args(['grades', '--json'])))
+        self.assertEqual(caught.exception.code, 1)
+        self.assertEqual(out.getvalue(), '')

@@ -71,8 +71,9 @@ pip install -r requirements.txt
 .\install-cli.ps1   # Registers global 'bb', 'blackboard', and 'bbscraper' commands
 ```
 
-The scraper automatically uses installed Chromium browsers: Edge first on Windows,
-Chrome first on macOS/Linux, then other compatible installations (including Brave).
+The scraper prefers your installed default browser when it is Chromium-compatible.
+Otherwise it tries Edge on Windows or Chrome on macOS/Linux, then other compatible
+installations (including Brave), and explains the fallback.
 It launches a separate Blackboard profile in `.session/`; your everyday browser
 profile is not used. Login and scraping never download browser binaries.
 

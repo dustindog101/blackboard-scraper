@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from core.config import BLACKBOARD_BASE, load_courses
 from core.output import ensure_output_dir
 from core.async_engine import AdaptiveDOM
-from core.gradebook import MAX_CONNECTIONS, course_label, default_api_get, due_iso, is_calculated, item_status, status_text, student_records
+from core.gradebook import GradebookError, EXPIRED, FORBIDDEN, NOT_FOUND, UNAVAILABLE, MAX_CONNECTIONS, course_label, default_api_get, due_iso, is_calculated, item_status, status_text, student_records
 from core.time import format_local, parse_datetime, to_iso
 from scrapers.quiz import _api_get, _get_cookie_header, _clean_html_text
 
@@ -26,10 +26,12 @@ def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, An
     """
     cookie_header = _get_cookie_header()
     if not cookie_header:
-        return None
+        raise GradebookError(EXPIRED)
 
     # 1. Fetch gradebook columns
     cols = _api_get(f"/learn/api/public/v2/courses/{course_id}/gradebook/columns", cookie_header)
+    if cols and cols.get("_http_status"):
+        raise GradebookError({401: EXPIRED, 403: FORBIDDEN, 404: NOT_FOUND}.get(cols["_http_status"], UNAVAILABLE))
     if not cols or "results" not in cols:
         return None
 
@@ -44,6 +46,8 @@ def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, An
         records_future = pool.submit(student_records, course_id, cols["results"], cookie_header)
         details = dict(zip(content_ids, pool.map(_detail, content_ids)))
         status_inputs = records_future.result()
+        if status_inputs.get("error"):
+            raise GradebookError(status_inputs["error"])
 
     assignments: List[Dict[str, Any]] = []
 

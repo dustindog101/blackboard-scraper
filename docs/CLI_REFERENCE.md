@@ -45,7 +45,7 @@ Every `bb <COMMAND> --help` page ends with copy-pasteable `Examples:`. Unknown c
 ## 🔐 Authentication & Sessions
 
 ### `bb login`
-**Description:** Smart authentication entry point. By default, executes zero-touch automated SSO login with real-time macOS SMS Duo 2FA passcode interception (<3ms).
+**Description:** Smart authentication entry point. By default, executes zero-touch automated SSO login with real-time macOS SMS Duo 2FA passcode interception (when available).
 - Mode syntax: accepts both flags and positionals:
   - `bb login` (Smart automated default on macOS)
   - `bb login auto` or `bb login --auto`
@@ -68,6 +68,18 @@ saved session before continuing the read command.
 
 Authentication diagnostics omit page text, full URLs, credential values, and
 passcodes. Automatic login does not save screenshots of authentication pages.
+
+`--code-file <path>` is a live input channel: start login with an empty or absent file,
+wait for `WAITING_FOR_CODE`, then provide the newly received code in that file while
+login is running. It is consumed after reading; do not place old codes there before
+starting. SMS, configured Telegram, terminal and file input can race; the first valid
+code wins. Available Duo methods are detected; accounts without SMS can use a push
+or passcode. `--manual` remains available when automation cannot use the offered method.
+
+A confirmed expired session first tries an HTTPS-only UMBC session refresh. A network
+failure is reported separately and must not trigger a new Duo login. The installed
+Chromium-family default browser is preferred; Firefox/Safari defaults fall back to an
+installed compatible browser with a short explanation. No browser download is required.
 
 ### `bb check` / `bb session check`
 **Description:** High-speed HTTP REST API probe (<120ms) verifying session token validity without launching a browser. Returns exit code 0 if authenticated, 1 if expired.
@@ -318,3 +330,22 @@ All prior `--flag` invocations remain 100% operational:
 | `bb --bot-stop` | `bb bot stop` | Stop daemon |
 | `bb --bot-restart` | `bb bot restart` | Restart daemon |
 | `bb --bot-status` | `bb bot status` | Inspect daemon |
+
+### Grade and deadline reliability
+
+An official overall grade must be externally designated as the course total or use a
+recognized overall-total name; a category subtotal such as "Quiz average" is not a
+course grade. Percent-scaled totals remain percentages even if the column also lists
+whole-course points. When no official total is available, the labeled calculated
+fallback uses included, non-exempt graded points and does not assume category weights.
+
+If student-grade records are unreadable, visible items retain `status: "unknown"` and
+`grades --json` includes `records_error`. Text and briefing label this partial data as
+"grades unavailable" rather than "no grade yet". Assignment-list errors expose an
+`error` per course; 401 stops with login guidance, and 403 reports student visibility
+without opening a browser.
+
+Deadlines retain distinct column/content identities even when titles repeat. Calendar
+rows join by source identity first; title-only joins require a unique match within the
+same course. Telegram briefings include overdue work and avoid repeating urgent work
+in the upcoming list.

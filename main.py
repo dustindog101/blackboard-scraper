@@ -24,7 +24,7 @@ if sys.platform == "win32":
         pass
 
 from core.config import BLACKBOARD_BASE, load_courses
-from core.gradebook import course_label
+from core.gradebook import EXPIRED, GradebookError, course_label
 from core.export_json import build_composite_schema, build_export_doc
 from core.browser import BrowserProfileLockedError, BrowserUnavailableError
 
@@ -1543,6 +1543,7 @@ async def main_async(args: argparse.Namespace) -> None:
             _usage_error("no courses configured.", "Run: bb discover")
 
         raw_all_assign: dict[str, list[dict]] = {}
+        assignment_errors = {}
 
         # 1. REST Fast-Path, all courses at once
         if not getattr(args, "visible", False):
@@ -1552,8 +1553,17 @@ async def main_async(args: argparse.Namespace) -> None:
                     data = [item for item in data if kw in item.get("title", "").lower() or kw in item.get("instructions", "").lower()]
                 return data
 
-            rest_results = await asyncio.gather(*(asyncio.to_thread(scrape_course_assignments_http, cid) for cid in target_cids))
+            rest_results = await asyncio.gather(*(asyncio.to_thread(scrape_course_assignments_http, cid) for cid in target_cids), return_exceptions=True)
             for cid, data in zip(target_cids, rest_results):
+                if isinstance(data, GradebookError):
+                    if data.kind == EXPIRED:
+                        print("Session expired — run `bb login`", file=sys.stderr)
+                        raise SystemExit(1)
+                    assignment_errors[cid] = data.kind
+                    raw_all_assign[cid] = []
+                    continue
+                if isinstance(data, BaseException):
+                    raise data
                 if data is not None:
                     data = _filter(data)
                     if args.md:
@@ -1590,6 +1600,7 @@ async def main_async(args: argparse.Namespace) -> None:
                     "course_id": cid,
                     "course_name": courses.get(cid, cid),
                     "assignments": data if isinstance(data, list) else [],
+                    **({"error": assignment_errors[cid]} if cid in assignment_errors else {}),
                 }
                 for cid, data in raw_all_assign.items()
             ]
@@ -1597,7 +1608,9 @@ async def main_async(args: argparse.Namespace) -> None:
         else:
             for cid, data in raw_all_assign.items():
                 cname = courses.get(cid, cid)
-                if isinstance(data, list):
+                if cid in assignment_errors:
+                    print(f"{course_label(cname)}: assignments unavailable ({assignment_errors[cid]})")
+                elif isinstance(data, list):
                     print(format_assignments_summary(data, cname, cid))
                     print("")
         return

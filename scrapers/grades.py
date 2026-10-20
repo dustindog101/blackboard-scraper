@@ -215,6 +215,8 @@ def overall_line(overall: Dict[str, Any]) -> str:
     """`94.3% A  official (Overall Grade) · 7 of 9 graded`."""
     counts = f"{overall['graded']} of {overall['total']} graded"
     source = overall["source"]
+    if overall.get("unavailable"):
+        return "grades unavailable (partial data)"
     if source == "none":
         return f"no grade yet · {counts}"
     parts = []
@@ -242,7 +244,9 @@ def summary_lines(pairs: List[tuple]) -> List[str]:
     """One aligned line per course: `ECON 122  83.5% B  official    22 of 31 graded`. pairs = [(label, overall)]."""
     cells = []
     for label, o in pairs:
-        if o["source"] == "none":
+        if o.get("unavailable"):
+            value, source = "grades unavailable", "partial"
+        elif o["source"] == "none":
             value, source = "no grade yet", ""
         else:
             value = ((f"{o['percent']:g}%" if o["percent"] is not None else "") + (f" {o['letter']}" if o["letter"] else "")).strip() or "n/a"

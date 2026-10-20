@@ -22,11 +22,8 @@ def get_cookie_header() -> Optional[str]:
         return None
     try:
         cookies_list = json.loads(cookie_file.read_text())
-        return "; ".join([
-            f"{c['name']}={c['value']}"
-            for c in cookies_list
-            if "blackboard.umbc.edu" in c.get("domain", "") or "umbc.edu" in c.get("domain", "")
-        ])
+        from core.session_state import cookie_header
+        return cookie_header(cookies=cookies_list)
     except Exception:
         return None
 

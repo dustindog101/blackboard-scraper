@@ -19,7 +19,7 @@ Architecture decisions live in `docs/adr/`; vocabulary in `CONTEXT.md`. This fil
 
 ## 2. Browsers
 
-- Use the **installed browser**, not a Playwright download: Chrome on macOS, Edge first on Windows, then
+- Use the **installed Chromium-family default browser** when compatible. Otherwise use Chrome on macOS, Edge on Windows, then
   whatever Chromium-family browser exists (Chrome, Brave, Edge). Bundled Chromium is an optional last resort,
   never required. The download costs too much disk.
 - **One shared launcher** for sync and async paths. No module copies its own candidate loop.

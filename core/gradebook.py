@@ -272,7 +272,9 @@ _LETTER_RE = re.compile(r"^[A-F][+-]?$")
 
 def _pick_official(columns: List[Dict[str, Any]], records: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """The course's own total: a Calculated column the student has a visible value for."""
-    visible = [c for c in columns if is_calculated(c) and c.get("id") in records
+    visible = [c for c in columns if is_calculated(c)
+               and (c.get("externalGrade") or (c.get("name") or "").strip().lower() in OFFICIAL_NAMES)
+               and c.get("id") in records
                and (_record_score(records[c["id"]]) is not None or (records[c["id"]].get("displayGrade") or {}).get("text"))]
     if not visible:
         return None
@@ -293,7 +295,7 @@ def _official_overall(column: Dict[str, Any], record: Dict[str, Any], schemas: L
     possible = _number(display.get("possible")) or _possible(column)
     text = display.get("text")
     scale = str(display.get("scaleType") or "").lower()
-    if scale == "percent" and score is not None and not possible:
+    if scale == "percent" and score is not None:
         percent: Optional[float] = round(score, 1)
         possible = 100.0
     else:
@@ -377,6 +379,7 @@ def public_view(gradebook: Dict[str, Any]) -> Dict[str, Any]:
         "overall": gradebook["overall"],
         "items": [{k: v for k, v in i.items() if not k.startswith("_")} for i in gradebook["items"]],
         "excluded": gradebook["excluded"],
+        **({"records_error": gradebook["records_error"]} if gradebook.get("records_error") else {}),
     }
 
 
@@ -422,8 +425,8 @@ def student_records(course_id: str, columns: List[Dict[str, Any]], cookie: str,
     try:
         user_id = current_user_id(cookie, api_get)
         records = _get_all(f"/learn/api/public/v2/courses/{course_id}/gradebook/users/{user_id}", cookie, api_get)
-    except GradebookError:
-        return {"records": None, "posts": {}}
+    except GradebookError as exc:
+        return {"records": None, "posts": {}, "error": exc.kind}
     return {
         "records": {r.get("columnId"): r for r in records},
         "posts": _verify_discussions(course_id, columns, records, user_id, cookie, api_get),
@@ -453,18 +456,24 @@ def fetch_gradebooks(courses: Dict[str, str], cookie: str, api_get: Callable = d
             except GradebookError as e:
                 return {"error": e.kind}
             records: Optional[List[Dict[str, Any]]]
+            records_error = None
             try:
                 records = users[cid].result()
             except GradebookError as e:
                 if e.kind == EXPIRED:
                     return {"error": EXPIRED}
                 records = None
+                records_error = e.kind
             try:
                 scheme = schemas[cid].result()
             except GradebookError:
                 scheme = []
             posts = _verify_discussions(cid, columns, records, user_id, cookie, api_get) if verify and records else {}
-            return build_gradebook(cid, courses[cid], columns, records, scheme, posts)
+            book = build_gradebook(cid, courses[cid], columns, records, scheme, posts)
+            if records_error:
+                book["records_error"] = records_error
+                book["overall"]["unavailable"] = True
+            return book
 
         with ThreadPoolExecutor(max_workers=len(ids)) as finishers:
             return dict(zip(ids, finishers.map(finish, ids)))

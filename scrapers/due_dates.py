@@ -45,14 +45,16 @@ def _entry(cid: Optional[str], course: str, title: str, due_at: Optional[str], s
 def reconcile(books: Dict[str, Dict[str, Any]], calendar_items: List[Dict[str, Any]], courses: Dict[str, str]) -> List[Dict[str, Any]]:
     """Merge gradebook items and calendar entries; the key is course + title, never title alone."""
     combined: Dict[Tuple[Optional[str], str], Dict[str, Any]] = {}
+    by_title: Dict[tuple, list] = {}
     by_source_id: Dict[Tuple[Optional[str], str], Tuple[Optional[str], str]] = {}
 
     for cid, book in books.items():
         if book.get("error"):
             continue
         label = course_label(courses.get(cid) or book.get("course_name"))
-        for item in book["items"]:
-            key = (cid, _normalize_title(item["name"]))
+        for index, item in enumerate(book["items"]):
+            key = (cid, item.get("_column_id") or item.get("_content_id") or f"row:{index}")
+            by_title.setdefault((cid, _normalize_title(item["name"])), []).append(key)
             combined[key] = _entry(
                 cid, label, item["name"], item["due_at"], item["status"], "gradebook",
                 score=item["score"], possible=item["possible"], percent=item["percent"], category=item["category"],
@@ -72,7 +74,12 @@ def reconcile(books: Dict[str, Dict[str, Any]], calendar_items: List[Dict[str, A
             continue  # a course that is not one of the configured (current) courses
         else:
             cid = None
-        key = by_source_id.get((cid, c.get("source_id") or "")) or (cid, _normalize_title(title))
+        matches = by_title.get((cid, _normalize_title(title)), [])
+        key = by_source_id.get((cid, c.get("source_id") or ""))
+        if key is None and len(matches) == 1:
+            key = matches[0]
+        if key is None:
+            key = (cid, "calendar:" + str(c.get("source_id") or (title, c.get("due_at") or c.get("raw_due"))))
         due_at = c.get("due_at") or c.get("raw_due")
         if key in combined:
             existing = combined[key]
@@ -133,6 +140,9 @@ async def due_report_async(
     failed = [course_label(courses[cid]) for cid, b in books.items() if b.get("error") in (FORBIDDEN, NOT_FOUND)]
     if failed:
         notes.append(f"{', '.join(failed)}: gradebook not visible to students, skipped")
+    for cid, book in books.items():
+        if book.get("records_error"):
+            notes.append(f"{course_label(courses[cid])}: grades unavailable; item statuses unknown")
     entries = reconcile(books, calendar_items, courses)
     items = select(entries, window_filter, exclude_completed)
     overdue_hidden = 0
