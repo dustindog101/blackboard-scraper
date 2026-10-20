@@ -64,3 +64,18 @@ startup. Output destinations are validated before writes; a later receipt-file f
 preserves the real stdout result and save exit code. See the CLI reference for the
 exit-2/3/4 contract and the explicit final-status footer. These changes retain the
 existing human output except where the final status makes submission wording unsafe.
+
+## Shorthand and explicit retakes
+
+`--set` now creates the same internal ID-based changes list as file mode from a fresh
+runtime baseline, without file-age expiry. Letters follow bb's provider-order list,
+which may differ from Blackboard's shuffled display; no text matching is permitted.
+No duplicate save pipeline is introduced. [ADR-0007](0007-explicit-untimed-attempt-creation.md)
+supersedes this ADR's no-start rule only for explicit `--new-attempt`; never submitting
+and the narrow answer-PATCH allowlist remain unchanged.
+
+Verified answer types: multiple answer (select all); single choice (multiple choice
+with one answer, encoded by Ultra as `multipleanswer` with `answerSelectionLimit: 1`);
+and true/false (`eitherOr` / `true_false`). Essay, short answer, fill-in-the-blank,
+matching, ordering, calculated, file response, and anything else are unsupported:
+**answer in Blackboard**. Type support does not establish live acceptance of every clear case.

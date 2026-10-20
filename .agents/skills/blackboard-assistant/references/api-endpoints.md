@@ -17,3 +17,24 @@ student visibility restrictions, missing data and network failure. Use the share
 Gradable Item model rather than inferring completion from a raw discussion status.
 See [coding standards](../../../../docs/agents/coding-standards.md) and implementation
 in `core/gradebook.py` and `core/rest.py` for the maintained behavior.
+
+## Explicit answer saves and starts
+
+Observed save route: `PATCH /learn/api/v1/courses/{courseId}/gradebook/attempts/{attemptId}/assessment/answers/{questionAttemptId}`
+with only `questionType` and `givenAnswer`. No submit route is allowed.
+Shorthand maps bb's provider-order letters to stable choice IDs before using this pipeline.
+
+Static-JS-discovered, **UNVERIFIED live** creation route:
+`POST /learn/api/v1/courses/{courseId}/gradebook/columns/{columnId}/attempts`.
+Only explicit `--new-attempt` permits its fixed native-test IN_PROGRESS body.
+The HTTP creation adapter allows no other body/route, redirects or retries. Browser
+fallback uses shared candidate order and clicks the exact start button behind the
+same route/body allowlist. GET reconciles the complete attempt inventory and ID.
+See [protocol](../../../../docs/specs/save-draft-answers-protocol.md) and
+[ADR-0007](../../../../docs/adr/0007-explicit-untimed-attempt-creation.md).
+
+Verified answer types: multiple answer (select all); single choice (multiple choice
+with one answer, encoded by Ultra as `multipleanswer` with `answerSelectionLimit: 1`);
+and true/false (`eitherOr` / `true_false`). Essay, short answer, fill-in-the-blank,
+matching, ordering, calculated, file response, and anything else are unsupported:
+**answer in Blackboard**. Type support does not establish live acceptance of every clear case.

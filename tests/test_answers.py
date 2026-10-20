@@ -16,7 +16,9 @@ import urllib.request
 import pytest
 
 from core import assessment_answers as model, rest
-from scrapers import answers
+from scrapers import answers, answer_attempts as starts
+
+ORIGINAL_BROWSER_OPEN = answers.BrowserTransport._open
 
 NOW = datetime(2026, 10, 20, 16, 0, tzinfo=timezone.utc)
 ORIGIN = "https://blackboard.example.invalid"
@@ -1160,3 +1162,547 @@ def test_read_only_views_skip_safety_gate_but_writes_do_not(provider):
     with pytest.raises(model.AnswersRefusal):
         answers.load_state(match)
     assert provider.writes == []
+
+
+# Shorthand and explicit retakes use synthetic data only.
+
+
+@pytest.mark.parametrize("values,expected", [
+    (["1=a", "2=a,b,D", "3=f"], [["choice-c"], ["choice-c", "choice-a", "choice-b"], ["false"]]),
+    (["1=clear", "3=False"], [[], ["false"]]),
+    (["3=T"], [["true"]]), (["3=True"], [["true"]]),
+    (["3=A"], [["true"]]), (["3=B"], [["false"]]),
+])
+def test_set_translation_provider_order(state, values, expected):
+    doc = answers.export_doc(state)
+    doc["changes"] = model.set_changes(model.parse_sets(values), state["projection"])
+    assert [edit.after for edit in answers.prepare(doc, state)] == expected
+
+
+@pytest.mark.parametrize("values", [["1=A", "1=B"], ["1=Z"], ["1=A,B"], ["4=A"], ["9=A"],
+                                   ["0=A"], ["1="], ["1=A,A"], ["A=1"], ["1=A,,B"],
+                                   ["1=Same label"], ["3=True,T"], ["3=True,False"]])
+def test_set_invalid_never_writes(provider, capsys, values):
+    assert answers.run_cli(args(set=values, apply=True), {CID: "TEST100"}, [CID]) == 2
+    assert assert_one_json(capsys)["error"] == "invalid_input"
+    assert not provider.writes
+
+
+@pytest.mark.parametrize("other", ["file", "export"])
+def test_set_conflicting_modes_before_network(monkeypatch, capsys, other):
+    monkeypatch.setattr(answers, "resolve_target", lambda *_: pytest.fail("invalid flags must not read"))
+    assert answers.run_cli(args(set=["1=A"], **{other: "unused.json"}), {}, []) == 2
+    assert_one_json(capsys)
+
+
+def test_set_preview_and_apply_share_pipeline(provider, capsys, monkeypatch):
+    original = answers.apply
+    documents = []
+    def shared(doc, state, *args, **kwargs):
+        documents.append(deepcopy(doc))
+        return original(doc, state, *args, **kwargs)
+    monkeypatch.setattr(answers, "apply", shared)
+    assert answers.run_cli(args(set=["1=b", "2=A,D", "3=False"]), {CID: "TEST100"}, [CID]) == 0
+    assert assert_one_json(capsys)["outcome"] == "preview"
+    assert not provider.writes
+    assert answers.run_cli(args(set=["1=b", "2=A,D", "3=False"], apply=True), {CID: "TEST100"}, [CID]) == 0
+    result = assert_one_json(capsys)
+    assert result["outcome"] == "saved_verified"
+    assert provider.patch_count == 3
+    assert documents[0]["changes"] == [change(), change(MULTI, ["choice-c", "choice-b"]), change(TF, ["false"])]
+    # Runtime baselines never use file expiry; the rest of prepare remains shared.
+    monkeypatch.setattr(answers, "_now", lambda: NOW + timedelta(minutes=20))
+    state = answers.load_state(answers.resolve_target(AID, [CID], {CID: "TEST100"}))
+    assert answers.prepare(documents[0], state)
+    documents[0].pop("_runtime_baseline")
+    with pytest.raises(model.AnswersRefusal, match="15 minutes"):
+        answers.prepare(documents[0], state)
+
+
+def test_set_has_fingerprint_and_midrun_baseline_guards(provider, monkeypatch, capsys):
+    def edit(fake):
+        if fake.read_count == 2:
+            blocks(fake.attempt)[1]["givenAnswer"] = [True, False, False, False]
+    provider.on_read = edit
+    assert answers.run_cli(args(set=["1=B"], apply=True), {CID: "TEST100"}, [CID]) == 3
+    assert assert_one_json(capsys)["error"] == "conflict"
+    assert provider.patch_count == 0
+
+
+def test_letters_in_current_preview_apply_and_unchanged_collapse(state):
+    doc = answers.export_doc(state)
+    doc["changes"] = [change(), change(MULTI, [], "clear"), change(TF, ["false"])]
+    current = answers.format_current(state)
+    preview = answers.preview(doc, state)
+    by_id = {q["question_attempt_id"]: q for q in state["projection"]["questions"]}
+    text = answers.format_result(preview, by_id)
+    assert "( ) A. Same label" in current
+    assert "[ ] A. Same label" in current
+    assert "( ) A. True" in current and "( ) B. False" in current
+    assert "(•) B. Same label" in text and "(•) B. False" in text
+    assert "[ ] A. Same label" not in text  # unchanged multi question collapsed
+    preview["outcome"] = "saved_verified"
+    for q in preview["questions"]:
+        if q["status"] == "change":
+            q["outcome"] = "saved_verified"
+    assert "(•) B. Same label" in answers.format_result(preview, by_id)
+    assert [model.choice_letter(i) for i in (0, 25, 26, 27, 701)] == ["A", "Z", "AA", "AB", "ZZ"]
+
+
+@pytest.fixture
+def retake(provider, monkeypatch):
+    provider.attempt["status"] = "COMPLETED"
+    provider.settings["attemptsAllowed"] = 3
+    match = answers.resolve_target(AID, [CID], {CID: "TEST100"})
+    created = {}
+    dispatched = []
+    original_get = provider.get_json
+    original_patch = provider.patch
+    def get(path, **kwargs):
+        for aid, attempt in created.items():
+            if path == f"/learn/api/v1/courses/{CID}/gradebook/attempts/{aid}?expand=toolAttemptDetail":
+                provider.calls.append(("GET", path, None))
+                return deepcopy(attempt)
+        return original_get(path, **kwargs)
+    def create(path, body, dispatch):
+        starts.validate_start(path, body)
+        dispatch()
+        dispatched.append((path, body))
+        aid = f"_{930001 + len(created)}_1"
+        attempt = raw_attempt()
+        attempt["id"] = aid
+        created[aid] = attempt
+        provider.attempts.append({"id": aid})
+        return {"id": aid}
+    def patch(request, **kwargs):
+        # Reuse the existing fake answer persistence for a newly created attempt.
+        if created:
+            previous = provider.attempt
+            provider.attempt = next(iter(created.values()))
+            try:
+                return original_patch(request, **kwargs)
+            finally:
+                provider.attempt = previous
+        return original_patch(request, **kwargs)
+    monkeypatch.setattr(answers, "_read_json", get)
+    monkeypatch.setattr(answers, "_open_no_redirect", patch)
+    monkeypatch.setattr(starts, "http_start", create)
+    return SimpleNamespace(provider=provider, match=match, created=created, dispatched=dispatched, create=create)
+
+
+def test_new_attempt_confirmed_and_read_only_view(retake, capsys):
+    assert answers.run_cli(args(new_attempt=True), {CID: "TEST100"}, [CID]) == 0
+    result = assert_one_json(capsys)
+    assert result["new_attempt"]["outcome"] == "created_verified"
+    assert result["target"]["attempt_id"] == "_930001_1"
+    assert result["new_attempt"]["dispatched"] is True
+    assert len(retake.dispatched) == 1
+    assert not retake.provider.writes
+    assert result["submitted"] is False
+
+
+def test_new_attempt_set_apply_shared_pipeline(retake, capsys):
+    assert answers.run_cli(args(new_attempt=True, set=["1=B", "2=A,D", "3=F"], apply=True), {CID: "TEST100"}, [CID]) == 0
+    result = assert_one_json(capsys)
+    assert result["outcome"] == "saved_verified"
+    assert result["new_attempt"]["outcome"] == "created_verified"
+    assert retake.provider.patch_count == 3
+    assert len(retake.dispatched) == 1
+
+
+@pytest.mark.parametrize("values", [["1=A,B"], ["1=Z"], ["4=A"], ["7=A"], ["1=A", "1=B"]])
+def test_invalid_set_refuses_before_start(retake, capsys, values):
+    assert answers.run_cli(args(new_attempt=True, set=values, apply=True), {CID: "TEST100"}, [CID]) == 2
+    assert_one_json(capsys)
+    assert not retake.dispatched
+
+
+def test_new_attempt_uses_active_without_start(provider, capsys, monkeypatch):
+    monkeypatch.setattr(starts, "http_start", lambda *_: pytest.fail("must use active"))
+    assert answers.run_cli(args(new_attempt=True, set=["1=A"], apply=True), {CID: "TEST100"}, [CID]) == 0
+    output = capsys.readouterr()
+    assert "already IN_PROGRESS" in output.err
+    assert json.loads(output.out)["new_attempt"]["outcome"] == "existing"
+    assert provider.patch_count == 1
+
+
+@pytest.mark.parametrize("field,value", [("attemptsAllowed", None), ("attemptsAllowed", "3"),
+                                         ("attemptsAllowed", -1), ("attemptsAllowed", 0),
+                                         ("attemptsAllowed", 1), ("attemptsAllowed", True),
+                                         ("timeLimit", 10), ("isPasswordRequired", True),
+                                         ("isSecureBrowserRequiredToTake", True), ("isWebcamRequired", True),
+                                         ("isIpFilterEnabled", True), ("isCompletionForced", True),
+                                         ("isBacktrackingProhibited", True)])
+def test_new_attempt_preconditions(retake, field, value, capsys):
+    retake.provider.settings[field] = value
+    assert answers.run_cli(args(new_attempt=True), {CID: "TEST100"}, [CID]) == 3
+    assert_one_json(capsys)
+    assert not retake.dispatched
+
+
+def test_new_attempt_provider_attemptcount_mapping_and_contradiction(retake):
+    retake.provider.settings.pop("attemptsAllowed")
+    retake.provider.settings["attemptCount"] = 3
+    starts.ensure_attempt(retake.match, lambda _: None)
+    assert len(retake.dispatched) == 1
+
+
+@pytest.mark.parametrize("due", [NOW - timedelta(seconds=1), NOW + timedelta(seconds=119)])
+def test_new_attempt_past_due_or_near_cutoff(retake, due, capsys):
+    retake.provider.columns[0]["grading"]["due"] = due.isoformat()
+    assert answers.run_cli(args(new_attempt=True), {CID: "TEST100"}, [CID]) == 3
+    assert_one_json(capsys)
+    assert not retake.dispatched
+
+
+def test_new_attempt_rechecks_after_browser_startup(retake):
+    def unavailable(*_):
+        raise answers.NotDispatched("no token")
+    class Browser:
+        def __init__(self, progress):
+            pass
+        def start(self, match, path, body, dispatch):
+            retake.provider.settings["isPasswordRequired"] = True
+            dispatch()
+        def close(self):
+            pass
+    with pytest.raises(model.AnswersRefusal, match="password"):
+        starts.ensure_attempt(retake.match, lambda _: None, http=unavailable, browser_factory=Browser)
+    assert not retake.dispatched
+
+
+def test_start_http_then_browser_order_and_cleanup(retake):
+    calls = []
+    def unavailable(*_):
+        calls.append("http")
+        raise answers.NotDispatched("no token")
+    class Browser:
+        label = "installed browser"
+        def __init__(self, progress):
+            calls.append("browser")
+        def start(self, match, path, body, dispatch):
+            retake.create(path, body, dispatch)
+        def close(self):
+            calls.append("close")
+    state, receipt = starts.ensure_attempt(retake.match, lambda _: None, http=unavailable, browser_factory=Browser)
+    assert calls == ["http", "browser", "close"]
+    assert receipt["transport"] == "installed browser"
+    assert state["target"]["attempt_id"] == "_930001_1"
+
+
+@pytest.mark.parametrize("failure", [401, 403, 404, 429, 500, "timeout", "malformed"])
+def test_start_dispatched_failures_never_fallback_or_retry(retake, failure, monkeypatch, capsys):
+    calls = []
+    def failed(path, body, dispatch):
+        dispatch()
+        calls.append(path)
+        if failure == "timeout":
+            raise TimeoutError("synthetic")
+        if failure == "malformed":
+            raise ValueError("synthetic")
+        raise urllib.error.HTTPError(ORIGIN + path, failure, "synthetic", {}, None)
+    monkeypatch.setattr(starts, "http_start", failed)
+    monkeypatch.setattr(starts, "BrowserStarter", lambda *_: pytest.fail("never retry a dispatched start"))
+    assert answers.run_cli(args(new_attempt=True), {CID: "TEST100"}, [CID]) == 4
+    receipt = assert_one_json(capsys)["new_attempt"]
+    assert receipt["outcome"] == "unknown" and receipt["dispatched"] is True
+    assert len(calls) == 1
+
+
+def test_start_lost_ack_reconciles_get_without_retry(retake):
+    def lost(path, body, dispatch):
+        retake.create(path, body, dispatch)
+        raise TimeoutError("synthetic ack lost")
+    state, receipt = starts.ensure_attempt(retake.match, lambda _: None, http=lost)
+    assert receipt["outcome"] == "created_verified"
+    assert receipt["acknowledgment_error"] == "TimeoutError"
+    assert len(retake.dispatched) == 1
+    assert state["attempt"]["status"] == "IN_PROGRESS"
+
+
+def test_start_ambiguous_double_attempt_is_exit4(retake, monkeypatch, capsys):
+    def double(path, body, dispatch):
+        retake.create(path, body, dispatch)
+        # Simulate an outside writer creating another attempt; no second CLI dispatch.
+        retake.create(path, body, lambda: None)
+    monkeypatch.setattr(starts, "http_start", double)
+    assert answers.run_cli(args(new_attempt=True), {CID: "TEST100"}, [CID]) == 4
+    assert assert_one_json(capsys)["error"] == "start_unknown"
+
+
+def test_start_incomplete_inventory_refuses(retake, monkeypatch):
+    old = answers._read_json
+    def paged(path, **kwargs):
+        data = old(path, **kwargs)
+        if path.endswith("/attempts"):
+            data["paging"] = {"nextPage": "/more"}
+        return data
+    monkeypatch.setattr(answers, "_read_json", paged)
+    with pytest.raises(model.AnswersRefusal, match="incomplete"):
+        starts.ensure_attempt(retake.match, lambda _: None)
+    assert not retake.dispatched
+
+
+def test_start_cancel_and_local_lock_before_dispatch(retake):
+    import threading
+    event = threading.Event()
+    event.set()
+    with pytest.raises(model.AnswersRefusal, match="Cancelled"):
+        starts.ensure_attempt(retake.match, lambda _: None, cancel_event=event)
+    with answers.AttemptLock("start-" + CID + "-" + AID):
+        with pytest.raises(model.AnswersRefusal, match="Another bb"):
+            starts.ensure_attempt(retake.match, lambda _: None)
+    assert not retake.dispatched
+
+
+@pytest.mark.parametrize("suffix", ["/submit", "/finalize", "?submit=true", "/", "/assessment/answers/" + SINGLE])
+def test_start_allowlist_cannot_submit(suffix):
+    path = f"/learn/api/v1/courses/{CID}/gradebook/columns/{COL}/attempts"
+    with pytest.raises(model.AnswersInputError):
+        starts.validate_start(path + suffix, starts._START_BODY)
+    for key in ("submitted", "score", "finished", "submit"):
+        with pytest.raises(model.AnswersInputError):
+            starts.validate_start(path, {**starts._START_BODY, key: True})
+    with pytest.raises(model.AnswersInputError):
+        starts.validate_start(path, {**starts._START_BODY, "status": "COMPLETED"})
+    with pytest.raises(AssertionError):
+        answers._validate_write(path, starts._START_BODY)
+
+
+def test_http_start_exact_request_and_missing_token(monkeypatch):
+    path = f"/learn/api/v1/courses/{CID}/gradebook/columns/{COL}/attempts"
+    seen = []
+    def open_request(req, **kwargs):
+        seen.append(req)
+        assert req.method == "POST"
+        assert req.full_url == ORIGIN + path
+        assert json.loads(req.data) == starts._START_BODY
+        return b'{"id":"_930001_1"}'
+    monkeypatch.setattr(answers, "_open_no_redirect", open_request)
+    dispatched = []
+    starts.http_start(path, starts._START_BODY, lambda: dispatched.append(True))
+    assert dispatched == [True] and len(seen) == 1
+    monkeypatch.setattr(rest, "xsrf_token", lambda: None)
+    with pytest.raises(answers.NotDispatched):
+        starts.http_start(path, starts._START_BODY, lambda: pytest.fail("missing token"))
+    assert len(seen) == 1
+
+
+def test_answers_parser_shorthand_new_attempt_and_help(capsys):
+    import main
+    parsed = main._parse_args(["answers", "Synthetic", "-c", "TEST100", "--set", "1=A", "--set", "3=F", "--apply", "--new-attempt"])
+    assert parsed.set == ["1=A", "3=F"] and parsed.new_attempt and parsed.apply
+    with pytest.raises(SystemExit) as exc:
+        main._parse_args(["answers", "Synthetic", "--new-attempt", "--help"])
+    assert exc.value.code == 0
+    assert "shuffled" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exc:
+        main._parse_args(["answers", "Synthetic", "--set", "1=A", "--file", "unused"])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("case", ["start", "submit", "wrong_body", "two_starts", "time_warning", "access_code"])
+def test_browser_start_click_and_network_allowlist(retake, monkeypatch, case):
+    path = f"/learn/api/v1/courses/{CID}/gradebook/columns/{COL}/attempts"
+    events = []
+    class Locator:
+        def __init__(self, visible=False):
+            self.visible = visible
+            self.first = self
+        def count(self):
+            return int(self.visible)
+        def or_(self, other):
+            return self if self.visible else other
+        def nth(self, i):
+            return self
+        def is_visible(self):
+            return self.visible
+        def wait_for(self, **kwargs):
+            pass
+        def click(self, **kwargs):
+            events.append("click")
+            if case in ("time_warning", "access_code"):
+                pytest.fail("warning must refuse before click")
+            request = SimpleNamespace(method="POST", url=ORIGIN + path,
+                                      post_data_json=deepcopy(starts._START_BODY))
+            if case == "submit":
+                request.url += "/submit"
+            if case == "wrong_body":
+                request.post_data_json["status"] = "COMPLETED"
+            route = SimpleNamespace(request=request, continue_=lambda: events.append("continue"),
+                                    abort=lambda: events.append("abort"))
+            context.handler(route)
+            if case == "two_starts":
+                context.handler(route)
+                route.request.url = ORIGIN + path + "/submit"
+                context.handler(route)
+    class Page:
+        url = ORIGIN + "/ultra/stream"
+        def goto(self, url, **kwargs):
+            self.url = url
+        def expect_response(self, predicate, **kwargs):
+            class Pending:
+                def __enter__(self):
+                    return self
+                def __exit__(self, *_):
+                    pass
+            return Pending()
+        def get_by_role(self, role, **kwargs):
+            assert role in ("link", "button")  # live Ultra renders "Start attempt 2" as a link
+            assert kwargs["name"].fullmatch("Start new attempt")
+            assert kwargs["name"].fullmatch("Start attempt 2")
+            assert not kwargs["name"].fullmatch("Submit")
+            return Locator(role == "link")
+        def locator(self, selector):
+            return Locator(case in ("time_warning", "access_code"))
+        def get_by_text(self, *args):
+            return Locator(False)
+    class Context:
+        def route(self, pattern, handler):
+            self.handler = handler
+        def unroute(self, pattern, handler):
+            events.append("unroute")
+    context = Context()
+    browser = starts.BrowserStarter(lambda _: None)
+    browser._ctx, browser._page = context, Page()
+    monkeypatch.setattr(browser, "_open", lambda: events.append("open"))
+    dispatches = []
+    def invoke():
+        return browser.start(retake.match, path, starts._START_BODY, lambda: dispatches.append(True))
+    if case in ("time_warning", "access_code", "submit"):
+        with pytest.raises(model.AnswersRefusal):
+            invoke()
+        assert not dispatches
+    elif case == "wrong_body":
+        with pytest.raises(model.AnswersInputError):
+            invoke()
+        assert not dispatches
+    else:
+        invoke()
+        assert dispatches == [True]
+        assert events.count("continue") == 1
+        if case == "two_starts":
+            assert events.count("abort") == 2
+    assert "unroute" not in events
+    # Late requests remain blocked after start() returns or raises.
+    late = SimpleNamespace(request=SimpleNamespace(method="POST", url=ORIGIN + path,
+                                                   post_data_json=deepcopy(starts._START_BODY)),
+                           continue_=lambda: pytest.fail("late start escaped the guard"),
+                           abort=lambda: events.append("late aborted"))
+    context.handler(late)
+    assert events[-1] == "late aborted"
+
+
+def test_new_attempt_no_history_start_alone_and_set_refusal(retake, capsys):
+    retake.provider.attempts = []
+    assert answers.run_cli(args(new_attempt=True, set=["1=A"], apply=True), {CID: "TEST100"}, [CID]) == 3
+    assert assert_one_json(capsys)["error"] == "questions_unavailable"
+    assert not retake.dispatched
+    assert answers.run_cli(args(new_attempt=True), {CID: "TEST100"}, [CID]) == 0
+    assert assert_one_json(capsys)["new_attempt"]["outcome"] == "created_verified"
+
+
+def test_new_attempt_count_changes_after_browser_startup(retake):
+    def unavailable(*_):
+        raise answers.NotDispatched("no token")
+    class Browser:
+        def __init__(self, progress):
+            pass
+        def start(self, match, path, body, dispatch):
+            retake.provider.settings["attemptsAllowed"] = 1
+            dispatch()
+        def close(self):
+            pass
+    with pytest.raises(model.AnswersRefusal, match="No attempts remaining"):
+        starts.ensure_attempt(retake.match, lambda _: None, http=unavailable, browser_factory=Browser)
+    assert not retake.dispatched
+
+
+def test_new_attempt_human_output_and_out_receipt(retake, capsys, tmp_path):
+    out = tmp_path / "receipt.json"
+    assert answers.run_cli(args(new_attempt=True, json=False, out=str(out)), {CID: "TEST100"}, [CID]) == 0
+    text = capsys.readouterr().out
+    assert "Started attempt _930001_1" in text
+    assert "Read only; nothing was changed" not in text
+    assert json.loads(out.read_text())["new_attempt"]["outcome"] == "created_verified"
+
+
+def test_new_attempt_answer_failure_keeps_start_receipt_exit4(retake, monkeypatch, capsys):
+    def refuse(*args, **kwargs):
+        raise model.AnswersRefusal("unsafe_settings", "settings changed after start")
+    monkeypatch.setattr(answers, "apply", refuse)
+    assert answers.run_cli(args(new_attempt=True, set=["1=B"], apply=True), {CID: "TEST100"}, [CID]) == 4
+    receipt = assert_one_json(capsys)
+    assert receipt["new_attempt"]["outcome"] == "created_verified"
+    assert receipt["new_attempt"]["attempt_id"] == "_930001_1"
+    assert not retake.provider.writes
+
+
+def test_new_attempt_explicit_flag_required(retake, capsys):
+    assert answers.run_cli(args(set=["1=A"], apply=True), {CID: "TEST100"}, [CID]) == 3
+    assert assert_one_json(capsys)["error"] == "no_active_attempt"
+    assert not retake.dispatched
+
+
+def test_new_attempt_conflicting_attemptcount_refuses(retake, capsys):
+    retake.provider.settings["attemptCount"] = 2
+    assert answers.run_cli(args(new_attempt=True), {CID: "TEST100"}, [CID]) == 3
+    assert assert_one_json(capsys)["error"] == "unknown_attempt_count"
+    assert not retake.dispatched
+
+
+def test_start_browser_uses_shared_launcher_and_disables_service_workers(monkeypatch):
+    from core import browser as launcher
+    from playwright import sync_api
+    calls = []
+    page = SimpleNamespace(url=ORIGIN + "/ultra/stream", goto=lambda *args, **kwargs: None)
+    context = SimpleNamespace(pages=[page], close=lambda: None)
+    pw = SimpleNamespace(stop=lambda: None)
+    monkeypatch.setattr(sync_api, "sync_playwright", lambda: SimpleNamespace(start=lambda: pw))
+    def launch(pw_arg, directory, **kwargs):
+        calls.append(kwargs)
+        assert pw_arg is pw
+        return context, {"name": "Synthetic installed browser"}
+    monkeypatch.setattr(launcher, "launch_persistent_context", launch)
+    browser = starts.BrowserStarter(lambda _: None)
+    ORIGINAL_BROWSER_OPEN(browser)  # inherited launcher; dependencies fully mocked
+    assert calls == [{"headless": True, "service_workers": "block"}]
+    assert browser.label == "browser (Synthetic installed browser)"
+    browser.close()
+
+
+def test_unknown_timer_enum_refuses(retake, capsys):
+    retake.provider.settings.pop("timeLimit")
+    retake.provider.settings["timerCompletion"] = "UNKNOWN_FUTURE_ENUM"
+    assert answers.run_cli(args(new_attempt=True), {CID: "TEST100"}, [CID]) == 3
+    assert assert_one_json(capsys)["error"] == "unsafe_settings"
+    assert not retake.dispatched
+
+
+def test_start_unknown_receipt_persisted_to_out(retake, monkeypatch, capsys, tmp_path):
+    def lost(path, body, dispatch):
+        dispatch()
+        raise TimeoutError("synthetic")
+    monkeypatch.setattr(starts, "http_start", lost)
+    path = tmp_path / "unknown.json"
+    assert answers.run_cli(args(new_attempt=True, out=str(path)), {CID: "TEST100"}, [CID]) == 4
+    result = assert_one_json(capsys)
+    assert json.loads(path.read_text()) == result
+    assert result["new_attempt"]["dispatched"] is True
+
+
+@pytest.mark.parametrize("path,expected", [
+    ("/ultra/courses/_1_1/assessment/_2_1/overview?courseId=_1_1", ("_1_1", "_2_1")),
+    ("/ultra/courses/_1_1/assessment/_2_1/attempt/_9_1?courseId=_1_1", ("_1_1", "_2_1")),
+    ("/ultra/courses/_1_1/outline/assessment/test/_2_1?courseId=_1_1", ("_1_1", "_2_1")),
+    ("/ultra/courses/_1_1/outline?contentId=_2_1", ("_1_1", "_2_1")),
+])
+def test_parse_target_url(path, expected):
+    assert answers.parse_target_url(answers.BLACKBOARD_BASE + path) == expected
+    assert answers.parse_target_url("J#5") is None
+
+
+def test_parse_target_url_refuses_foreign_or_incomplete():
+    for url in ("https://evil.example/ultra/courses/_1_1/assessment/_2_1", answers.BLACKBOARD_BASE + "/ultra/stream"):
+        with pytest.raises(model.AnswersInputError):
+            answers.parse_target_url(url)

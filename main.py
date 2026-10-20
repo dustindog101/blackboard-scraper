@@ -918,7 +918,12 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
         help="Save quiz answers without submitting",
         description=(
             "Show, export, preview or save answers in an existing in-progress test attempt.\n"
-            "Never starts or submits an attempt. Only --apply changes anything in Blackboard."
+            "Never submits. --apply saves answers; --new-attempt explicitly starts an eligible untimed attempt.\n"
+            "Letters follow bb's list, which may differ from Blackboard's shuffled display.\n"
+            "Verified: multiple answer (select all), single choice (multipleanswer, selection limit 1), "
+            "true/false (eitherOr/true_false).\n"
+            "Essay, short answer, fill-in-the-blank, matching, ordering, calculated, file response "
+            "and other types: answer in Blackboard."
         ),
         epilog=(
             "Examples:\n"
@@ -928,7 +933,7 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
             '  bb answers "J#5" -c ENGL --file j5.json --apply   # save, verify, leave unsubmitted'
         ),
     )
-    answers_p.add_argument("target", metavar="TARGET", help="Test title (or part of it) or ID")
+    answers_p.add_argument("target", metavar="TARGET", help="Test title or part of it (e.g. 'J#5'), its ID, or its Blackboard URL")
     answers_p.add_argument("--course", "-c", help="Course code or ID the test is in")
     answers_p.add_argument("--json", action="store_true", help="Print one JSON result to stdout (progress goes to stderr)")
     answers_p.add_argument("--out", metavar="FILE", help="Also write the JSON result to FILE (owner-only)")
@@ -936,7 +941,9 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
     answers_mode = answers_p.add_mutually_exclusive_group()
     answers_mode.add_argument("--export", metavar="FILE", help="Write the current questions and answers to FILE (changes: [])")
     answers_mode.add_argument("--file", metavar="FILE", help="Read changes from FILE and preview them")
-    answers_p.add_argument("--apply", action="store_true", help="With --file: save the changes (never submits)")
+    answers_mode.add_argument("--set", action="append", metavar="N=A,B", help="Preview choices by bb number and letters; repeatable; True/False/T/F or clear also accepted")
+    answers_p.add_argument("--apply", action="store_true", help="With --file or --set: save the changes (never submits)")
+    answers_p.add_argument("--new-attempt", action="store_true", help="Explicitly start an eligible untimed attempt, or use an existing in-progress attempt")
     answers_p.add_argument("--attempt", metavar="ID", help="Pick one of several in-progress attempts")
     answers_p.add_argument("--overwrite", action="store_true", help="Allow replacing an existing --export/--out file")
 

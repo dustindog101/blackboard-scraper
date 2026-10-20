@@ -1,6 +1,6 @@
 """`bb answers`: export, preview and save answers in an existing Assessment Attempt.
 
-Never starts, submits or finalizes an attempt. Protocol notes: docs/specs/save-draft-answers-protocol.md.
+Never submits or finalizes. Only explicit --new-attempt can start an eligible attempt. Protocol notes: docs/specs/save-draft-answers-protocol.md.
 
 Transport order mirrors login (ADR-0002): HTTP REST first; if HTTP has no persistence
 (no XSRF token before dispatch, or an explicit 401 rejection), the same allowlisted PATCH is sent from the
@@ -29,7 +29,8 @@ from typing import Any, Callable, Dict, List, Optional
 from core import rest
 from core.assessment_answers import (
     SCHEMA_VERSION, AnswersInputError, AnswersRefusal, PlannedEdit, build_export,
-    check_snapshot_age, encode_given, fingerprint, parse_file, plan_changes, project_attempt,
+    check_snapshot_age, choice_letter, encode_given, fingerprint, parse_file, parse_sets,
+    plan_changes, project_attempt, set_changes,
 )
 from core.config import BLACKBOARD_BASE, SESSION_DIR
 
@@ -139,15 +140,18 @@ def _safe_due(test: Dict[str, Any]) -> Optional[str]:
         # Observed on every untimed Ultra test in this account (25/25, 2026-10-20): no timeLimit key and a
         # timerCompletion enum. bb assignment already treats a present timeLimit as "timed". Neither signal → unknown.
         has_flag = any(settings.get(k) is False for k in timer_keys)
-        timer_unknown |= not (has_flag or isinstance(settings.get("timerCompletion"), str))
+        timer_unknown |= not (has_flag or settings.get("timerCompletion") == "CONTINUAL")
         timed = False
     timed |= any(settings.get(k) is True for k in timer_keys)
     if timer_unknown:
         raise AnswersRefusal("unsafe_settings", "Test timer settings are unknown; refusing to save.")
+    location = settings.get("restrictLocation")
+    if location is not None and not isinstance(location, dict):
+        raise AnswersRefusal("unsafe_settings", "Test location restrictions are unknown; refusing.")
     risky = [label for label, active in [
         ("timed", timed), ("password protected", settings[required[0]]),
         ("secure browser", settings[required[1]]), ("webcam/proctored", settings[required[2]]),
-        ("IP restricted", settings[required[3]] or (settings.get("restrictLocation") or {}).get("selectedRestrictType") not in (None, "NONE")),
+        ("IP restricted", settings[required[3]] or (location or {}).get("selectedRestrictType") not in (None, "NONE")),
         ("forced completion", settings[required[4]]), ("no backtracking", settings[required[5]])] if active]
     if risky:
         raise AnswersRefusal("unsafe_settings", "Refusing: this test is " + ", ".join(risky) + ". Answer it yourself in Blackboard.")
@@ -169,8 +173,34 @@ def _test_from_content(content: dict) -> dict:
     return ((content.get("contentDetail") or {}).get("resource/x-bb-asmt-test-link") or {}).get("test") or {}
 
 
+_URL_COURSE = re.compile(r"/courses/(_\d+_\d+)")
+_URL_ITEM = re.compile(r"/(?:assessment|test|outline/assessment(?:/test)?)/(_\d+_\d+)|[?&](?:contentId|content_id)=(_\d+_\d+)")
+
+
+def parse_target_url(target: str) -> Optional[tuple]:
+    """(course_id, content_id) from a pasted Blackboard URL, None if TARGET is not a URL."""
+    if not re.match(r"https?://", target.strip(), re.I):
+        return None
+    from urllib.parse import urlsplit
+    parts, base = urlsplit(target.strip()), urlsplit(BLACKBOARD_BASE)
+    if parts.netloc.lower() != base.netloc.lower():
+        raise AnswersInputError(f"that URL is not on {base.netloc}")
+    course = _URL_COURSE.search(parts.path)
+    item = _URL_ITEM.search(parts.path + ("?" + parts.query if parts.query else ""))
+    if not course or not item:
+        raise AnswersInputError("could not find a course and test ID in that URL; paste the test's page URL or use its title")
+    return course.group(1), item.group(1) or item.group(2)
+
+
 def resolve_target(target: str, course_ids: List[str], courses: Dict[str, str]) -> Dict[str, Any]:
-    """Exactly one native Ultra test across the given courses, or an ambiguity refusal."""
+    """Exactly one native Ultra test across the given courses, or an ambiguity refusal.
+
+    TARGET may be a title (or part of it, e.g. "J#5"), a content or gradebook-column ID, or a pasted
+    Blackboard URL (the course and test IDs are read from it; the host must be this Blackboard).
+    """
+    parsed = parse_target_url(target)
+    if parsed:
+        course_ids, target = [parsed[0]], parsed[1]
     matches = []
     key = target.casefold().strip()
     for cid in course_ids:
@@ -201,7 +231,7 @@ def resolve_target(target: str, course_ids: List[str], courses: Dict[str, str]) 
     return m
 
 
-def load_state(match: Dict[str, Any], attempt_id: Optional[str] = None, check_safety: bool = True) -> Dict[str, Any]:
+def load_inventory(match: Dict[str, Any], check_safety: bool = True, complete: bool = False) -> Dict[str, Any]:
     """Fresh read of user, test settings, eligible attempt and its questions.
 
     check_safety=False is for read-only views (show/export): they never write, and apply re-checks before dispatch.
@@ -214,28 +244,60 @@ def load_state(match: Dict[str, Any], attempt_id: Optional[str] = None, check_sa
     else:
         due = (_test_from_content(content).get("gradingColumn") or {}).get("dueDate") or match.get("due")
     grades = _get(f"/learn/api/v1/courses/{cid}/gradebook/grades?userId={me['id']}&limit=200", "your grades")
+    if complete and (not isinstance(grades.get("results"), list) or (grades.get("paging") or {}).get("nextPage")
+                     or any(not isinstance(g, dict) for g in grades["results"])):
+        raise AnswersRefusal("unknown_attempt_count", "Grade inventory incomplete; refusing to start.")
     grade = next((g for g in grades.get("results", []) if g.get("columnId") == match["column_id"]), None)
     attempts: List[Dict[str, Any]] = []
     if grade:
         data = _get(f"/learn/api/v1/courses/{cid}/gradebook/columns/{match['column_id']}/grades/{grade['id']}/attempts",
                     "your attempts")
         attempts = data.get("results", []) if isinstance(data, dict) else []
-        if not attempts:
+        if complete:
+            if (not isinstance(data, dict) or not isinstance(data.get("results"), list)
+                    or (data.get("paging") or {}).get("nextPage")
+                    or any(not isinstance(entry, dict) for entry in data["results"])):
+                raise AnswersRefusal("unknown_attempt_count", "Attempt inventory incomplete; refusing to start.")
+            known = {grade.get("firstAttemptId"), grade.get("lastAttemptId")} - {None}
+            if not known <= {a.get("id") for a in attempts}:
+                raise AnswersRefusal("unknown_attempt_count", "Attempt inventory contradicts grade; refusing to start.")
+        if not attempts and not complete:
             ids = {grade.get("firstAttemptId"), grade.get("lastAttemptId")} - {None}
             attempts = [{"id": i} for i in ids]
+    details = []
+    seen = set()
+    for entry in attempts:
+        attempt_id = entry.get("id")
+        if not isinstance(attempt_id, str) or not re.fullmatch(_ID, attempt_id) or attempt_id in seen:
+            raise AnswersRefusal("unknown_attempt_count", "Missing or duplicate attempt ID.")
+        seen.add(attempt_id)
+        detail = _get(f"/learn/api/v1/courses/{cid}/gradebook/attempts/{attempt_id}?expand=toolAttemptDetail", "the attempt")
+        if complete and (detail.get("id") != attempt_id or detail.get("userId") != me["id"] or detail.get("courseId") != cid
+                         or detail.get("status") not in {"IN_PROGRESS", "COMPLETED", "GRADED", "NEEDS_GRADING", "SUBMITTED"}):
+            raise AnswersRefusal("unknown_attempt_count", "Attempt identity/status unknown; refusing to start.")
+        details.append(detail)
+    return {"me": me, "content": content, "due": due, "attempts": details}
+
+
+def load_state(match: Dict[str, Any], attempt_id: Optional[str] = None, check_safety: bool = True) -> Dict[str, Any]:
+    inventory = load_inventory(match, check_safety=check_safety)
+    return state_from_inventory(match, inventory, attempt_id)
+
+
+def state_from_inventory(match, inventory, attempt_id=None):
+    cid, aid = match["course_id"], match["assessment_id"]
+    me, content, due = inventory["me"], inventory["content"], inventory["due"]
+    attempts = inventory["attempts"]
     if attempt_id:
         attempts = [a for a in attempts if a.get("id") == attempt_id]
         if not attempts:
             raise AnswersRefusal("attempt_not_found", f"Attempt {attempt_id} is not yours on this test.")
 
-    in_progress = []
-    for a in attempts:
-        detail = _get(f"/learn/api/v1/courses/{cid}/gradebook/attempts/{a['id']}?expand=toolAttemptDetail", "the attempt")
-        if detail.get("status") == "IN_PROGRESS" and detail.get("userId") == me["id"] and detail.get("courseId") == cid:
-            in_progress.append(detail)
+    in_progress = [a for a in attempts if a.get("status") == "IN_PROGRESS"
+                   and a.get("userId") == me["id"] and a.get("courseId") == cid]
     if not in_progress:
-        raise AnswersRefusal("no_active_attempt", "No in-progress attempt. Open the test in Blackboard first; "
-                             "this command never starts one.")
+        raise AnswersRefusal("no_active_attempt", "No in-progress attempt. Open the test in Blackboard first, "
+                             "or explicitly use --new-attempt for an eligible untimed test.")
     if len(in_progress) > 1:
         raise AnswersRefusal("multiple_attempts", "More than one in-progress attempt. Pass --attempt ID.",
                              attempts=[a["id"] for a in in_progress])
@@ -349,7 +411,8 @@ class BrowserTransport:
             from playwright.sync_api import sync_playwright
             from core.browser import launch_persistent_context
             self._pw = sync_playwright().start()
-            self._ctx, spec = launch_persistent_context(self._pw, SESSION_DIR, headless=True)
+            self._ctx, spec = launch_persistent_context(self._pw, SESSION_DIR, headless=True,
+                                                       **getattr(self, "launch_options", {}))
             self.label = f"browser ({spec.get('name') or spec.get('channel') or 'playwright'})"
             cookie_file = SESSION_DIR / "cookies.json"
             if cookie_file.exists():
@@ -511,7 +574,8 @@ def _check_binding(doc: Dict[str, Any], state: Dict[str, Any]) -> None:
 
 def prepare(doc: Dict[str, Any], state: Dict[str, Any]) -> List[PlannedEdit]:
     _check_binding(doc, state)
-    check_snapshot_age(doc, _now())
+    if not doc.get("_runtime_baseline"):
+        check_snapshot_age(doc, _now())
     return plan_changes(doc, state["projection"], state["sha"])
 
 
@@ -818,7 +882,7 @@ def _clock() -> str:
 
 
 def _unsupported_lines(unsupported: List[Dict[str, Any]]) -> List[str]:
-    return [f"{u['number']:>2}. ⚠ Answer this one in Blackboard (bb can't save {u['provider_type']}): {_short(u['prompt'], 50)}"
+    return [f"{u['number']:>2}. Answer in Blackboard (bb can't save {u['provider_type']}): {_short(u['prompt'], 50)}"
             for u in unsupported]
 
 
@@ -831,8 +895,8 @@ def format_current(state: Dict[str, Any]) -> str:
     out.append("")
     for q in qs:
         out += _hang(f"{q['number']:>2}. ", q["prompt"] + _hint(q), "    ")
-        for c in q["choices"]:
-            out += _hang(f"     {_box(q, c['id'] in q['selected_choice_ids'])} ", c["text"], "         ")
+        for i, c in enumerate(q["choices"]):
+            out += _hang(f"     {_box(q, c['id'] in q['selected_choice_ids'])} {choice_letter(i)}. ", c["text"], "            ")
         out.append("")
     if proj["unsupported"]:
         out += _unsupported_lines(proj["unsupported"]) + [""]
@@ -875,15 +939,15 @@ def format_result(res: Dict[str, Any], questions: Dict[str, Dict[str, Any]], nex
         after = set(item["after_choice_ids"])
         out += _hang(f"{q['number']:>2}. ", q["prompt"] + _hint(q), "    ")
         out.append(f"    → {tag}" + (f" ({item['detail']})" if item.get("detail") else ""))
-        for c in q["choices"]:
+        for i, c in enumerate(q["choices"]):
             was, now = c["id"] in before, c["id"] in after
             sign = "+" if now and not was else "-" if was and not now else " "
-            out += _hang(f"   {sign} {_box(q, now)} ", c["text"], "         ")
+            out += _hang(f"   {sign} {_box(q, now)} {choice_letter(i)}. ", c["text"], "            ")
         out.append("")
     if out[-1] != "":
         out.append("")
     if nothing_to_do:
-        out.append(f"Nothing to save: all {len(items)} answers already match your file. Blackboard was not changed.")
+        out.append(f"Nothing to save: all {len(items)} answers already match your selections. Blackboard was not changed.")
         return "\n".join(out)
     if outcome == "preview":
         out.append(f"Preview only; nothing saved yet. {len(changed)} to change, {len(items) - len(changed)} already set.")
@@ -915,10 +979,15 @@ EXIT_OK, EXIT_INPUT, EXIT_REFUSED, EXIT_PARTIAL = 0, 2, 3, 4
 
 def run_cli(args, courses: Dict[str, str], target_cids: List[str], cancel_event=None) -> int:
     as_json = bool(getattr(args, "json", False))
+    start_receipt = None
     def progress(msg: str) -> None:  # stderr only, so --json stdout stays one document
         print(msg, file=sys.stderr)
 
     def emit(payload: Dict[str, Any], human: str, code: int) -> int:
+        if start_receipt:
+            payload["new_attempt"] = start_receipt
+            if start_receipt["outcome"] == "created_verified":
+                human = f"Started attempt {start_receipt['attempt_id']}; confirmed IN_PROGRESS by GET. Nothing submitted.\n\n" + human
         text = json.dumps(payload, indent=None if getattr(args, "compact", False) else 2, ensure_ascii=False)
         if getattr(args, "out", None):
             try:
@@ -930,8 +999,15 @@ def run_cli(args, courses: Dict[str, str], target_cids: List[str], cancel_event=
         return code
 
     def fail(code: int, kind: str, message: str, **details: Any) -> int:
-        payload = {"schema_version": SCHEMA_VERSION, "kind": "answers_result", "outcome": "refused" if code == EXIT_REFUSED else "invalid_input",
+        payload = {"schema_version": SCHEMA_VERSION, "kind": "answers_result", "outcome": "unknown" if code == EXIT_PARTIAL else "refused" if code == EXIT_REFUSED else "invalid_input",
                    "error": kind, "message": message, "submitted": False, **({"details": details} if details else {})}
+        if start_receipt:
+            payload["new_attempt"] = start_receipt
+            if getattr(args, "out", None):
+                try:
+                    write_private(Path(args.out), json.dumps(payload, indent=2) + "\n", overwrite=getattr(args, "overwrite", False))
+                except (AnswersInputError, OSError) as exc:
+                    progress(f"Could not write receipt to {args.out}: {exc}")
         if as_json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
@@ -952,14 +1028,23 @@ def run_cli(args, courses: Dict[str, str], target_cids: List[str], cancel_event=
     target_arg = f'"{args.target}"' if not args.target.startswith("_") else args.target
     base_cmd = f"bb answers {target_arg}" + (f" -c {args.course}" if getattr(args, "course", None) else "")
     try:
-        if args.apply and not args.file:
-            return fail(EXIT_INPUT, "invalid_input", "--apply only works with --file.", hints=[
+        sets = getattr(args, "set", None) or []
+        new_attempt = bool(getattr(args, "new_attempt", False))
+        parsed_sets = parse_sets(sets)
+        if sets and (args.file or args.export):
+            raise AnswersInputError("--set cannot be combined with --file or --export")
+        if new_attempt and (args.file or getattr(args, "attempt", None)):
+            raise AnswersInputError("--new-attempt cannot be combined with --file or --attempt; use --set for a fresh attempt")
+        if args.apply and not (args.file or sets):
+            return fail(EXIT_INPUT, "invalid_input", "--apply only works with --file or --set.", hints=[
                 f"1. {base_cmd} --export answers.json   (write a template)",
                 "2. edit the \"changes\" list in answers.json",
                 f"3. {base_cmd} --file answers.json          (preview)",
                 f"4. {base_cmd} --file answers.json --apply  (save; never submits)"])
         if args.export and args.file:
             raise AnswersInputError("use either --export or --file, not both")
+        if args.export:
+            validate_destination(Path(args.export), getattr(args, "overwrite", False))
         if getattr(args, "out", None):
             validate_destination(Path(args.out), getattr(args, "overwrite", False))
         doc = None
@@ -970,14 +1055,23 @@ def run_cli(args, courses: Dict[str, str], target_cids: List[str], cancel_event=
             except (OSError, UnicodeError) as exc:
                 raise AnswersInputError(f"cannot read {path}: {exc}") from None
         cids = target_cids or ([doc["target"]["course_id"]] if doc else []) or list(courses)
-        if len(cids) > 3 and not args.target.startswith("_"):
+        if len(cids) > 3 and not args.target.startswith("_") and not parse_target_url(args.target):
             codes = ", ".join(sorted({_course(n).replace(" ", "") for n in courses.values()})[:5])
             raise AnswersInputError(f"name the course with -c, e.g. -c {codes.split(', ')[0]} (yours: {codes})")
 
         match = resolve_target(args.target, cids, courses)
         progress(f"Reading {match['title']} from Blackboard…")
-        state = load_state(match, attempt_id=getattr(args, "attempt", None) or (doc["target"]["attempt_id"] if doc else None),
-                           check_safety=doc is not None)
+        if new_attempt:
+            from scrapers.answer_attempts import ensure_attempt
+            state, start_receipt = ensure_attempt(match, progress, parsed=parsed_sets, cancel_event=cancel_event)
+        else:
+            state = load_state(match, attempt_id=getattr(args, "attempt", None) or (doc["target"]["attempt_id"] if doc else None),
+                               check_safety=doc is not None or bool(sets))
+        if sets:
+            doc = export_doc(state)
+            doc["_runtime_baseline"] = True  # never loaded from a file; no file-age expiry
+            doc["changes"] = set_changes(parsed_sets, state["projection"])
+            prepare(doc, state)  # same cardinality/baseline/fingerprint validation as file mode
 
         if args.export:
             exported = export_doc(state)
@@ -987,7 +1081,7 @@ def run_cli(args, courses: Dict[str, str], target_cids: List[str], cancel_event=
             until = datetime.fromisoformat(exported["snapshot"]["expires_at"]).strftime("%-I:%M %p" if sys.platform != "win32" else "%I:%M %p")
             unsup = (f"\n{len(exported['unsupported'])} question(s) must be answered in Blackboard itself."
                      if exported["unsupported"] else "")
-            human = (f"Exported {n} questions to {args.export}. Nothing was changed in Blackboard.{unsup}\n"
+            human = (f"Exported {n} questions to {args.export}. No answers were changed.{unsup}\n"
                      f"Next: add entries to \"changes\" (see \"example_change\"), then preview. "
                      f"The file is valid until {until}; export again after that.\n"
                      f"  {base_cmd} --file {args.export}")
@@ -1001,20 +1095,35 @@ def run_cli(args, courses: Dict[str, str], target_cids: List[str], cancel_event=
                        "target": {k: state["target"][k] for k in ("course_name", "title", "course_id", "assessment_id", "attempt_id")},
                        "due": state["due"], "questions": state["projection"]["questions"],
                        "unsupported": state["projection"]["unsupported"], "submitted": False}
-            return emit(payload, format_current(state), EXIT_OK)
+            current_text = format_current(state)
+            if start_receipt and start_receipt["dispatched"]:
+                current_text = current_text.replace("Read only; nothing was changed.", "Answers read only; no answers changed.")
+            return emit(payload, current_text, EXIT_OK)
 
         by_id = {q["question_attempt_id"]: q for q in state["projection"]["questions"]}
         if not args.apply:
+            import shlex
             res = preview(doc, state)
-            return emit(res, format_result(res, by_id, next_cmd=f"{base_cmd} --file {args.file}"), EXIT_OK)
+            next_cmd = base_cmd + (" " + " ".join("--set " + shlex.quote(value) for value in sets) if sets else f" --file {shlex.quote(args.file)}")
+            return emit(res, format_result(res, by_id, next_cmd=next_cmd), EXIT_OK)
 
         res = apply(doc, state, progress, cancel_event=cancel_event)
         code = EXIT_OK if res["outcome"] in ("saved_verified", "unchanged") else (EXIT_PARTIAL if res["dispatched"] else EXIT_REFUSED)
+        if code != EXIT_OK and start_receipt and start_receipt["dispatched"]:
+            code = EXIT_PARTIAL
         return emit(res, format_result(res, by_id), code)
     except AnswersInputError as exc:
-        return fail(EXIT_INPUT, "invalid_input", str(exc))
+        return fail(EXIT_PARTIAL if start_receipt and start_receipt["dispatched"] else EXIT_INPUT, "invalid_input", str(exc))
     except AnswersRefusal as exc:
-        return fail(EXIT_REFUSED, exc.code, str(exc), **exc.details)
+        return fail(EXIT_PARTIAL if start_receipt and start_receipt["dispatched"] else EXIT_REFUSED, exc.code, str(exc), **exc.details)
+    except Exception as exc:
+        from scrapers.answer_attempts import StartUnknown
+        if isinstance(exc, StartUnknown):
+            start_receipt = exc.receipt
+            return fail(EXIT_PARTIAL, "start_unknown", str(exc))
+        if start_receipt and start_receipt["dispatched"]:
+            return fail(EXIT_PARTIAL, "after_start_failed", f"Attempt started; subsequent operation failed ({type(exc).__name__}). Check Blackboard.")
+        raise
 
 
 def input_error(args, message: str) -> int:

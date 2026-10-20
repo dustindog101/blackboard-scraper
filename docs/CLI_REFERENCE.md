@@ -215,7 +215,8 @@ Native rubric previews require `displayBefore: true`; hidden rubric definitions 
 
 ### `bb answers <TARGET> [-c COURSE]`
 Show, export, preview or explicitly save chosen answers in an existing `IN_PROGRESS`
-native Ultra test attempt. Never starts or submits an attempt. Saving is a remote
+native Ultra test attempt. Explicit `--new-attempt` can start an eligible untimed attempt.
+Never submits. Saving or starting is a remote
 mutation; agents need the student's explicit save request and must always preview first.
 Saved answers may be visible to course staff.
 
@@ -225,6 +226,10 @@ bb answers "Practice Quiz" -c DEMO100 --export answers.json   # export; no remot
 # Edit only changes[] in answers.json, then preview:
 bb answers "Practice Quiz" -c DEMO100 --file answers.json
 bb answers "Practice Quiz" -c DEMO100 --file answers.json --apply
+bb answers "Practice Quiz" -c DEMO100 --set 1=A --set 2=A,B --set 3=False  # preview
+bb answers "Practice Quiz" -c DEMO100 --set 1=A --apply                  # save
+bb answers "Practice Quiz" -c DEMO100 --new-attempt                     # start then show
+bb answers "Practice Quiz" -c DEMO100 --new-attempt --set 1=A --apply    # retake and save
 ```
 
 - `TARGET`: test title/substring, content ID or gradebook column ID; ambiguity refuses.
@@ -233,7 +238,34 @@ bb answers "Practice Quiz" -c DEMO100 --file answers.json --apply
   the exact attempt; the command never silently substitutes another one.
 - `--export FILE`: write a fresh template with `changes: []`; expires after 15 minutes.
 - `--file FILE`: validate and preview the before/after changes without saving.
-  Mutually exclusive with `--export`; `--apply` requires `--file`.
+  Mutually exclusive with `--export` and `--set`; `--apply` requires `--file` or `--set`.
+- `--set N=A,B`: repeatable shorthand using the answerable question number shown by bb
+  (presentation blocks do not count). Letters are case-insensitive and follow bb's list,
+  which may differ from Blackboard's shuffled display. True/false accepts True/False/T/F
+  as well as letters. `N=clear` clears. Never matches by option text. Duplicate numbers,
+  unknown letters, unsupported/absent numbers and excessive selections exit 2 before writes.
+  It translates to the file mode's internal changes list and shares validation, fingerprints,
+  baseline comparisons, locking, per-question readback and receipts. Its baseline is read at
+  runtime; no 15-minute file expiry applies. Without `--apply`, it previews with zero writes
+  unless the separate explicit `--new-attempt` flag is also present.
+- `--new-attempt`: run the same `_safe_due` check as apply; require a complete known
+  attempt inventory and positive attempts remaining (`attemptsAllowed` minus existing count;
+  Ultra's observed `attemptCount` is the equivalent provider field). Unknown, contradictory,
+  unlimited sentinel or exhausted counts refuse. The 120-second due window also applies.
+  If one IN_PROGRESS attempt exists, report and use it without starting another; multiple
+  active attempts refuse. A local assessment lock serializes CLI starts on this machine.
+  HTTP first, then the installed browser, then optional bundled Playwright via `core.browser`.
+  Only missing session/XSRF **before dispatch** permits browser fallback. After any start
+  dispatch (including HTTP 401/404), never retry or switch transports: reconcile by GET only.
+  Browser mode clicks exactly `Start new attempt` / `Start attempt`, refuses timer/access-code
+  prompts and blocks every non-read request except the single allowlisted creation POST.
+  GET must confirm exactly one new IN_PROGRESS attempt and its ID. Ambiguity exits 4.
+  Both HTTP and browser creation are **UNVERIFIED live**; see [protocol](specs/save-draft-answers-protocol.md).
+  With `--set`, all edits are preflighted against a readable prior attempt before creation,
+  then translated again against the new runtime question list. If no prior question list
+  is available, start separately, then preview/save. A changed new question definition may
+  prevent saving after creation; receipt/exit 4 preserves the created attempt ID.
+  Cannot combine with `--file` (pinned to an existing attempt) or `--attempt`.
 - `--apply`: save requested changes sequentially and independently read them back.
   No mandatory stdin prompt; no automatic submission or rollback.
 - `--json`: one versioned JSON document on stdout; progress/warnings go to stderr.
@@ -306,12 +338,18 @@ answers are no-ops. Duplicate/unknown fields, keys, choices or changes are rejec
 files are limited to 512 KiB. Nested snapshot question IDs and selection lists must
 have the documented types; invalid UTF-8 is an input error. Re-export after expiry or a definition/baseline conflict.
 
-Only single-choice, multiple-answer and true/false are supported. Other types are
-reported as unsupported. Timed/proctored, password/secure-browser/IP-restricted,
+Verified answer types: multiple answer (select all); single choice (multiple choice
+with one answer, encoded by Ultra as `multipleanswer` with `answerSelectionLimit: 1`);
+and true/false (`eitherOr` / `true_false`). Essay, short answer, fill-in-the-blank,
+matching, ordering, calculated, file response, and anything else are unsupported:
+**answer in Blackboard**. Type support does not establish live acceptance of every clear case.
+
+Timed/proctored, password/secure-browser/IP-restricted,
 forced-completion and no-backtracking tests are refused. All six recognized safety
-booleans must be present and boolean. A missing `timeLimit` requires an explicit false
+booleans must be present and boolean. A missing `timeLimit` accepts an explicit false
 `isTimeLimitEnabled`, `isTimerEnabled` or `isTimed`, with no contradictory enabled or
-unknown timer flag. `timerCompletion: CONTINUAL` alone does not prove no timer.
+unknown timer flag. The observed untimed Ultra shape (no `timeLimit`, `timerCompletion: CONTINUAL`)
+is also accepted by the shared safety check; other timer enums are unknown.
 `gradingColumn.dueDate: null` means no deadline; a missing/invalid due date is unknown
 and refuses. Settings and the 120-second deadline window are checked again immediately
 before each actual dispatch, including after browser startup.
@@ -332,15 +370,20 @@ deviation; avoid concurrent editing. See [ADR-0006](adr/0006-explicit-answer-sav
 and the [protocol note](specs/save-draft-answers-protocol.md). After partial/unknown
 results, inspect the attempt in Blackboard before retrying; earlier answers may persist.
 The command never submits, but Blackboard or an instructor can change the attempt state.
+With `--new-attempt`, JSON includes `new_attempt` (`requested`, `outcome`: `existing` /
+`created_verified` / `unknown`, `dispatched`, `transport`, `attempt_id`, `submitted: false`).
+Any later failure after creation exits 4 and retains this receipt. Exit 3 means no
+creation or save dispatch. Exit 4 covers an unsuccessful run after either kind of dispatch.
 
 | Exit | Meaning |
 | --- | --- |
-| `0` | Successful show/export/preview, fully verified save, or no changes needed |
+| `0` | Successful show/export/preview, confirmed start, fully verified save, or no changes needed |
 | `2` | Invalid CLI/local input, including refused overwrite/symlink destinations |
-| `3` | Refusal/conflict/unknown state before any PATCH was dispatched |
-| `4` | A PATCH was dispatched and apply ended partial, unknown or refused; inspect per-question outcomes |
+| `3` | Refusal/conflict/unknown state before any start or PATCH dispatch |
+| `4` | A start or PATCH was dispatched and the run ended partial, unknown or refused; inspect receipts |
 
-Exit `4` is not proof of persistence. `dispatched` records whether an actual PATCH was
+Exit `4` is not proof of persistence. `new_attempt.dispatched` records start dispatch;
+`dispatched` records whether an actual PATCH was
 sent (including a rejected HTTP 401). Each PATCH must pass bounded GET reconciliation
 before the next is sent: at most three reads with 1+2 seconds backoff and 0.6-second
 per-read timeouts (about five seconds total). Unknown persistence stops immediately.

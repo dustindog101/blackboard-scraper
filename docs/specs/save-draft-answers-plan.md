@@ -1,7 +1,44 @@
 # Implementation plan: save answers without submitting
 
-Status: proposed. Companion [specification](save-draft-answers.md) is normative.
-This PR adds no CLI behavior and performs no live Blackboard mutation.
+Status: original implementation plan retained below as history. The branch now
+implements save, shorthand and guarded explicit retakes; see the current
+[specification](save-draft-answers.md), [protocol](save-draft-answers-protocol.md),
+ADR-0006 and ADR-0007. Original CAS/browser/no-start gates are superseded only as
+those decisions specify. This extension ran no live start, apply or submit.
+
+## Current shorthand and explicit retake extension
+
+`--set N=A,B` (repeatable) translates provider-order letters to stable choice IDs in
+exactly the same internal changes list as `--file`. True/False/T/F and `N=clear` are
+accepted; number/letter/cardinality/type/duplicate validation runs before writes.
+Read-only and preview/apply views show A., B., C. with the existing radio/checkbox
+markers; unchanged preview/apply questions collapse. Letters follow bb's list, which
+may differ from Blackboard's shuffled display; never match option text.
+The baseline is fresh at runtime, with no file-age expiry; all fingerprint, baseline,
+lock, readback and receipt guards remain shared. `--set` excludes `--file` / `--export`.
+
+`--new-attempt` is a separate explicit mutation, authorized by the current request and
+[ADR-0007](../adr/0007-explicit-untimed-attempt-creation.md). It supersedes the original
+no-start invariant **only for this flag**, leaving `bb assignment --start-attempt`
+unchanged. It never submits. Apply's `_safe_due`, complete known attempt count,
+positive attempts remaining and the 120-second due window are rechecked immediately
+before dispatch. Use an existing IN_PROGRESS attempt instead of starting again.
+HTTP precedes the installed browser and optional bundled Playwright; only pre-dispatch
+unavailability permits fallback. No dispatched start is retried, including 401/404.
+GET must confirm exactly one new IN_PROGRESS attempt and ID; ambiguity exits 4.
+Timer/access-code prompts refuse; the browser blocks submit and all unrelated writes.
+Creation remains **UNVERIFIED live**; static JS inspection is evidence for its shape,
+not provider acceptance. See the [protocol](save-draft-answers-protocol.md).
+Combined start/save preflights against readable prior questions before spending an
+attempt; without them start separately, then preview/save. New question changes may
+prevent saving after creation (exit 4, created ID retained). File/attempt pinning cannot
+be combined with new-attempt. No new schedules or unattended starts are introduced.
+
+Verified answer types: multiple answer (select all); single choice (multiple choice
+with one answer, encoded by Ultra as `multipleanswer` with `answerSelectionLimit: 1`);
+and true/false (`eitherOr` / `true_false`). Essay, short answer, fill-in-the-blank,
+matching, ordering, calculated, file response, and anything else are unsupported:
+**answer in Blackboard**. Type support does not establish live acceptance of every clear case.
 
 ## 1. Review and prove the protocol
 

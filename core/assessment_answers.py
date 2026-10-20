@@ -121,7 +121,7 @@ def project_attempt(attempt: Dict[str, Any]) -> Dict[str, Any]:
             ids = [a["id"] for a in answers]
             if len(set(ids)) != len(ids):
                 raise AnswersRefusal("unsupported_protocol", f"Duplicate choice IDs on question {number}")
-            # No A/B/C labels: Blackboard may shuffle display order per student.
+            # CLI letters follow this provider order, not Blackboard's shuffled UI.
             choices = [{"id": a["id"], "text": clean_text((a.get("answerText") or {}).get("rawText"))}
                        for a in answers]
             limit = 1 if kind == SINGLE else (question.get("answerSelectionLimit") or len(choices))
@@ -160,6 +160,54 @@ def encode_given(kind: str, choice_ids: List[str], selected: List[str]) -> Any:
         return None if not selected else selected[0] == "true"
     wanted = set(selected)
     return [cid in wanted for cid in choice_ids]
+
+
+def choice_letter(index: int) -> str:
+    """Zero-based provider position as A..Z, AA..AZ, ... ."""
+    label = ""
+    index += 1
+    while index:
+        index, digit = divmod(index - 1, 26)
+        label = chr(65 + digit) + label
+    return label
+
+
+def parse_sets(values: List[str]) -> Dict[int, List[str]]:
+    """Parse local shorthand before reads or attempt creation; no text matching."""
+    result = {}
+    for value in values:
+        match = re.fullmatch(r"\s*([1-9]\d*)\s*=\s*(.*?)\s*", value)
+        if not match:
+            raise AnswersInputError("--set needs N=A,B, N=True/False, or N=clear")
+        number, selection = int(match[1]), match[2].upper()
+        if number in result:
+            raise AnswersInputError(f"duplicate --set question {number}")
+        tokens = [s.strip() for s in selection.split(",")]
+        if not all(re.fullmatch(r"[A-Z]+", s) for s in tokens) or len(set(tokens)) != len(tokens):
+            raise AnswersInputError(f"question {number}: invalid or duplicate selection")
+        result[number] = [] if tokens == ["CLEAR"] else tokens
+    return result
+
+
+def set_changes(parsed: Dict[int, List[str]], projection: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Translate CLI letters into the same ID-based changes consumed by plan_changes."""
+    questions = {q["number"]: q for q in projection["questions"]}
+    changes = []
+    for number, tokens in parsed.items():
+        q = questions.get(number)
+        if q is None:
+            raise AnswersInputError(f"question {number} is unsupported or absent; answer in Blackboard")
+        letters = {choice_letter(i): c["id"] for i, c in enumerate(q["choices"])}
+        if q["type"] == TRUE_FALSE:
+            letters.update(TRUE="true", T="true", FALSE="false", F="false")
+        if any(token not in letters for token in tokens):
+            raise AnswersInputError(f"question {number}: unknown letter (use bb's option list)")
+        selected = [letters[token] for token in tokens]
+        if len(set(selected)) != len(selected):
+            raise AnswersInputError(f"question {number}: duplicate selection")
+        changes.append({"question_attempt_id": q["question_attempt_id"],
+                        "operation": "set" if tokens else "clear", "selected_choice_ids": selected})
+    return changes
 
 
 def _iso(dt: datetime) -> str:
@@ -321,7 +369,8 @@ def plan_changes(doc: Dict[str, Any], fresh: Dict[str, Any], fresh_sha: str) -> 
         if bad:
             raise AnswersInputError(f"question {q['number']}: unknown choice ID(s) {', '.join(bad)}")
         if len(desired) > q["max_selections"]:
-            raise AnswersInputError(f"question {q['number']}: at most {q['max_selections']} choice(s) allowed")
+            raise AnswersInputError(f"question {q['number']} takes one answer" if q["max_selections"] == 1
+                                    else f"question {q['number']}: at most {q['max_selections']} choices allowed")
         desired = [c for c in valid if c in desired]  # provider order
         now_sel = q["selected_choice_ids"]
         if set(now_sel) == set(desired):

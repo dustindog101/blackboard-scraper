@@ -35,23 +35,41 @@ Recent announcements are not necessarily unread. REST read state is unknown unle
 
 ## Save chosen answers (explicit request only)
 
-Use `bb answers "<test>" -c <COURSE>` to show an existing attempt; export with
-`--export answers.json`, then edit only `changes[]`. **Always preview first** with
-`--file answers.json`. Only the student's explicit request to save those changes
-authorizes adding `--apply`. Saved answers may be visible to course staff. This command
-never starts or submits an attempt; review and submission stay with the student.
+Use `bb answers "<test>" -c <COURSE>` to show an existing attempt. Preview with
+repeatable `--set 1=A --set 2=A,B --set 3=False` (or `--export`, edit `changes[]`,
+then `--file`). **Always preview chosen answers before saving.** Only the student's
+explicit save request authorizes `--apply`. `N=clear` clears; True/False/T/F and
+letters are case-insensitive. Letters follow bb's list, which may differ from
+Blackboard's shuffled display. Never match by option text. Shorthand shares the
+file pipeline and uses a fresh runtime baseline without file-age expiry.
 
-Only single-choice, multiple-answer and true/false are supported. Baseline re-reads
-are not CAS and cannot prevent browser/other-host races; avoid concurrent editing.
-Safety settings and deadlines fail closed; do not infer no timer from an omitted
-`timeLimit` or `timerCompletion: CONTINUAL`. Each PATCH reconciles before the next;
-all requests are verified again in one final snapshot under an OS lock. Ctrl-C stops
-further dispatches and still reports dispatched writes. Exit 3 means no PATCH sent;
-exit 4 means a PATCH was sent but the run did not fully succeed. HTTP 401 rejects
-without persistence and permits browser fallback only before any HTTP save persisted;
-403/5xx/timeouts never permit fallback. On partial/unknown results, inspect Blackboard
-before retrying. See the checkout's
-CLI reference for schema, expiry, transport order and exit codes.
+Only an explicit request to start authorizes `--new-attempt`; show/preview/apply
+alone never start. It starts an eligible untimed test then shows it, or combines
+with `--set ... --apply` to start and save. Reuse an existing IN_PROGRESS attempt.
+Unknown safety/count/deadline settings, restrictions, no attempts remaining or less
+than 120 seconds until due refuse. Combined start/save requires readable prior
+questions for preflight; otherwise start separately, then preview/save. The creation
+transports are **UNVERIFIED live**. HTTP → installed browser → optional bundled
+Playwright; fallback is allowed only before a start dispatch. Never retry a dispatched
+start, including HTTP 401/404. GET must confirm exactly one new IN_PROGRESS attempt
+and its ID. Time-limit/access-code prompts refuse. Never submit; the student reviews
+and submits. Saved answers may be visible to course staff.
+
+Verified answer types: multiple answer (select all); single choice (multiple choice
+with one answer, encoded by Ultra as `multipleanswer` with `answerSelectionLimit: 1`);
+and true/false (`eitherOr` / `true_false`). Essay, short answer, fill-in-the-blank,
+matching, ordering, calculated, file response, and anything else are unsupported:
+**answer in Blackboard**. Type support does not establish live acceptance of every clear case.
+
+Baseline re-reads are not CAS; avoid concurrent browser/other-host editing. Each
+PATCH reconciles before the next, then a final snapshot checks every requested
+answer under an OS lock. Safety uses the same `_safe_due` check for start and save,
+including the observed no-timeLimit/CONTINUAL Ultra shape; unknown enums refuse.
+HTTP answer-save 401 may fall back before persistence; **attempt creation has no
+post-dispatch fallback**. Exit 3 refuses before dispatch; exit 4 reports a failed or
+unknown run after a start or save dispatch. Preserve `new_attempt` receipts and
+inspect Blackboard before retrying. Ctrl-C stops new writes and reconciles.
+See the CLI and API references for the maintained contract.
 
 ## Session and login
 
