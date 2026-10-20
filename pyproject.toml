@@ -13,7 +13,7 @@ authors = [
     { name = "Amanuel Hailie" }
 ]
 dependencies = [
-    "playwright>=1.40.0",
+    "playwright>=1.49.0",
     "pypdf>=4.0.0",
     "tzdata>=2024.1; sys_platform == 'win32'",
 ]

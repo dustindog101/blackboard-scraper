@@ -5,7 +5,6 @@ import json
 import os
 import re
 import sys
-import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,6 +26,8 @@ if sys.platform == "win32":
 from core.config import BLACKBOARD_BASE, load_courses
 from core.gradebook import course_label
 from core.export_json import build_composite_schema, build_export_doc
+from core.browser import BrowserProfileLockedError, BrowserUnavailableError
+
 from core.async_engine import AsyncSessionManager, AsyncCourseWorkerPool, EngineConfig, TaskProfile, get_optimal_concurrency
 
 
@@ -52,6 +53,10 @@ def login_auto(*args, **kwargs):
     return _from_session("login_auto")(*args, **kwargs)
 
 
+async def _login_auto_async(**kwargs):
+    return await _from_session("_login_auto_async")(**kwargs)
+
+
 def quick_check_session_http(*args, **kwargs):
     return _from_session("quick_check_session_http")(*args, **kwargs)
 
@@ -61,13 +66,16 @@ async def check_session_async(*args, **kwargs):
 
 
 async def _require_session_async(cdp=None):
-    """True when the saved session works. A quick REST probe first; otherwise the full check (and its login help)."""
-    from core.rest import RestError, get_json
-    try:
-        await asyncio.to_thread(get_json, "/learn/api/public/v1/users/me", 6.0)
+    """Probe once without Playwright, loading authentication only for recovery."""
+    import contextlib
+    from core.session_state import VALID, probe_session
+    if cdp:
         return True
-    except RestError:
-        return await _from_session("_require_session_async")(cdp)
+    state, _ = await asyncio.to_thread(probe_session)
+    if state == VALID:
+        return True
+    with contextlib.redirect_stdout(sys.stderr):
+        return await _from_session("_require_session_async")(cdp, checked_state=state)
 
 
 # Scrapers
@@ -1308,24 +1316,17 @@ async def main_async(args: argparse.Namespace) -> None:
         if is_manual and not code_file:
             await asyncio.to_thread(login, force_flag, username, password, cdp)
         else:
-            cancel_event = threading.Event()
-            try:
-                success = await asyncio.to_thread(
-                    login_auto,
-                    username=username,
-                    password=password,
-                    headless=headless,
-                    cdp_url=cdp,
-                    auto_exp=True,
-                    force=force_flag,
-                    passcode=getattr(args, "duo_passcode", None),
-                    cancel_event=cancel_event,
-                    code_file=code_file,
-                    code_timeout=getattr(args, "code_timeout", 300.0),
-                )
-            except asyncio.CancelledError:
-                cancel_event.set()
-                raise
+            success = await _login_auto_async(
+                username=username,
+                password=password,
+                headless=headless,
+                cdp_url=cdp,
+                auto_exp=True,
+                force=force_flag,
+                passcode=getattr(args, "duo_passcode", None),
+                code_file=code_file,
+                code_timeout=getattr(args, "code_timeout", 300.0),
+            )
             if not success:
                 raise SystemExit(1)
         return
@@ -1401,7 +1402,7 @@ async def main_async(args: argparse.Namespace) -> None:
 
     # From here down, academic commands require an active session
     if not await _require_session_async(cdp):
-        return
+        raise SystemExit(1)
 
     # --- briefing ---
     if subcmd in ("briefing", "brief") or getattr(args, "briefing", False):
@@ -1790,6 +1791,9 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nCancelled.", file=sys.stderr)
         raise SystemExit(130) from None
+    except (BrowserProfileLockedError, BrowserUnavailableError) as error:
+        print(f"\n{error}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

@@ -310,8 +310,8 @@ class TestTUIAuthPromptAndAutoRecovery(unittest.TestCase):
         output_str = out.getvalue()
         self.assertIn("No login detected and no credentials found in config.json", output_str)
 
-    @patch("core.session.quick_check_session_http", side_effect=[(False, None), (True, {"studentId": "BH69617"})])
-    @patch("core.session.check_session", return_value=False)
+    @patch("core.session.quick_check_session_http", return_value=(True, {"studentId": "BH69617"}))
+    @patch("core.session.check_session_state", return_value=("expired", None))
     @patch("core.session.ensure_config_exists", return_value=(False, {"auto_login": {"username": "BH69617", "password": "pass"}}))
     @patch("core.session.has_auto_login_credentials", return_value=True)
     @patch("core.session.login_auto")
@@ -386,29 +386,23 @@ class TestWindowsCrossPlatformBehaviors(unittest.TestCase):
 
 
 class TestBrowserLaunchCandidates(unittest.TestCase):
-    def test_candidates_order_and_structure(self):
-        from core.session import get_browser_launch_candidates
+    def test_candidates_are_existence_checked_with_optional_bundled_last(self):
+        from pathlib import Path
+        from core.browser import get_browser_launch_candidates
         candidates = get_browser_launch_candidates()
-        self.assertTrue(len(candidates) >= 5)
-
-        # 1. Primary candidates should include Google Chrome, Microsoft Edge, and Bundled Chromium fallback
-        names = [c["name"] for c in candidates]
-        self.assertTrue(any("Google Chrome" in n for n in names))
-        self.assertTrue(any("Microsoft Edge" in n for n in names))
-        self.assertTrue(any("Playwright Bundled Chromium" in n for n in names))
-
-        # 2. Last candidate must be the bundled Chromium fallback
-        self.assertIsNone(candidates[-1]["channel"])
+        installed = [c for c in candidates if not c.get("bundled")]
+        for candidate in installed:
+            self.assertTrue(Path(candidate["executable_path"]).is_file())
         self.assertEqual(candidates[-1]["name"], "Playwright Bundled Chromium")
 
-    @patch("core.session.get_browser_launch_candidates")
+    @patch("core.browser.get_browser_launch_candidates")
     def test_launch_context_candidate_fallback(self, mock_candidates):
         from unittest.mock import MagicMock
         from core.session import _launch_context
 
         mock_candidates.return_value = [
-            {"name": "Missing Chrome", "channel": "chrome"},
-            {"name": "Working Edge", "channel": "msedge"},
+            {"name": "Missing Chrome", "executable_path": "/missing/chrome"},
+            {"name": "Working Edge", "executable_path": "/ok/edge"},
         ]
 
         mock_pw = MagicMock()
@@ -429,13 +423,13 @@ class TestBrowserLaunchCandidates(unittest.TestCase):
 
 
 class TestPureHTTPSessionCheck(unittest.TestCase):
-    @patch("core.session.quick_check_session_http", return_value=(True, {"studentId": "BH69617"}))
+    @patch("core.session.check_session_state", return_value=("valid", {"studentId": "BH69617"}))
     def test_check_session_async_active(self, mock_http):
         from core.session import check_session_async
         res = asyncio.run(check_session_async(quiet=True, fast_only=True))
         self.assertTrue(res)
 
-    @patch("core.session.quick_check_session_http", return_value=(False, None))
+    @patch("core.session.check_session_state", return_value=("expired", None))
     @patch("core.async_engine.AsyncSessionManager")
     def test_check_session_async_expired_pure_http(self, mock_session_mgr, mock_http):
         from core.session import check_session_async
@@ -444,13 +438,13 @@ class TestPureHTTPSessionCheck(unittest.TestCase):
         # Verify no browser session manager was initialized
         mock_session_mgr.assert_not_called()
 
-    @patch("core.session.quick_check_session_http", return_value=(True, {"studentId": "BH69617"}))
+    @patch("core.session.check_session_state", return_value=("valid", {"studentId": "BH69617"}))
     def test_check_session_sync_active(self, mock_http):
         from core.session import check_session
         res = check_session(quiet=True, fast_only=True)
         self.assertTrue(res)
 
-    @patch("core.session.quick_check_session_http", return_value=(False, None))
+    @patch("core.session.check_session_state", return_value=("expired", None))
     def test_check_session_sync_expired_pure_http(self, mock_http):
         from core.session import check_session
         res = check_session(quiet=True, fast_only=True)

@@ -27,9 +27,15 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # playwright is imported lazily: REST-only commands never load it
     from playwright.async_api import BrowserContext, Page, Playwright, Route
 
+from core.browser import get_browser_launch_candidates, launch_persistent_context_async
 from core.config import SESSION_DIR
 
 logger = logging.getLogger("blackboard.async_engine")
+
+
+def async_playwright():
+    from playwright.async_api import async_playwright as start
+    return start()
 
 
 def _playwright_timeout() -> type:
@@ -277,63 +283,60 @@ class AsyncSessionManager:
         elif diff < 0:
             pass  # Will naturally drain on next acquisitions
 
+    async def _start(self) -> None:
+        # Validate overrides before starting the driver so a configuration
+        # error cannot leave a Playwright process running.
+        if not self.config.cdp_url:
+            get_browser_launch_candidates()
+        self._pw = await async_playwright().start()
+
+        if self.config.cdp_url:
+            logger.info(f"🔌 Connecting to CDP browser: {self.config.cdp_url}")
+            browser = await self._pw.chromium.connect_over_cdp(self.config.cdp_url)
+            self._context = browser.contexts[0] if browser.contexts else await browser.new_context()
+        else:
+            self._context, _ = await launch_persistent_context_async(
+                self._pw, SESSION_DIR, headless=self.config.headless,
+            )
+            cookie_file = Path(SESSION_DIR) / "cookies.json"
+            if cookie_file.exists():
+                import json
+                try:
+                    cookies = json.loads(cookie_file.read_text())
+                    if cookies:
+                        await self._context.add_cookies(cookies)
+                except Exception:
+                    pass
+
+    async def _release(self) -> None:
+        """Release whatever a failed startup created (context, then driver)."""
+        context, pw = self._context, self._pw
+        self._context = self._pw = None
+        if context is not None:
+            try:
+                await context.close()
+            except Exception:
+                pass
+        if pw is not None:
+            try:
+                await pw.stop()
+            except Exception:
+                pass
+
     async def initialize(self) -> None:
         """Launch persistent context or connect via CDP."""
         async with self._lock:
             if self._initialized:
                 return
 
-            from playwright.async_api import async_playwright
-            self._pw = await async_playwright().start()
+            try:
+                await self._start()
+                if self.config.block_assets and self._context:
+                    await self._context.route("**/*", RouteOptimizer.route_handler)
+            except BaseException:
+                await self._release()
+                raise
 
-            if self.config.cdp_url:
-                logger.info(f"🔌 Connecting to CDP browser: {self.config.cdp_url}")
-                browser = await self._pw.chromium.connect_over_cdp(self.config.cdp_url)
-                self._context = browser.contexts[0] if browser.contexts else await browser.new_context()
-            else:
-                from core.session import get_browser_launch_candidates
-                candidates = get_browser_launch_candidates()
-                user_data_dir = str(SESSION_DIR)
-                last_error = None
-
-                for spec in candidates:
-                    kwargs = {
-                        "user_data_dir": user_data_dir,
-                        "headless": self.config.headless,
-                        "args": ["--disable-blink-features=AutomationControlled"],
-                        "viewport": {"width": 1280, "height": 800},
-                    }
-                    if spec.get("channel"):
-                        kwargs["channel"] = spec["channel"]
-                    if spec.get("executable_path"):
-                        kwargs["executable_path"] = spec["executable_path"]
-
-                    try:
-                        self._context = await self._pw.chromium.launch_persistent_context(**kwargs)
-                        break
-                    except Exception as e:
-                        last_error = e
-                        if "Target directory" in str(e) and "is in use" in str(e):
-                            raise
-                        continue
-
-                if not self._context:
-                    if last_error:
-                        raise last_error
-                    raise RuntimeError("No compatible Chromium browser found.")
-
-                cookie_file = Path(SESSION_DIR) / "cookies.json"
-                if cookie_file.exists():
-                    import json
-                    try:
-                        cookies = json.loads(cookie_file.read_text())
-                        if cookies:
-                            await self._context.add_cookies(cookies)
-                    except Exception:
-                        pass
-
-            if self.config.block_assets and self._context:
-                await self._context.route("**/*", RouteOptimizer.route_handler)
 
             self._initialized = True
 

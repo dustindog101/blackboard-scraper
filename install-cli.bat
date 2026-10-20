@@ -20,7 +20,7 @@ if not exist "%VENV_PYTHON%" (
     echo    Please create it first:
     echo    python -m venv .venv
     echo    .\.venv\Scripts\pip install -r requirements.txt
-    echo    .\.venv\Scripts\playwright install chromium
+    echo    Browser download is optional: use installed Edge/Chrome, or .\.venv\Scripts\playwright install chromium --no-shell
     exit /b 1
 )
 
