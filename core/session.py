@@ -22,6 +22,7 @@ except ImportError:
 
 from core.sms_listener import check_sms_access, ensure_messages_sync, get_current_max_rowid, normalize_passcode, wait_for_duo_sms_passcode
 
+from core.browser import browser_unavailable_message, get_browser_launch_candidates
 from core.config import (
     BLACKBOARD_BASE,
     LOGIN_INDICATORS,
@@ -35,82 +36,6 @@ from core.config import (
 # ============================================================
 # Browser helpers
 # ============================================================
-
-def get_browser_launch_candidates() -> list[dict]:
-    """
-    Returns a prioritized list of browser launch specifications.
-    Automatically detects system-installed desktop browsers (0 MB extra download):
-      1. Google Chrome (channel='chrome')
-      2. Brave Browser (macOS, Windows, Linux common binary locations)
-      3. Microsoft Edge (channel='msedge' - standard on Windows 10/11/Server, macOS, Linux)
-      4. Chromium / Chrome Beta channels
-      5. System executable paths (Linux/macOS)
-      6. Bundled Playwright Chromium (fallback if no system browser exists)
-    """
-    candidates = []
-
-    # 1. System Google Chrome executable paths (macOS, Linux, Windows)
-    chrome_paths = [
-        # macOS
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-        # Linux
-        "/usr/bin/google-chrome-stable",
-        "/usr/bin/google-chrome",
-        "/usr/bin/chromium-browser",
-        "/usr/bin/chromium",
-        # Windows
-        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
-        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-    ]
-    for p in chrome_paths:
-        if p and not p.startswith("%") and Path(p).exists():
-            candidates.append({"name": f"Google Chrome ({p})", "executable_path": p})
-            break
-
-    # 2. Google Chrome channel (supported natively by Playwright on macOS, Windows, Linux)
-    candidates.append({"name": "Google Chrome (channel)", "channel": "chrome"})
-
-    # 3. Brave Browser (check standard paths across macOS, Windows, Linux)
-    brave_paths = [
-        # macOS
-        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-        os.path.expanduser("~/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
-        # Linux
-        "/usr/bin/brave-browser",
-        "/usr/bin/brave",
-        "/snap/bin/brave",
-        "/var/lib/flatpak/exports/bin/com.brave.Browser",
-        # Windows
-        os.path.expandvars(r"%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe"),
-        os.path.expandvars(r"%ProgramFiles(x86)%\BraveSoftware\Brave-Browser\Application\brave.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"),
-    ]
-    for p in brave_paths:
-        if p and not p.startswith("%") and Path(p).exists():
-            candidates.append({"name": f"Brave Browser ({p})", "executable_path": p})
-            break
-
-    # 4. Microsoft Edge channel (pre-installed on Windows, optional on macOS/Linux)
-    candidates.append({"name": "Microsoft Edge (channel)", "channel": "msedge"})
-
-    # 5. Chrome Beta & Chromium channels
-    candidates.append({"name": "Google Chrome Beta (channel)", "channel": "chrome-beta"})
-    candidates.append({"name": "Chromium (channel)", "channel": "chromium"})
-
-    # Additional Linux system binary locations
-    system_paths = [
-        "/usr/bin/microsoft-edge-stable",
-    ]
-    for p in system_paths:
-        if Path(p).exists():
-            candidates.append({"name": f"System Browser ({p})", "executable_path": p})
-
-    # 6. Fallback to default Playwright bundled Chromium
-    candidates.append({"name": "Playwright Bundled Chromium", "channel": None})
-
-    return candidates
 
 
 def _launch_context(pw, headless: bool = True, cdp_url: str = None):
@@ -143,6 +68,7 @@ def _launch_context(pw, headless: bool = True, cdp_url: str = None):
 
         try:
             context = pw.chromium.launch_persistent_context(**kwargs)
+            print(f"🌐 Using {spec['name']} for Blackboard", file=sys.stderr)
 
             # Explicitly load session cookies
             cookie_file = Path(SESSION_DIR) / "cookies.json"
@@ -176,13 +102,7 @@ def _launch_context(pw, headless: bool = True, cdp_url: str = None):
             # Binary not found or unsupported channel: try next candidate
             continue
 
-    # If all candidate launches failed
-    print("\n❌ [ERROR] Could not launch any system browser (Chrome, Brave, Edge) or bundled Chromium.")
-    print("   To install the default Playwright Chromium browser binary, run:")
-    print("       playwright install chromium\n")
-    if last_error:
-        raise last_error
-    raise RuntimeError("No compatible Chromium browser found.")
+    raise RuntimeError(browser_unavailable_message()) from last_error
 
 
 def _is_login_page(url: str) -> bool:
