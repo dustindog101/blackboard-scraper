@@ -2,14 +2,14 @@ import asyncio
 import json
 import logging
 import sys
-import urllib.error
-import urllib.request
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from core.config import BLACKBOARD_BASE, SESSION_DIR, load_courses
 from core.output import ensure_output_dir
 from core.async_engine import AdaptiveDOM
+from core.gradebook import fetch_user_grades, TOTAL_NAMES
+from scrapers.quiz import _api_get
 
 logger = logging.getLogger("blackboard.scrapers.grades")
 
@@ -50,50 +50,19 @@ def scrape_grades_api(course_id: str) -> Optional[List[Dict[str, Any]]]:
     if not cookie_header:
         return None
 
-    headers = {
-        "Cookie": cookie_header,
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-    }
-
-    url = f"{BLACKBOARD_BASE}/learn/api/public/v2/courses/{course_id}/gradebook/columns"
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=7) as resp:
-            if resp.status != 200:
-                return None
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        if e.code in (401, 403, 404):
-            # Course is closed or unavailable -> return empty list immediately
-            return []
-        logger.debug(f"Gradebook HTTP {e.code} for {course_id}: {e}")
+    data = _api_get(f"/learn/api/public/v2/courses/{course_id}/gradebook/columns", cookie_header)
+    if data and data.get("_http_status") in (401, 403, 404):
+        return []
+    if not data or "results" not in data:
         return None
-    except Exception as e:
-        logger.debug(f"Gradebook network error for {course_id}: {e}")
-        return None
-
-    raw_cols = data.get("results", [])
-    extracted: List[Dict[str, Any]] = []
-
-    for col in raw_cols:
-        name = col.get("name", "Untitled").strip()
-        # Skip internal calculation containers if course has actual items
-        if name.lower() in ("overall grade", "total", "weighted total") and len(raw_cols) > 1:
-            continue
-
-        due_iso = col.get("grading", {}).get("due") or ""
-        due_formatted = _format_grade_due(due_iso)
-        pts = col.get("score", {}).get("possible")
-
-        extracted.append({
-            "name": name,
-            "dueDate": due_formatted,
-            "status": "Unopened",
-            "grade": "--",
-            "points_possible": pts,
-        })
-
+    columns = [c for c in data["results"] if c.get("name", "").strip().lower() not in TOTAL_NAMES]
+    records = fetch_user_grades(course_id, columns, cookie_header, _api_get)
+    extracted = []
+    for col in columns:
+        record = records[col.get("id")]
+        due = col.get("dueDate") or col.get("grading", {}).get("due") or ""
+        extracted.append({"name": col.get("name", "Untitled"), "dueDate": _format_grade_due(due),
+                          "raw_due": due, **record})
     return extracted
 
 

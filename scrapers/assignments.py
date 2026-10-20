@@ -8,6 +8,7 @@ from playwright.async_api import Page
 from core.config import BLACKBOARD_BASE, load_courses
 from core.output import ensure_output_dir
 from core.async_engine import AdaptiveDOM
+from core.gradebook import fetch_user_grades, TOTAL_NAMES
 from scrapers.quiz import _api_get, _get_cookie_header, _clean_html_text
 
 logger = logging.getLogger("blackboard.scrapers.assignments")
@@ -27,15 +28,14 @@ def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, An
     if not cols or "results" not in cols:
         return None
 
-    me = _api_get("/learn/api/v1/users/me", cookie_header)
-    user_id = me.get("id") if me and "_http_status" not in me else None
+    records = fetch_user_grades(course_id, cols["results"], cookie_header, _api_get)
 
     assignments: List[Dict[str, Any]] = []
 
     for c in cols["results"]:
         name = c.get("name", "")
         # Skip total score rollups
-        if name in ("Overall Grade", "Weighted Total", "Total"):
+        if name.strip().lower() in TOTAL_NAMES:
             continue
 
         col_id = c.get("id")
@@ -107,13 +107,8 @@ def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, An
                         except Exception:
                             due_formatted = raw_c_due
 
-        # Check user grade / attempt status
-        status = "NOT_ATTEMPTED"
-        if user_id and col_id:
-            grades = _api_get(f"/learn/api/v1/courses/{course_id}/gradebook/columns/{col_id}/grades?userId={user_id}", cookie_header)
-            if grades and "results" in grades and len(grades["results"]) > 0:
-                g = grades["results"][0]
-                status = g.get("status", status)
+        record = records[col_id]
+        status = record["submission_status"]
 
         assignments.append({
             "id": content_id or col_id,
@@ -124,6 +119,9 @@ def scrape_course_assignments_http(course_id: str) -> Optional[List[Dict[str, An
             "due_date": due_formatted,
             "points_possible": f"{possible} points" if possible is not None else "",
             "submission_status": status,
+            "status": record["status"],
+            "completed": record["completed"],
+            "posts_from_you": record["posts_from_you"],
             "attempts": attempts,
             "is_timed_test": is_timed,
             "instructions": instructions,
