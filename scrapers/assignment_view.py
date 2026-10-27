@@ -10,29 +10,12 @@ import zipfile
 from xml.etree import ElementTree
 
 from core.config import BLACKBOARD_BASE
+from core.rest import DocumentRedirects as _DocumentRedirects
 from scrapers.quiz import _api_get, _clean_html_text, _format_local_datetime, _get_cookie_header
 
 MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
 DEFAULT_TEXT_LIMIT = 12000
 FULL_TEXT_LIMIT = 60000
-
-
-class _DocumentRedirects(urllib.request.HTTPRedirectHandler):
-    def __init__(self, blackboard):
-        self.blackboard = blackboard
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        host = urllib.parse.urlsplit(newurl).hostname or ""
-        bb_host = urllib.parse.urlsplit(BLACKBOARD_BASE).hostname
-        allowed = (host == bb_host or re.fullmatch(r"alt-[a-z0-9]+\.blackboard\.com", host) or host.endswith(".content.blackboardcdn.com")) if self.blackboard else (
-            host == "docs.google.com" or host.endswith(".googleusercontent.com")
-        )
-        if not allowed or urllib.parse.urlsplit(newurl).scheme != "https":
-            raise urllib.error.HTTPError(req.full_url, 403, "Document redirect outside its provider", headers, fp)
-        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if redirected is not None and host != bb_host:
-            redirected.remove_header("Cookie")
-        return redirected
 
 
 def _read_document(resource, cookie, limit):

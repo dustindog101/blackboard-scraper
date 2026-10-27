@@ -412,10 +412,14 @@ Unknown final status is displayed as `UNKNOWN`.
 
 ### `bb download <ITEM_OR_QUERY>`
 **Description:** Downloads specific Blackboard content item, attachment, or search query directly to `downloads/<CourseName>/`.
-- `ITEM_OR_QUERY`: Positional target (e.g. `bb download "Worksheet_1.pdf"` or `bb download _8825690_1`).
+- `ITEM_OR_QUERY`: Positional target: an item title, an item ID, the **file name of a file linked inside an item's body**, or the numeric `pid` of a Blackboard file URL (`bb download "Worksheet_1.pdf"`, `bb download _8825690_1`, `bb download "HW3.docx" -c IS410`, `bb download 23310389` or `_23310389_1`).
 - `-c <COURSE>`: Restrict target course.
 - `--out-dir <dir>`: Custom destination directory (default: `./downloads`). It is only created when a file is written.
-- A name that matches a **folder** is not downloaded: the command lists the files inside (and exits 0). A name that matches several items lists them and exits 1. Items that are not files (assignments, links) say so.
+- Files linked in an item's description (assignments, tests, documents; `/bbcswebdav/` links and Ultra `data-bbfile` embeds) count as files. Matching such a file name or pid downloads just that file; matching the assignment/test/document downloads all of its embedded files. File names are made safe (no path parts, `..` or escapes) and never overwrite another file written in the same run (`name (2).ext`).
+- A name that matches a **folder** is not downloaded: the command lists the files inside, including files embedded in descendants (and exits 0). A name that matches several items (or the same file name in several courses) lists them and exits 1. Items with no files (assignments without embedded files, links) say so.
+- `--json`: `{status, course_id, course_name, content_id, title, content_type, downloaded_files[{file_name, saved_to, size_bytes}]}`. `status` is `success`, `found_no_attachments`, `not_a_file`, `folder` (adds `files[{title, content_id, path, embedded_in?}]`), `multiple_matches`, `not_found` or `error`. Additive fields: `embedded_in {content_id, title, content_type}` when the match was a file embedded in another item (`content_id` is then the embedding item), and `errors[{file_name, kind, message}]` with `kind` `auth`, `forbidden`, `not_found` or `unknown`.
+- A download that comes back as an HTML page (the session expired) or HTTP 401 reports `session expired, run bb login` and saves nothing; 403 is "not visible to students", 404 "file not found". `error` exits 1.
+- `bb search` also lists embedded files (type `file`, `embedded_in` set; `bb outline --json` shows them under the embedding item's `attachments` with `embedded: true`).
 
 ### `bb activity`
 **Description:** Recent activity (grades, due dates, announcements, new content, discussion posts) grouped by course, newest first. Reads the Ultra stream REST endpoint (about 0.3 s); the browser is only a fallback when REST is unavailable. Repeated entries are merged and a discussion thread's responses collapse into one row.

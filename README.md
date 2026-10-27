@@ -476,7 +476,11 @@ Automatically locates course and downloads attachments, PDFs, or Jupyter noteboo
 ```bash
 bb download "Worksheet_1.pdf"
 bb download _8825690_1               # Download by exact Blackboard item ID
+bb download "HW3.docx" -c IS410      # A file linked inside an assignment's description
+bb download 23310389                 # By the pid in a /bbcswebdav/ URL (also _23310389_1)
+bb download "Homework 3" -c IS410    # An assignment/test/document: downloads the files embedded in it
 ```
+A download that returns a login page reports `session expired, run bb login` instead of saving it.
 
 ### 8. Course Discovery & Active Term Isolation (`bb discover`)
 Intelligently queries Blackboard REST API and auto-populates `config.json` with active courses:

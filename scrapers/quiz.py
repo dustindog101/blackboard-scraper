@@ -32,6 +32,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from core.config import BLACKBOARD_BASE, SESSION_DIR, load_courses
 from core.output import ensure_output_dir
+from scrapers.outline import _ANCHOR_RE, _extract_links, _resolve_href
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -96,38 +97,6 @@ def parse_assessment_target(target: str, default_course_id: Optional[str] = None
         result["assessment_id"] = target
 
     return result
-
-
-_ANCHOR_RE = re.compile(
-    r"<a\b[^>]*?\bhref\s*=\s*([\"'])(.*?)\1[^>]*>(.*?)</a\s*>",
-    flags=re.DOTALL | re.IGNORECASE,
-)
-
-
-def _resolve_href(href: str) -> Optional[str]:
-    """Returns an absolute URL for a usable href, or None for anchors/javascript."""
-    href = html.unescape(href or "").strip()
-    if not href or href.startswith("#") or href.lower().startswith("javascript:"):
-        return None
-    if href.startswith("/"):
-        return f"{BLACKBOARD_BASE}{href}"
-    return href
-
-
-def _extract_links(raw_html: Optional[str]) -> List[Dict[str, str]]:
-    """Lists the links in an HTML body as [{"text", "url"}], deduplicated by URL."""
-    if not raw_html:
-        return []
-    links: List[Dict[str, str]] = []
-    seen = set()
-    for match in _ANCHOR_RE.finditer(raw_html):
-        url = _resolve_href(match.group(2))
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        text = html.unescape(re.sub(r"<[^>]+>", "", match.group(3))).strip()
-        links.append({"text": text or url, "url": url})
-    return links
 
 
 def _inline_link(match: "re.Match[str]") -> str:

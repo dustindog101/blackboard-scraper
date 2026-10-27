@@ -1744,7 +1744,7 @@ async def main_async(args: argparse.Namespace) -> None:
             _emit_json(args, item)
         else:
             print(format_download_result(item))
-        if item.get("status") in ("not_found", "multiple_matches"):
+        if item.get("status") in ("not_found", "multiple_matches", "error"):
             raise SystemExit(1)
         return
 
