@@ -218,7 +218,7 @@ class TestGrabEmbedded(unittest.TestCase):
     def grab(self, query, **kw):
         with tempfile.TemporaryDirectory() as tmp:
             result = run_grab(query, kw.pop("outlines", {"_1_1": outline_with()}), Path(tmp), **kw)
-            saved = sorted(str(Path(f["saved_to"]).relative_to(tmp)) for f in result.get("downloaded_files", [])
+            saved = sorted(Path(f["saved_to"]).relative_to(tmp).as_posix() for f in result.get("downloaded_files", [])
                            if Path(f["saved_to"]).is_absolute())
         return result, saved
 

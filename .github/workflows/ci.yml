@@ -30,6 +30,7 @@ jobs:
 
   test:
     name: Test on ${{ matrix.os }} (Python ${{ matrix.python-version }})
+    timeout-minutes: 15
     runs-on: ${{ matrix.os }}
     needs: lint
     strategy:

@@ -79,8 +79,16 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(answers.BrowserTransport, "_open", forbidden)
     monkeypatch.setattr(urllib.request, "urlopen", forbidden)
     monkeypatch.setattr(urllib.request.OpenerDirector, "open", forbidden)
-    monkeypatch.setattr(socket.socket, "connect", forbidden)
-    monkeypatch.setattr(socket.socket, "connect_ex", forbidden)
+    # Windows asyncio builds its self-pipe with a loopback socketpair; allow only that.
+    def guard(real):
+        def connect(self, address, *args, **kwargs):
+            if isinstance(address, tuple) and address and address[0] in ("127.0.0.1", "::1"):
+                return real(self, address, *args, **kwargs)
+            return forbidden()
+        return connect
+
+    monkeypatch.setattr(socket.socket, "connect", guard(socket.socket.connect))
+    monkeypatch.setattr(socket.socket, "connect_ex", guard(socket.socket.connect_ex))
     monkeypatch.setattr(answers, "SESSION_DIR", tmp_path / "session")
     monkeypatch.setattr(answers, "BLACKBOARD_BASE", ORIGIN)
     monkeypatch.setattr(answers, "_now", lambda: NOW)
@@ -357,7 +365,9 @@ def test_parse_refuses_duplicate_question_changes(doc):
         model.parse_file(json.dumps(doc))
 
 
-@pytest.mark.parametrize("text", ["{", "[]", "null", "x" * (model.MAX_FILE_BYTES + 1)])
+# Explicit ids: pytest puts the param id in an env var, which Windows caps at 32767 chars.
+@pytest.mark.parametrize("text", ["{", "[]", "null", "x" * (model.MAX_FILE_BYTES + 1)],
+                         ids=["open-brace", "array", "null", "oversize"])
 def test_parse_refuses_malformed_or_oversize(text):
     with pytest.raises(model.AnswersInputError):
         model.parse_file(text)
@@ -590,20 +600,27 @@ def test_apply_near_deadline_refuses_before_any_write(doc, state, provider, seco
     assert provider.writes == []
 
 
+def lock_text(lock):
+    lock.handle.seek(1)  # byte 0 is the locked byte
+    return lock.handle.read().decode()
+
+
 def test_apply_live_pid_lock_refused(doc, state, provider):
     with answers.AttemptLock(ATT) as lock:
-        owner = lock.path.read_text()
+        # Read through the holder's handle: Windows byte-range locks deny other handles.
+        owner = lock_text(lock)
         with pytest.raises(model.AnswersRefusal) as exc:
             answers.apply(doc, state, lambda _: None)
         assert exc.value.code == "locked"
-        assert lock.path.read_text() == owner
+        assert lock_text(lock) == owner
     assert provider.writes == []
 
 
 
 def test_old_lock_with_live_pid_remains_held(doc, state, provider):
     with answers.AttemptLock(ATT) as lock:
-        lock.path.write_text(f"{os.getpid()} {answers.time.time() - 601}")
+        lock.handle.write(f"{os.getpid()} {answers.time.time() - 601}".encode())
+        lock.handle.flush()
         with pytest.raises(model.AnswersRefusal) as exc:
             answers.apply(doc, state, lambda _: None)
         assert exc.value.code == "locked"
@@ -675,17 +692,22 @@ def test_preview_and_human_formatting_are_read_only(doc, state, provider):
     assert provider.writes == []
 
 
+def assert_private_mode(path):
+    if os.name != "nt":  # Windows has no POSIX permission bits
+        assert path.stat().st_mode & 0o777 == 0o600
+
+
 def test_write_private_mode_and_no_clobber(tmp_path):
     path = tmp_path / "nested" / "export.json"
     answers.write_private(path, "first")
     assert path.read_text() == "first"
-    assert path.stat().st_mode & 0o777 == 0o600
+    assert_private_mode(path)
     with pytest.raises(model.AnswersInputError, match="already exists"):
         answers.write_private(path, "second")
     assert path.read_text() == "first"
     answers.write_private(path, "replacement", overwrite=True)
     assert path.read_text() == "replacement"
-    assert path.stat().st_mode & 0o777 == 0o600
+    assert_private_mode(path)
 
 
 @pytest.mark.parametrize("dangling", [False, True])
@@ -1024,7 +1046,7 @@ def test_private_writer_uses_exclusive_unique_temp(doc, tmp_path):
     answers.write_private(path, "safe")
     assert victim.read_text() == "untouched"
     assert path.read_text() == "safe"
-    assert path.stat().st_mode & 0o777 == 0o600
+    assert_private_mode(path)
 
 
 @pytest.mark.parametrize("record", [None, [], "bad", {}, {"question_attempt_id": 1, "selected_choice_ids": []},
