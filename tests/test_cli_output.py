@@ -295,7 +295,7 @@ class TestDownload(unittest.TestCase):
             dest = Path(tmp) / "downloads" / "IS_410"
             with patch("scrapers.outline.fetch_item_attachments", return_value=[]):
                 result = download_content_item_files("c", "i", dest, "x", cookie_header="a=b", allow_default_endpoint=False)
-            self.assertEqual(result, [])
+            self.assertEqual(result, {"downloaded": [], "errors": []})
             self.assertFalse(dest.exists())
 
 

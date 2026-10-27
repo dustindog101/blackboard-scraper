@@ -363,6 +363,36 @@ bb outline --all --type document     # Lecture docs only
 bb outline --all --filter "Homework" # Search keyword
 ```
 
+### Save answers without submitting (`bb answers`)
+
+`bb answers "Practice Quiz" -c DEMO100` reads an existing in-progress Ultra test.
+Use `--set 1=A --set 2=A,B --set 3=False` to preview; add `--apply` to save and verify.
+`--set N=clear` clears; True/False/T/F and letters are case-insensitive. Letters follow
+bb's list, which may differ from Blackboard's shuffled display; no option-text matching.
+Or export with `--export answers.json`, edit `changes[]`, preview with `--file answers.json`,
+then add `--apply`. Both inputs share the same save pipeline; runtime `--set` baselines
+have no file expiry. Unchanged questions collapse; options show letters and radio/checkbox markers.
+
+`--new-attempt` explicitly starts an eligible untimed test, then shows its answers;
+with `--set ... --apply` it can start and save. It uses an existing IN_PROGRESS attempt
+when present. Unknown safety/count/deadline data, restrictions, exhausted attempts and
+less than 120 seconds until due refuse. HTTP → installed browser → optional bundled
+Playwright; a dispatched start is never retried, and GET must confirm exactly one new
+IN_PROGRESS attempt. The creation request was observed live from the Ultra UI; `bb`'s own start is offline-tested. Combined start/save
+requires a readable prior question list for input preflight; otherwise start separately.
+It never submits. Saved answers may be visible to course staff.
+
+Verified answer types: multiple answer (select all); single choice (multiple choice
+with one answer, encoded by Ultra as `multipleanswer` with `answerSelectionLimit: 1`);
+and true/false (`eitherOr` / `true_false`). Essay, short answer, fill-in-the-blank,
+matching, ordering, calculated, file response, and anything else are unsupported:
+**answer in Blackboard**. Type support does not establish live acceptance of every clear case.
+
+Fresh baseline checks are weaker than CAS; avoid concurrent browser/other-host edits.
+Inspect Blackboard after any partial/unknown result. See the [CLI reference](docs/CLI_REFERENCE.md#bb-answers-target--c-course),
+[protocol evidence](docs/specs/save-draft-answers-protocol.md), and
+[retake decision](docs/adr/0007-explicit-untimed-attempt-creation.md).
+
 ### 3. Assignment Discovery (`bb assignments`)
 List gradable items and their status, then inspect one by title or ID:
 ```bash
@@ -446,7 +476,11 @@ Automatically locates course and downloads attachments, PDFs, or Jupyter noteboo
 ```bash
 bb download "Worksheet_1.pdf"
 bb download _8825690_1               # Download by exact Blackboard item ID
+bb download "HW3.docx" -c IS410      # A file linked inside an assignment's description
+bb download 23310389                 # By the pid in a /bbcswebdav/ URL (also _23310389_1)
+bb download "Homework 3" -c IS410    # An assignment/test/document: downloads the files embedded in it
 ```
+A download that returns a login page reports `session expired, run bb login` instead of saving it.
 
 ### 8. Course Discovery & Active Term Isolation (`bb discover`)
 Intelligently queries Blackboard REST API and auto-populates `config.json` with active courses:

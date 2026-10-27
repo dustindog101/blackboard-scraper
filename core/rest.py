@@ -8,12 +8,33 @@ import json
 import re
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, List, Optional
 
 from core.config import BLACKBOARD_BASE, SESSION_DIR
 from core.session_state import cookie_header as filtered_cookie_header, user_agent
 
+
+class DocumentRedirects(urllib.request.HTTPRedirectHandler):
+    """Redirect policy for document downloads: https only, to the provider's own hosts, and the session
+    Cookie is dropped on any host but Blackboard's. A refused redirect raises HTTPError 403."""
+
+    def __init__(self, blackboard):
+        self.blackboard = blackboard
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        host = urllib.parse.urlsplit(newurl).hostname or ""
+        bb_host = urllib.parse.urlsplit(BLACKBOARD_BASE).hostname
+        allowed = (host == bb_host or re.fullmatch(r"alt-[a-z0-9]+\.blackboard\.com", host) or host.endswith(".content.blackboardcdn.com")) if self.blackboard else (
+            host == "docs.google.com" or host.endswith(".googleusercontent.com")
+        )
+        if not allowed or urllib.parse.urlsplit(newurl).scheme != "https":
+            raise urllib.error.HTTPError(req.full_url, 403, "Document redirect outside its provider", headers, fp)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and host != bb_host:
+            redirected.remove_header("Cookie")
+        return redirected
 
 
 class RestError(Exception):

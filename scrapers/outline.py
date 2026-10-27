@@ -3,22 +3,123 @@ import asyncio
 import html
 import json
 import logging
+import mimetypes
 import re
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
+from email.message import Message
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from core.config import BLACKBOARD_BASE, SESSION_DIR, load_courses
 from core.output import ensure_output_dir
+from core.rest import DocumentRedirects, RestError
 from core.async_engine import AdaptiveDOM
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
 
 logger = logging.getLogger("blackboard.scrapers.outline")
+
+_ANCHOR_RE = re.compile(
+    r"<a\b[^>]*?\bhref\s*=\s*([\"'])(.*?)\1[^>]*>(.*?)</a\s*>",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+
+
+def _resolve_href(href: str) -> Optional[str]:
+    """Returns an absolute URL for a usable href, or None for anchors/javascript."""
+    href = html.unescape(href or "").strip()
+    if not href or href.startswith("#") or href.lower().startswith("javascript:"):
+        return None
+    if href.startswith("/"):
+        return f"{BLACKBOARD_BASE}{href}"
+    return href
+
+
+def _extract_links(raw_html: Optional[str]) -> List[Dict[str, str]]:
+    """Lists the links in an HTML body as [{"text", "url"}], deduplicated by URL."""
+    if not raw_html:
+        return []
+    links: List[Dict[str, str]] = []
+    seen = set()
+    for match in _ANCHOR_RE.finditer(raw_html):
+        url = _resolve_href(match.group(2))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        text = html.unescape(re.sub(r"<[^>]+>", "", match.group(3))).strip()
+        links.append({"text": text or url, "url": url})
+    return links
+
+
+_DAV_PATH_RE = re.compile(r"/bbcswebdav/", re.IGNORECASE)
+_PID_RE = re.compile(r"/bbcswebdav/pid-(\d+)", re.IGNORECASE)
+_BBFILE_RE = re.compile(r"""data-bbfile\s*=\s*(["'])(.*?)\1""", re.DOTALL | re.IGNORECASE)
+
+
+def _is_blackboard_url(url: str) -> bool:
+    return urllib.parse.urlsplit(url).hostname == urllib.parse.urlsplit(BLACKBOARD_BASE).hostname
+
+
+def url_pid(url: str) -> Optional[str]:
+    """The numeric pid inside a bbcswebdav URL (``pid-23310389-dt-...``), or None."""
+    match = _PID_RE.search(url or "")
+    return match.group(1) if match else None
+
+
+def _embedded_name(text: str, url: str) -> str:
+    base = urllib.parse.unquote(Path(urllib.parse.urlsplit(url).path).name)
+    name = " ".join(html.unescape(text or "").split())
+    if not name or name == url:
+        return base or "document"
+    if not Path(name).suffix and Path(base).suffix:
+        name += Path(base).suffix  # link text like "Homework 3" still saves with the real extension
+    return name
+
+
+def extract_embedded_files(raw_html: Optional[str]) -> List[Dict[str, Any]]:
+    """Files linked inside an item's HTML body: bbcswebdav hrefs (absolute or relative, either quote
+    style) and Ultra ``data-bbfile`` JSON. Returns attachment dicts marked ``embedded: True``."""
+    if not raw_html:
+        return []
+    found: List[Dict[str, Any]] = []
+    seen = set()
+
+    def add(name: str, url: str, mime: str = "") -> None:
+        url = urllib.parse.urlunsplit(urllib.parse.urlsplit(url)._replace(query="", fragment=""))  # drop signed tokens
+        if url in seen or not _is_blackboard_url(url):
+            return
+        seen.add(url)
+        found.append({
+            "id": url_pid(url),
+            "file_name": name,
+            "mime_type": mime or mimetypes.guess_type(name)[0] or "application/octet-stream",
+            "download_url": url,
+            "embedded": True,
+        })
+
+    for match in _BBFILE_RE.finditer(raw_html):
+        try:
+            info = json.loads(html.unescape(match.group(2)))
+        except ValueError:
+            continue
+        url = _resolve_href(info.get("resourceUrl") or info.get("viewerUrl") or "")
+        if url:
+            add(_embedded_name(info.get("linkName") or info.get("displayName") or "", url), url, info.get("mimeType", ""))
+    for link in _extract_links(raw_html):
+        if _DAV_PATH_RE.search(urllib.parse.urlsplit(link["url"]).path):
+            add(_embedded_name(link["text"], link["url"]), link["url"])
+    return found
+
+
+def safe_file_name(name: str, fallback: str = "downloaded_file") -> str:
+    """A bare file name: HTML/URL escapes decoded, path parts and ``..`` stripped, extension kept."""
+    name = urllib.parse.unquote(html.unescape(name or ""))
+    name = re.sub(r"[\x00-\x1f<>:\"|?*]", "_", name.replace("\\", "/").split("/")[-1]).strip(" .")
+    return name or fallback
 
 
 # ============================================================================
@@ -166,6 +267,14 @@ def _crawl_api_tree(
                 "mime_type": mime_type,
                 "download_url": download_url,
             })
+
+        if content_type != "file":
+            # Links live in the description, the document body, or an assignment/test's instructions.
+            handler = item.get("contentHandler") or {}
+            body_parts = (desc, item.get("body"), handler.get("instructions"))
+            embedded = extract_embedded_files(" ".join(x for x in body_parts if isinstance(x, str)))
+            attachments.extend(embedded)
+            is_downloadable = bool(embedded)
 
         # Resolve external link URL
         external_url: Optional[str] = None
@@ -515,37 +624,10 @@ def fetch_item_attachments(
 
         raw_body = (c_doc.get("body", {}).get("rawText") or "") + " " + (c_doc.get("body", {}).get("displayText") or "")
 
-        # Look for data-bbfile JSON or resourceUrl
-        bbfile_matches = re.finditer(r'data-bbfile="([^"]+)"', raw_body)
-        for m in bbfile_matches:
-            try:
-                raw_json = html.unescape(m.group(1))
-                file_info = json.loads(raw_json)
-                res_url = file_info.get("resourceUrl") or file_info.get("viewerUrl")
-                fname = file_info.get("linkName") or file_info.get("displayName") or "document.pdf"
-                if res_url and res_url not in seen_urls:
-                    seen_urls.add(res_url)
-                    attachments.append({
-                        "id": cid,
-                        "file_name": fname,
-                        "mime_type": file_info.get("mimeType", "application/octet-stream"),
-                        "download_url": res_url,
-                    })
-            except Exception:
-                pass
-
-        # Look for direct href="https://.../bbcswebdav/..." links
-        dav_matches = re.finditer(r'href="(https?://[^"]+/bbcswebdav/[^"]+)"', raw_body)
-        for m in dav_matches:
-            dav_url = html.unescape(m.group(1))
-            if dav_url not in seen_urls:
-                seen_urls.add(dav_url)
-                attachments.append({
-                    "id": cid,
-                    "file_name": Path(urllib.parse.urlparse(dav_url).path).name or "document",
-                    "mime_type": "application/octet-stream",
-                    "download_url": dav_url,
-                })
+        for emb in extract_embedded_files(raw_body):
+            if emb["download_url"] not in seen_urls:
+                seen_urls.add(emb["download_url"])
+                attachments.append({**emb, "id": cid})
 
     return attachments
 
@@ -554,35 +636,105 @@ def download_course_file(
     download_url: str,
     destination_path: Path,
     cookie_header: Optional[str] = None,
-) -> bool:
+    taken: Optional[set] = None,
+) -> Path:
     """
-    Downloads an authenticated course file or attachment to local disk.
-    Supports both absolute and relative Blackboard URLs.
-    Creates parent directories automatically.
+    Downloads an authenticated course file or attachment to local disk (absolute or relative URL) and
+    returns the final path. The directory is created only once a real file body arrives. Raises
+    ``RestError`` with a distinct kind: auth (401 or an HTML login page instead of a file), forbidden
+    (403, or a redirect outside Blackboard's own hosts), not_found, unknown. When ``destination_path``
+    has no extension it is taken from the response ``Content-Disposition`` filename, else its
+    ``Content-Type``; ``taken`` (names already written this run) keeps the final name unique.
     """
     cookie_header = cookie_header or get_cookie_header()
     if not cookie_header:
-        logger.error("Cannot download file: Missing session cookies.")
-        return False
+        raise RestError("auth", 401, "session expired, run `bb login`")
 
     if download_url.startswith("/"):
         download_url = f"{BLACKBOARD_BASE}{download_url}"
 
-    headers = {
-        "Cookie": cookie_header,
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    is_bb = _is_blackboard_url(download_url)
+    if is_bb:
+        headers["Cookie"] = cookie_header  # never send the session to another host
 
     try:
-        req = urllib.request.Request(download_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        opener = urllib.request.build_opener(DocumentRedirects(is_bb))
+        with opener.open(urllib.request.Request(download_url, headers=headers), timeout=30) as resp:
             content = resp.read()
-        destination_path.parent.mkdir(parents=True, exist_ok=True)
-        destination_path.write_bytes(content)
-        return True
-    except Exception as e:
-        logger.error(f"Failed to download file from {download_url} to {destination_path}: {e}")
+            content_type = resp.headers.get("Content-Type", "")
+            disposition = resp.headers.get("Content-Disposition", "")
+    except urllib.error.HTTPError as exc:
+        kind = {401: "auth", 403: "forbidden", 404: "not_found"}.get(exc.code, "unknown")
+        raise RestError(kind, exc.code, f"HTTP {exc.code}") from None
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RestError("unknown", None, str(exc)) from None
+
+    if _looks_like_login_page(content, content_type, destination_path.name):
+        raise RestError("auth", 401, "session expired, run `bb login`")
+    if not destination_path.suffix:
+        name = _name_with_extension(destination_path.name, content_type, disposition)
+        if taken is not None:
+            taken.discard(destination_path.name.lower())  # the provisional name is replaced by the final one
+            destination_path = _free_path(destination_path.parent, name, taken)
+        else:
+            destination_path = destination_path.parent / name
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    destination_path.write_bytes(content)
+    return destination_path
+
+
+def _name_with_extension(name: str, content_type: str, disposition: str) -> str:
+    """``name`` with an extension: the Content-Disposition filename if it has one, else a
+    Content-Type guess (never ``.html``, which would only ever be a login page)."""
+    message = Message()
+    message["Content-Disposition"] = disposition
+    suggested = safe_file_name(message.get_filename() or "", "")
+    if Path(suggested).suffix:
+        return suggested
+    mime = content_type.split(";")[0].strip().lower()
+    ext = None if mime in ("text/html", "application/octet-stream") else mimetypes.guess_extension(mime)
+    return name + ext if ext and ext not in (".html", ".htm") else name
+
+
+def _looks_like_login_page(content: bytes, content_type: str, file_name: str) -> bool:
+    """A 200 HTML page where a non-HTML file was expected means the session was bounced to login."""
+    if Path(file_name).suffix.lower() in (".html", ".htm"):
         return False
+    head = content[:512].lstrip().lower()
+    return "text/html" in content_type.lower() or head.startswith((b"<!doctype html", b"<html"))
+
+
+def _free_path(directory: Path, name: str, taken: set) -> Path:
+    """``name`` in ``directory``, or ``name (2).ext`` when this run already wrote that name."""
+    path, n = directory / name, 1
+    while path.name.lower() in taken:
+        n += 1
+        path = directory / f"{Path(name).stem} ({n}){Path(name).suffix}"
+    taken.add(path.name.lower())
+    return path
+
+
+def download_attachments(
+    attachments: List[Dict[str, Any]],
+    destination_dir: Path,
+    default_filename: str = "downloaded_file",
+    cookie_header: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Downloads attachment dicts into ``destination_dir`` with safe, de-duplicated names.
+    Returns {"downloaded": [{file_name, saved_to, size_bytes}], "errors": [{file_name, kind, message}]}."""
+    downloaded: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    taken: set = set()
+    for att in attachments:
+        dest = _free_path(destination_dir, safe_file_name(att.get("file_name") or "", default_filename), taken)
+        try:
+            dest = download_course_file(att["download_url"], dest, cookie_header, taken)
+        except RestError as exc:
+            errors.append({"file_name": dest.name, "kind": exc.kind, "message": str(exc)})
+            continue
+        downloaded.append({"file_name": dest.name, "saved_to": str(dest), "size_bytes": dest.stat().st_size})
+    return {"downloaded": downloaded, "errors": errors}
 
 
 def download_content_item_files(
@@ -592,40 +744,21 @@ def download_content_item_files(
     default_filename: str = "downloaded_file",
     cookie_header: Optional[str] = None,
     allow_default_endpoint: bool = True,
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
     """
     Resolves true attachment IDs for an item and downloads all associated files.
-    Returns list of downloaded file info dicts. The directory is only created when a file is written.
-    ``allow_default_endpoint`` is False for items that are not plain files (folders, documents), so the
-    single-attachment endpoint is never tried for them.
+    Returns {"downloaded": [...], "errors": [...]} (see ``download_attachments``). The directory is only
+    created when a file is written. ``allow_default_endpoint`` is False for items that are not plain
+    files (folders, documents), so the single-attachment endpoint is never tried for them.
     """
     attachments = fetch_item_attachments(course_id, content_id, cookie_header)
-    downloaded = []
-
-    if attachments:
-        for att in attachments:
-            fname = att.get("file_name") or default_filename
-            dest = destination_dir / fname
-            success = download_course_file(att["download_url"], dest, cookie_header)
-            if success:
-                downloaded.append({
-                    "file_name": fname,
-                    "saved_to": str(dest),
-                    "size_bytes": dest.stat().st_size if dest.exists() else 0,
-                })
-    elif allow_default_endpoint:
+    if not attachments and allow_default_endpoint:
         # Plain file items: direct content attachment download endpoint
-        fallback_url = f"{BLACKBOARD_BASE}/learn/api/public/v1/courses/{course_id}/contents/{content_id}/attachments/default/download"
-        dest = destination_dir / default_filename
-        success = download_course_file(fallback_url, dest, cookie_header)
-        if success:
-            downloaded.append({
-                "file_name": default_filename,
-                "saved_to": str(dest),
-                "size_bytes": dest.stat().st_size if dest.exists() else 0,
-            })
-
-    return downloaded
+        attachments = [{
+            "file_name": default_filename,
+            "download_url": f"{BLACKBOARD_BASE}/learn/api/public/v1/courses/{course_id}/contents/{content_id}/attachments/default/download",
+        }]
+    return download_attachments(attachments, destination_dir, default_filename, cookie_header)
 
 
 # ============================================================================

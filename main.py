@@ -150,7 +150,7 @@ _COURSE_CODE_RE = re.compile(r"\s*\([^)]*\)\s*(?:SP|FA|SU|WI)\d{4}\s*\([^)]*\)\s
 
 _REQUIRES_COURSE = ("outline", "discussions", "discuss")
 _TAKES_COURSE = (
-    "outline", "discussions", "discuss", "assignments", "assign", "assignment", "quiz", "asmt", "assessment",
+    "outline", "discussions", "discuss", "assignments", "assign", "assignment", "quiz", "asmt", "assessment", "answers",
     "grades", "announcements", "announce", "news", "search", "find", "download", "grab", "get", "calendar", "cal",
 )
 
@@ -389,7 +389,7 @@ def _intercept_legacy_args(argv: List[str]) -> Tuple[List[str], Optional[str]]:
     subcommands = {
         "login", "logout", "session", "check", "briefing", "brief", "due", "grades",
         "announcements", "announce", "news", "outline", "assignments", "assign",
-        "assignment", "quiz", "asmt", "assessment",
+        "assignment", "quiz", "asmt", "assessment", "answers",
         "search", "find", "download", "grab", "get", "calendar", "cal", "activity",
         "profile", "whoami", "courses", "discover", "terms", "bot", "menubar", "app",
         "guide", "help", "discussions", "discuss"
@@ -402,14 +402,11 @@ def _intercept_legacy_args(argv: List[str]) -> Tuple[List[str], Optional[str]]:
 
     BOOLEAN_PRE_FLAGS = {"--json", "--compact", "--raw", "-v", "--visible", "--md", "--save"}
     if argv[0] in BOOLEAN_PRE_FLAGS and len(argv) > 1:
-        subcmd_idx = None
-        for idx, token in enumerate(argv):
-            if token in subcommands:
-                subcmd_idx = idx
-                break
-        if subcmd_idx is not None:
-            reordered = [argv[subcmd_idx]] + [arg for i, arg in enumerate(argv) if i != subcmd_idx]
-            return reordered, None
+        subcmd_idx = 0
+        while subcmd_idx < len(argv) and argv[subcmd_idx] in BOOLEAN_PRE_FLAGS:
+            subcmd_idx += 1
+        if subcmd_idx < len(argv) and argv[subcmd_idx] in subcommands:
+            return [argv[subcmd_idx]] + argv[:subcmd_idx] + argv[subcmd_idx + 1:], None
 
     if argv[0] in ("-h", "--help", "-V", "--version"):
         return argv, None
@@ -646,7 +643,7 @@ _CANONICAL_COMMANDS = [
     # Daily workflow
     "briefing", "due", "grades", "announcements",
     # Course content
-    "outline", "assignments", "assignment", "search", "download",
+    "outline", "assignments", "assignment", "answers", "search", "download",
     "calendar", "activity", "profile", "discussions",
     # Discovery
     "courses", "discover", "terms",
@@ -682,6 +679,11 @@ class HelpfulParser(argparse.ArgumentParser):
     """ArgumentParser with concise did-you-mean errors (imsg-style)."""
 
     def error(self, message: str) -> None:
+        argv = _LAST_ARGV or sys.argv[1:]
+        if argv and argv[0] == "answers" and "--json" in argv:
+            from scrapers.answers import input_error
+            input_error(argparse.Namespace(json=True), message)
+            self.exit(2)
         # Invalid subcommand choice -> short suggestion, not a 500-char dump.
         if "invalid choice" in message and "argument <command>" in message:
             bad = ""
@@ -910,6 +912,40 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
     single_p.set_defaults(assignment_view="default")
     single_p.add_argument("--start-attempt", "--begin-attempt", dest="start_attempt", action="store_true", help="Allow beginning a new attempt if none is active (guarded)")
     single_p.add_argument("--force-start", dest="force_start", action="store_true", help="With --start-attempt: confirm starting timed assessments/exams")
+
+    answers_p = subparsers.add_parser(
+        "answers",
+        help="Save quiz answers without submitting",
+        description=(
+            "Show, preview and save answers in a test attempt. Never submits: you review and submit in Blackboard.\n"
+            "Works on the open (in-progress) attempt. --new-attempt starts a retake first (uses up one attempt).\n"
+            "Supported: multiple answer (select all), multiple choice (one answer), true/false.\n"
+            "Essay, short answer, fill-in-the-blank, matching, ordering, calculated and file response: answer in Blackboard."
+        ),
+        epilog=(
+            "Examples:\n"
+            '  bb answers "J#5" -c ENGL                                  # 1. show what is saved (read only)\n'
+            '  bb answers "J#5" -c ENGL --set 1=A,B,D --set 9=False      # 2. preview changes (saves nothing)\n'
+            '  bb answers "J#5" -c ENGL --set 1=A,B,D --set 9=False --apply   # 3. save, verify, leave unsubmitted\n'
+            '  bb answers "J#5" -c ENGL --new-attempt                    # start a retake (uses an attempt)\n'
+            '  bb answers "https://blackboard.umbc.edu/ultra/courses/_1_1/assessment/_2_1/overview"   # paste a URL\n'
+            '  bb answers "J#5" -c ENGL --export j5.json   # agents: JSON template; then --file j5.json [--apply]\n'
+            "\nLetters (A, B, C...) follow bb's list, which can differ from Blackboard's shuffled display."
+        ),
+    )
+    answers_p.add_argument("target", metavar="TARGET", help="Test title or part of it (e.g. 'J#5'), its ID, or its Blackboard URL")
+    answers_p.add_argument("--course", "-c", help="Scope the title search to a course code or ID (e.g. ENGL100)")
+    answers_p.add_argument("--json", action="store_true", help="Print one JSON result to stdout (progress goes to stderr)")
+    answers_p.add_argument("--out", metavar="FILE", help="Also write the JSON result to FILE (readable only by you)")
+    answers_p.add_argument("--compact", action="store_true", help="Minified JSON")
+    answers_mode = answers_p.add_mutually_exclusive_group()
+    answers_mode.add_argument("--set", action="append", metavar="N=A,B", help="Choose answers by bb's question number and letters, e.g. 1=A,C  9=False  4=clear (repeatable)")
+    answers_mode.add_argument("--export", metavar="FILE", help="Write the questions and answers to FILE as a template to edit")
+    answers_mode.add_argument("--file", metavar="FILE", help="Read changes from an edited --export FILE")
+    answers_p.add_argument("--apply", action="store_true", help="With --set or --file: save the changes (never submits)")
+    answers_p.add_argument("--new-attempt", action="store_true", help="Start a new attempt first (uses up one attempt; untimed tests only). If one is already open, uses it")
+    answers_p.add_argument("--attempt", metavar="ID", help="Pick one of several in-progress attempts")
+    answers_p.add_argument("--overwrite", action="store_true", help="Allow replacing an existing --export/--out file")
 
     search_p = subparsers.add_parser(
         "search",
@@ -1393,6 +1429,10 @@ async def main_async(args: argparse.Namespace) -> None:
     all_courses_flag = getattr(args, "all", False)
     target_cids = resolve_target_courses(target_course_arg, all_courses_flag, courses)
 
+    if subcmd == "answers" and target_course_arg and not target_cids:
+        from scrapers.answers import input_error
+        raise SystemExit(input_error(args, f"no course matches '{target_course_arg}'."))
+
     # Usage errors are short, exit 2, and name the fix. They run before any network or session probe.
     if subcmd in _REQUIRES_COURSE and not target_cids:
         _usage_error(f"{subcmd} needs a course.", f"Try: bb {subcmd} {_example_code(courses)}   (or --all)", "List yours: bb courses")
@@ -1402,6 +1442,25 @@ async def main_async(args: argparse.Namespace) -> None:
             "Yours: " + ", ".join(_short_label(n) for n in courses.values()),
             "Use a code like IS410, part of a title, a course ID, or --all.",
         )
+
+    # --- answers: never auto-logs in (no Duo prompt mid-save); refusals say to run bb login ---
+    if subcmd == "answers":
+        from scrapers.answers import run_cli
+        import signal
+        import threading
+        cancel = threading.Event()
+        previous = signal.signal(signal.SIGINT, lambda *_: cancel.set())
+        try:
+            worker = asyncio.create_task(asyncio.to_thread(run_cli, args, courses, target_cids, cancel_event=cancel))
+            try:
+                code = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                cancel.set()
+                # Let reconciliation emit its one truthful receipt before exiting.
+                code = await asyncio.shield(worker)
+        finally:
+            signal.signal(signal.SIGINT, previous)
+        raise SystemExit(code)
 
     # From here down, academic commands require an active session
     if not await _require_session_async(cdp):
@@ -1685,7 +1744,7 @@ async def main_async(args: argparse.Namespace) -> None:
             _emit_json(args, item)
         else:
             print(format_download_result(item))
-        if item.get("status") in ("not_found", "multiple_matches"):
+        if item.get("status") in ("not_found", "multiple_matches", "error"):
             raise SystemExit(1)
         return
 

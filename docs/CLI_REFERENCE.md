@@ -213,6 +213,198 @@ Native rubric previews require `displayBefore: true`; hidden rubric definitions 
 - Native submission assignments, tests, discussions, external-tool links and grade-only entries are identified separately. External provider visibility/submission state is not inferred from missing Blackboard attempt data.
 - `--start-attempt` (`--begin-attempt`) permits starting a new attempt; `--force-start` additionally confirms a timed assessment.
 
+### `bb answers <TARGET> [-c COURSE]`
+Show, export, preview or explicitly save chosen answers in an existing `IN_PROGRESS`
+native Ultra test attempt. Explicit `--new-attempt` can start an eligible untimed attempt.
+Never submits. Saving or starting is a remote
+mutation; agents need the student's explicit save request and must always preview first.
+Saved answers may be visible to course staff.
+
+```bash
+bb answers "Practice Quiz" -c DEMO100                         # show saved answers
+bb answers "Practice Quiz" -c DEMO100 --export answers.json   # export; no remote changes
+# Edit only changes[] in answers.json, then preview:
+bb answers "Practice Quiz" -c DEMO100 --file answers.json
+bb answers "Practice Quiz" -c DEMO100 --file answers.json --apply
+bb answers "Practice Quiz" -c DEMO100 --set 1=A --set 2=A,B --set 3=False  # preview
+bb answers "Practice Quiz" -c DEMO100 --set 1=A --apply                  # save
+bb answers "Practice Quiz" -c DEMO100 --new-attempt                     # start then show
+bb answers "Practice Quiz" -c DEMO100 --new-attempt --set 1=A --apply    # retake and save
+```
+
+- `TARGET`: test title/substring, content ID or gradebook column ID; ambiguity refuses.
+  Use `-c COURSE` to scope discovery. There is no bulk apply.
+- `--attempt ID`: select among multiple eligible active attempts. Export/file mode pins
+  the exact attempt; the command never silently substitutes another one.
+- `--export FILE`: write a fresh template with `changes: []`; expires after 15 minutes.
+- `--file FILE`: validate and preview the before/after changes without saving.
+  Mutually exclusive with `--export` and `--set`; `--apply` requires `--file` or `--set`.
+- `--set N=A,B`: repeatable shorthand using the answerable question number shown by bb
+  (presentation blocks do not count). Letters are case-insensitive and follow bb's list,
+  which may differ from Blackboard's shuffled display. True/false accepts True/False/T/F
+  as well as letters. `N=clear` clears. Never matches by option text. Duplicate numbers,
+  unknown letters, unsupported/absent numbers and excessive selections exit 2 before writes.
+  It translates to the file mode's internal changes list and shares validation, fingerprints,
+  baseline comparisons, locking, per-question readback and receipts. Its baseline is read at
+  runtime; no 15-minute file expiry applies. Without `--apply`, it previews with zero writes
+  unless the separate explicit `--new-attempt` flag is also present.
+- `--new-attempt`: run the same `_safe_due` check as apply; require a complete known
+  attempt inventory and positive attempts remaining (`attemptsAllowed` minus existing count;
+  Ultra's observed `attemptCount` is the equivalent provider field). Unknown, contradictory,
+  unlimited sentinel or exhausted counts refuse. The 120-second due window also applies.
+  If one IN_PROGRESS attempt exists, report and use it without starting another; multiple
+  active attempts refuse. A local assessment lock serializes CLI starts on this machine.
+  HTTP first, then the installed browser, then optional bundled Playwright via `core.browser`.
+  Only missing session/XSRF **before dispatch** permits browser fallback. After any start
+  dispatch (including HTTP 401/404), never retry or switch transports: reconcile by GET only.
+  Browser mode opens the test's overview page and clicks the one `Start attempt N` link, refuses timer/access-code
+  prompts and blocks every non-read request except the single allowlisted creation POST.
+  GET must confirm exactly one new IN_PROGRESS attempt and its ID. Ambiguity exits 4.
+  The route and body were observed live from the Ultra UI; `bb`'s own start has run offline only. See [protocol](specs/save-draft-answers-protocol.md).
+  With `--set ... --apply`, if the new attempt's questions or choices differ from the previous attempt, nothing is saved (exit 4).
+  With `--set`, all edits are preflighted against a readable prior attempt before creation,
+  then translated again against the new runtime question list. If no prior question list
+  is available, start separately, then preview/save. A changed new question definition may
+  prevent saving after creation; receipt/exit 4 preserves the created attempt ID.
+  Cannot combine with `--file` (pinned to an existing attempt) or `--attempt`.
+- `--apply`: save requested changes sequentially and independently read them back.
+  No mandatory stdin prompt; no automatic submission or rollback.
+- `--json`: one versioned JSON document on stdout; progress/warnings go to stderr.
+  `--compact` minifies JSON. Results include `outcome` and `submitted: false`, meaning
+  this command sent no submission action, not a guarantee against external submission.
+- `--out FILE`: also write the JSON result (an export result is a receipt, not its template).
+  Keep input/template and result paths distinct. Output files use atomic replacement
+  and owner-only permissions where supported; symlink destinations are refused.
+- `--overwrite`: permit replacing an existing `--export` or `--out` file. It does not
+  override conflicts, expiry, eligibility or deadline checks.
+
+The file schema is version 1: `target` binds the site/course/assessment/attempt and
+local account; `snapshot` holds timestamps, a definition fingerprint and baseline
+questions; `unsupported` lists unsupported blocks; `changes[]` requests sparse edits.
+Synthetic shape below: use a fresh export's actual IDs, binding, hash and timestamps;
+do not copy the placeholder metadata into a live file.
+
+```json
+{
+  "schema_version": 1,
+  "target": {
+    "origin": "https://blackboard.example.edu",
+    "course_id": "_100_1",
+    "assessment_id": "_200_1",
+    "attempt_id": "_300_1",
+    "account_binding": "example-only-local-digest"
+  },
+  "snapshot": {
+    "observed_at": "2026-10-20T10:00:00-04:00",
+    "expires_at": "2026-10-20T10:15:00-04:00",
+    "definition_sha256": "example-only-definition-hash",
+    "questions": [
+      {
+        "number": 1, "question_attempt_id": "_400_1", "question_id": "_500_1",
+        "type": "single_choice", "prompt": "Choose a resource.",
+        "points": 1, "max_selections": 1,
+        "choices": [
+          {"id": "new_00000000-0000-0000-0000-000000000001", "text": "Books"},
+          {"id": "new_00000000-0000-0000-0000-000000000002", "text": "Articles"}
+        ],
+        "selected_choice_ids": []
+      },
+      {
+        "number": 2, "question_attempt_id": "_401_1", "question_id": "_501_1",
+        "type": "true_false", "prompt": "A catalog lists resources.",
+        "points": 1, "max_selections": 1,
+        "choices": [{"id": "true", "text": "True"}, {"id": "false", "text": "False"}],
+        "selected_choice_ids": ["true"]
+      }
+    ]
+  },
+  "unsupported": [],
+  "changes": [
+    {
+      "question_attempt_id": "_400_1",
+      "operation": "set",
+      "selected_choice_ids": ["new_00000000-0000-0000-0000-000000000002"]
+    },
+    {"question_attempt_id": "_401_1", "operation": "clear", "selected_choice_ids": []}
+  ]
+}
+```
+
+Edit only `changes[]`. `set` replaces the whole selected set for one question; use
+stable choice IDs, never letters or display positions. Single-choice/true-false needs
+one ID; multiple-answer accepts unique IDs up to `max_selections`. True/false IDs are
+`"true"` and `"false"`. `clear` takes no selections (omit the field or use `[]`);
+`set` with an empty list is invalid. Omitted questions stay unchanged; already desired
+answers are no-ops. Duplicate/unknown fields, keys, choices or changes are rejected;
+files are limited to 512 KiB. Nested snapshot question IDs and selection lists must
+have the documented types; invalid UTF-8 is an input error. Re-export after expiry or a definition/baseline conflict.
+
+Verified answer types: multiple answer (select all); single choice (multiple choice
+with one answer, encoded by Ultra as `multipleanswer` with `answerSelectionLimit: 1`);
+and true/false (`eitherOr` / `true_false`). Essay, short answer, fill-in-the-blank,
+matching, ordering, calculated, file response, and anything else are unsupported:
+**answer in Blackboard**. Type support does not establish live acceptance of every clear case.
+
+Timed/proctored, password/secure-browser/IP-restricted,
+forced-completion and no-backtracking tests are refused. All six recognized safety
+booleans must be present and boolean. A missing `timeLimit` accepts an explicit false
+`isTimeLimitEnabled`, `isTimerEnabled` or `isTimed`, with no contradictory enabled or
+unknown timer flag. The observed untimed Ultra shape (no `timeLimit`, `timerCompletion: CONTINUAL`)
+is also accepted by the shared safety check; other timer enums are unknown.
+`gradingColumn.dueDate: null` means no deadline; a missing/invalid due date is unknown
+and refuses. Settings and the 120-second deadline window are checked again immediately
+before each actual dispatch, including after browser startup.
+
+HTTP is first. Only missing session/XSRF or HTTP 401 permits the same allowlisted
+PATCH through browser `fetch()`: installed browser first, optional bundled Playwright
+last under `core.browser` launch order. HTTP 401 explicitly means Blackboard rejected
+the request before persistence, even though the HTTP request was dispatched. Browser
+fallback is allowed only before HTTP has persisted any answer. HTTP 403, 429, 5xx,
+timeout, redirect and malformed responses never fall back. Other dispatched failures
+stop the batch and reconcile by GET without replaying writes.
+No automatic login/Duo occurs during this command.
+
+**Concurrency limitation:** no CAS/conditional write was observed. Export-baseline
+checks, an immediate pre-PATCH definition/choice-order re-read and a held OS attempt lock cannot prevent a
+browser/other-host edit racing between GET and PATCH. The student authorized this
+deviation; avoid concurrent editing. See [ADR-0006](adr/0006-explicit-answer-save-without-submit.md)
+and the [protocol note](specs/save-draft-answers-protocol.md). After partial/unknown
+results, inspect the attempt in Blackboard before retrying; earlier answers may persist.
+The command never submits, but Blackboard or an instructor can change the attempt state.
+With `--new-attempt`, JSON includes `new_attempt` (`requested`, `outcome`: `existing` /
+`created_verified` / `unknown`, `dispatched`, `transport`, `attempt_id`, `submitted: false`).
+Any later failure after creation exits 4 and retains this receipt. Exit 3 means no
+creation or save dispatch. Exit 4 covers an unsuccessful run after either kind of dispatch.
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | Successful show/export/preview, confirmed start, fully verified save, or no changes needed |
+| `2` | Invalid CLI/local input, including refused overwrite/symlink destinations |
+| `3` | Refusal/conflict/unknown state before any start or PATCH dispatch |
+| `4` | A start or PATCH was dispatched and the run ended partial, unknown or refused; inspect receipts |
+
+Exit `4` is not proof of persistence. `new_attempt.dispatched` records start dispatch;
+`dispatched` records whether an actual PATCH was
+sent (including a rejected HTTP 401). Each PATCH must pass bounded GET reconciliation
+before the next is sent: at most three reads with 1+2 seconds backoff and 0.6-second
+per-read timeouts (about five seconds total). Unknown persistence stops immediately.
+A separate final snapshot checks **every** requested answer, including unchanged and
+previously verified values, question presence, definition and `IN_PROGRESS` status.
+The OS lock stays held through that final read; abandoned lock files do not block
+future processes. Ctrl-C/task cancellation stops further dispatches and lets readback
+emit one receipt for already-dispatched writes.
+
+`--out` is checked before any Blackboard write (existence, overwrite, symlink and
+writable parent). Local JSON output uses a unique exclusive temporary file in the same
+directory, mode 0600, then atomic replacement; symlink targets are refused. If writing
+a receipt later fails, stdout still contains the real result and the save's exit code
+is preserved, with the file error on stderr. `--json` input, parser and course-resolution
+errors also produce one versioned JSON document (exit 2).
+
+For final status `IN_PROGRESS`, the existing “NOT SUBMITTED” footer remains. Otherwise
+the footer says: “This command sent no submit action. Blackboard now reports <status>.”
+Unknown final status is displayed as `UNKNOWN`.
+
 ### `bb search <QUERY>`
 **Description:** Omnisearch across all courses for files, assignments, and documents matching keyword query. Text output is grouped by course.
 - `QUERY`: Positional search string (e.g. `bb search "Syllabus"`).
@@ -220,10 +412,14 @@ Native rubric previews require `displayBefore: true`; hidden rubric definitions 
 
 ### `bb download <ITEM_OR_QUERY>`
 **Description:** Downloads specific Blackboard content item, attachment, or search query directly to `downloads/<CourseName>/`.
-- `ITEM_OR_QUERY`: Positional target (e.g. `bb download "Worksheet_1.pdf"` or `bb download _8825690_1`).
+- `ITEM_OR_QUERY`: Positional target: an item title, an item ID, the **file name of a file linked inside an item's body**, or the numeric `pid` of a Blackboard file URL (`bb download "Worksheet_1.pdf"`, `bb download _8825690_1`, `bb download "HW3.docx" -c IS410`, `bb download 23310389` or `_23310389_1`).
 - `-c <COURSE>`: Restrict target course.
 - `--out-dir <dir>`: Custom destination directory (default: `./downloads`). It is only created when a file is written.
-- A name that matches a **folder** is not downloaded: the command lists the files inside (and exits 0). A name that matches several items lists them and exits 1. Items that are not files (assignments, links) say so.
+- Files linked in an item's description (assignments, tests, documents; `/bbcswebdav/` links and Ultra `data-bbfile` embeds) count as files. Matching such a file name or pid downloads just that file; matching the assignment/test/document downloads all of its embedded files. File names are made safe (no path parts, `..` or escapes) and never overwrite another file written in the same run (`name (2).ext`).
+- A name that matches a **folder** is not downloaded: the command lists the files inside, including files embedded in descendants (and exits 0). A name that matches several items (or the same file name in several courses) lists them and exits 1. Items with no files (assignments without embedded files, links) say so.
+- `--json`: `{status, course_id, course_name, content_id, title, content_type, downloaded_files[{file_name, saved_to, size_bytes}]}`. `status` is `success`, `found_no_attachments`, `not_a_file`, `folder` (adds `files[{title, content_id, path, embedded_in?}]`), `multiple_matches`, `not_found` or `error`. Additive fields: `embedded_in {content_id, title, content_type}` when the match was a file embedded in another item (`content_id` is then the embedding item), and `errors[{file_name, kind, message}]` with `kind` `auth`, `forbidden`, `not_found` or `unknown`.
+- A download that comes back as an HTML page (the session expired) or HTTP 401 reports `session expired, run bb login` and saves nothing; 403 is "not visible to students", 404 "file not found". `error` exits 1.
+- `bb search` also lists embedded files (type `file`, `embedded_in` set; `bb outline --json` shows them under the embedding item's `attachments` with `embedded: true`).
 
 ### `bb activity`
 **Description:** Recent activity (grades, due dates, announcements, new content, discussion posts) grouped by course, newest first. Reads the Ultra stream REST endpoint (about 0.3 s); the browser is only a fallback when REST is unavailable. Repeated entries are merged and a discussion thread's responses collapse into one row.
