@@ -693,7 +693,9 @@ def _name_with_extension(name: str, content_type: str, disposition: str) -> str:
     if Path(suggested).suffix:
         return suggested
     mime = content_type.split(";")[0].strip().lower()
-    ext = None if mime in ("text/html", "application/octet-stream") else mimetypes.guess_extension(mime)
+    ext = {"application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx"}.get(mime)
+    if ext is None and mime not in ("text/html", "application/octet-stream"):
+        ext = mimetypes.guess_extension(mime)
     return name + ext if ext and ext not in (".html", ".htm") else name
 
 

@@ -797,6 +797,8 @@ def preview(doc: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def validate_destination(path: Path, overwrite: bool = False) -> None:
+    if not hasattr(os, "fchmod"):
+        raise AnswersInputError("private file output is unavailable: per-user file permissions cannot be secured on this platform")
     if path.is_symlink():
         raise AnswersInputError(f"{path} is a symlink; refusing to write")
     if path.exists() and not overwrite:

@@ -700,6 +700,19 @@ def assert_private_mode(path):
         assert path.stat().st_mode & 0o777 == 0o600
 
 
+@pytest.mark.parametrize("existing", [False, True])
+def test_private_output_fails_closed_without_fchmod(tmp_path, monkeypatch, existing):
+    path = tmp_path / "export.json"
+    if existing:
+        path.write_text("original")
+    monkeypatch.delattr(answers.os, "fchmod", raising=False)
+    with pytest.raises(model.AnswersInputError, match="private file output is unavailable"):
+        answers.write_private(path, "confidential", overwrite=True)
+    assert path.read_text() == "original" if existing else not path.exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == (["export.json"] if existing else [])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="private file output is unavailable on Windows")
 def test_write_private_mode_and_no_clobber(tmp_path):
     path = tmp_path / "nested" / "export.json"
     answers.write_private(path, "first")
@@ -715,6 +728,7 @@ def test_write_private_mode_and_no_clobber(tmp_path):
 
 @pytest.mark.parametrize("dangling", [False, True])
 @pytest.mark.parametrize("overwrite", [False, True])
+@pytest.mark.skipif(os.name == "nt", reason="private file output is unavailable on Windows")
 def test_write_private_refuses_symlinks(tmp_path, dangling, overwrite):
     target = tmp_path / "target"
     if not dangling:
@@ -738,6 +752,8 @@ def test_cli_json_is_one_document(mode, doc, provider, tmp_path, capsys):
     if mode == "read":
         code = answers.run_cli(args(), {CID: "TEST100 Synthetic course"}, [CID])
     elif mode == "export":
+        if os.name == "nt":
+            pytest.skip("private file output is unavailable on Windows")
         code = answers.run_cli(args(export=str(tmp_path / "export.json")), {CID: "TEST100 Synthetic course"}, [CID])
     else:
         if mode == "refusal":
@@ -997,7 +1013,18 @@ def test_cross_origin_pagination_refused(monkeypatch):
         answers._get_pages("/columns")
 
 
+def test_out_without_private_permissions_refuses_before_dispatch(doc, provider, tmp_path, monkeypatch, capsys):
+    monkeypatch.delattr(answers.os, "fchmod", raising=False)
+    path = tmp_path / "receipt"
+    assert cli(doc, tmp_path, apply=True, out=str(path)) == 2
+    result = assert_one_json(capsys)
+    assert "private file output is unavailable" in result["message"]
+    assert not provider.writes
+    assert not path.exists()
+
+
 @pytest.mark.parametrize("destination", ["existing", "symlink", "parent_file"])
+@pytest.mark.skipif(os.name == "nt", reason="private file output is unavailable on Windows")
 def test_out_rejected_before_any_patch(doc, provider, tmp_path, capsys, destination):
     path = tmp_path / "receipt"
     if destination == "existing":
@@ -1040,6 +1067,7 @@ def test_pre_dispatch_failures_exit3(doc, provider, tmp_path, capsys, monkeypatc
     assert not provider.writes
 
 
+@pytest.mark.skipif(os.name == "nt", reason="private file output is unavailable on Windows")
 def test_private_writer_uses_exclusive_unique_temp(doc, tmp_path):
     path = tmp_path / "receipt"
     predictable = tmp_path / f".receipt.{os.getpid()}.tmp"
@@ -1643,6 +1671,7 @@ def test_new_attempt_count_changes_after_browser_startup(retake):
     assert not retake.dispatched
 
 
+@pytest.mark.skipif(os.name == "nt", reason="private file output is unavailable on Windows")
 def test_new_attempt_human_output_and_out_receipt(retake, capsys, tmp_path):
     out = tmp_path / "receipt.json"
     assert answers.run_cli(args(new_attempt=True, json=False, out=str(out)), {CID: "TEST100"}, [CID]) == 0
@@ -1704,6 +1733,7 @@ def test_unknown_timer_enum_refuses(retake, capsys):
     assert not retake.dispatched
 
 
+@pytest.mark.skipif(os.name == "nt", reason="private file output is unavailable on Windows")
 def test_start_unknown_receipt_persisted_to_out(retake, monkeypatch, capsys, tmp_path):
     def lost(path, body, dispatch):
         dispatch()

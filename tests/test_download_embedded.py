@@ -139,6 +139,11 @@ class TestMissingExtension(unittest.TestCase):
         self.assertEqual(self.fetch("xid-1", content_type=ctype)[0], "xid-1.docx")
         self.assertEqual(self.fetch("xid-1", content_type="application/pdf; charset=binary")[0], "xid-1.pdf")
 
+    def test_docx_extension_does_not_depend_on_system_mime_registry(self):
+        with patch.object(ol.mimetypes, "guess_extension", return_value=None):
+            ctype = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            self.assertEqual(ol._name_with_extension("xid-1", ctype, ""), "xid-1.docx")
+
     def test_unknown_type_stays_extensionless(self):
         self.assertEqual(self.fetch("xid-1")[0], "xid-1")
 
