@@ -91,7 +91,7 @@ Readback cannot close this race. The student explicitly authorized proceeding wi
 limitation. [ADR-0006](../adr/0006-explicit-answer-save-without-submit.md) records the
 deviation from the original spec's CAS gate and browser-write ban.
 
-## Matching (derived from the Ultra client, not yet live-replayed)
+## Matching (live HTTP save and readback observed)
 
 Evidence (gathered read-only, 2026-11-01, from the shipped Ultra web bundle plus one live GET
 readback after a browser-UI save; no write was sent to gather it):
@@ -117,14 +117,15 @@ appears at most once). The definition fingerprint also covers prompt IDs, prompt
 text and order. `--set` takes prompt numbers and answer letters in bb's order; the Blackboard UI may
 show answers shuffled, so check by the letters bb prints. Nothing matches by text.
 
-Not verified: a `PATCH` sent by `bb` itself with the two-field body (the UI sends any other changed
-keys too, and multipleanswer was likewise unverified until live replay); clearing (all `null`);
-reused answers; distractor answers; the browser transport for this type.
+On 2026-11-01, an explicitly authorized in-progress untimed assessment was used to preview and save
+a temporary matching selection with `bb`, then preview and restore the original selection. Both
+HTTP writes returned `saved_verified` with matching final readback and the attempt remained
+in progress and unsubmitted. The temporary selection reused an answer for two prompts.
+Clearing, distractor answers and browser transport remain unverified live.
 
 ## Unverified
 
-Essay, fill-in, hotspot, ordering and other encodings remain unsupported; matching is
-derived from the Ultra client but not live-replayed (see "Matching" above). CAS and server-side
+Essay, fill-in, hotspot, ordering and other encodings remain unsupported. CAS and server-side
 atomic editability guarantees remain unverified. Behavior after the due date was not
 tested; apply refuses when less than 120 seconds remain, including past-due attempts.
 This local cutoff is not proof of server deadline enforcement or indefinite draft retention.
@@ -160,7 +161,7 @@ per-question GETs, OS lock and final verification are the same save implementati
 
 Verified answer types: multiple answer (select all); single choice (multiple choice
 with one answer, encoded as `multipleanswer` with `answerSelectionLimit: 1`); true/false
-(`eitherOr` / `true_false`). Essay, short answer, fill-in-the-blank, matching, ordering,
+(`eitherOr` / `true_false`); matching. Essay, short answer, fill-in-the-blank, ordering,
 calculated, file response, and anything else are unsupported: **answer in Blackboard**.
 These encodings were observed by the original save implementation; exhaustive live
 clear behavior remains unverified.
@@ -254,7 +255,7 @@ bb answers PRACTICE_ID -c DEMO100 --set 1=A --set 2=A,B --set 3=False
 bb answers PRACTICE_ID -c DEMO100 --set 1=A --set 2=A,B --set 3=False --apply --json
 ```
 
-Matching acceptance (not run; separately authorized, disposable untimed practice test that has
+Further matching acceptance (separately authorized, disposable untimed practice test that has
 a matching question, already `IN_PROGRESS`). Preview, then one save, then reload Blackboard:
 
 ```bash
