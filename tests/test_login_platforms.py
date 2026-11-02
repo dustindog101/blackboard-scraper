@@ -168,25 +168,32 @@ class TestSMSRecovery(unittest.TestCase):
         def outcome(*args, **kwargs):
             page.url = "https://blackboard.umbc.edu/ultra/course"
             return "accepted"
-        with sso_and_verification(page), patch.object(session, "ensure_config_exists", return_value=(False, {"auto_login": {"username": "fixture", "password": "fixture"}})), \
-             patch.object(session.sys, "platform", platform), \
-             patch.object(session.sys.stdin, "isatty", return_value=terminal is not None), \
-             patch.object(session, "check_session_state", return_value=("expired", None)), \
-             patch.object(session, "check_sms_access", return_value=(True, "")), \
-             patch.object(session, "ensure_messages_sync", return_value=True), \
-             patch.object(session, "get_current_max_rowid", return_value=10), \
-             patch.object(session, "sync_playwright"), \
-             patch.object(session, "_launch_context", return_value=(context, page)), \
-             patch.object(session, "_duo_passcode_input", return_value=code_input), \
-             patch.object(session, "_visible_duo_error", return_value=False), \
-             patch.object(session, "_click_exact_text_in_any_frame", side_effect=click) as clicks, \
-             patch.object(session, "wait_for_duo_sms_passcode", side_effect=captured), \
-             patch.object(session, "_read_terminal_passcodes", side_effect=terminal), \
-             patch.object(session, "_wait_for_passcode_outcome", side_effect=outcome), \
-             patch.object(session, "_wait_for_authenticated_session", return_value=True), \
-             patch.object(session, "_save_session"), patch.object(session, "track_session_usage"), \
-             patch("telegram.notifier.TelegramNotifier", return_value=SimpleNamespace(enabled=False)), \
-             contextlib.redirect_stdout(io.StringIO()) as out:
+        # ExitStack: a single 21-item `with` exceeds the static block limit on Python < 3.12.
+        with contextlib.ExitStack() as stack:
+            for cm in (
+                sso_and_verification(page),
+                patch.object(session, "ensure_config_exists", return_value=(False, {"auto_login": {"username": "fixture", "password": "fixture"}})),
+                patch.object(session.sys, "platform", platform),
+                patch.object(session.sys.stdin, "isatty", return_value=terminal is not None),
+                patch.object(session, "check_session_state", return_value=("expired", None)),
+                patch.object(session, "check_sms_access", return_value=(True, "")),
+                patch.object(session, "ensure_messages_sync", return_value=True),
+                patch.object(session, "get_current_max_rowid", return_value=10),
+                patch.object(session, "sync_playwright"),
+                patch.object(session, "_launch_context", return_value=(context, page)),
+                patch.object(session, "_duo_passcode_input", return_value=code_input),
+                patch.object(session, "_visible_duo_error", return_value=False),
+                patch.object(session, "wait_for_duo_sms_passcode", side_effect=captured),
+                patch.object(session, "_read_terminal_passcodes", side_effect=terminal),
+                patch.object(session, "_wait_for_passcode_outcome", side_effect=outcome),
+                patch.object(session, "_wait_for_authenticated_session", return_value=True),
+                patch.object(session, "_save_session"),
+                patch.object(session, "track_session_usage"),
+                patch("telegram.notifier.TelegramNotifier", return_value=SimpleNamespace(enabled=False)),
+            ):
+                stack.enter_context(cm)
+            clicks = stack.enter_context(patch.object(session, "_click_exact_text_in_any_frame", side_effect=click))
+            out = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             success = session.login_auto(headless=True, auto_exp=True)
         resends = [call for call in clicks.call_args_list if isinstance(call.args[1], tuple) and call.args[1][0] == "Send a new passcode"]
         context.close.assert_called_once()
