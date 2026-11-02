@@ -1039,7 +1039,11 @@ def test_out_rejected_before_any_patch(doc, provider, tmp_path, capsys, destinat
     assert not provider.writes
 
 
-def test_receipt_disk_failure_preserves_save_result(doc, provider, tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("without_fchmod", [False, True])
+def test_receipt_disk_failure_preserves_save_result(doc, provider, tmp_path, monkeypatch, capsys, without_fchmod):
+    if without_fchmod:
+        monkeypatch.delattr(answers.os, "fchmod", raising=False)
+    monkeypatch.setattr(answers, "validate_destination", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(answers, "write_private", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
     assert cli(doc, tmp_path, apply=True, out=str(tmp_path / "receipt")) == 0
     output = capsys.readouterr()
