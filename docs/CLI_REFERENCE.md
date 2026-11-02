@@ -414,6 +414,10 @@ a receipt later fails, stdout still contains the real result and the save's exit
 is preserved, with the file error on stderr. `--json` input, parser and course-resolution
 errors also produce one versioned JSON document (exit 2).
 
+Windows does not provide `fchmod`, so `bb answers --export` and `--out` refuse before
+any Blackboard write. This avoids claiming that Windows inherited ACLs are private.
+Use `--set` without `--out` for a preview or save, and `--json` for stdout.
+
 For final status `IN_PROGRESS`, the existing “NOT SUBMITTED” footer remains. Otherwise
 the footer says: “This command sent no submit action. Blackboard now reports <status>.”
 Unknown final status is displayed as `UNKNOWN`.

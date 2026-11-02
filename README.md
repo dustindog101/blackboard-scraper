@@ -373,6 +373,8 @@ bb's list, which may differ from Blackboard's shuffled display; no option-text m
 Or export with `--export answers.json`, edit `changes[]`, preview with `--file answers.json`,
 then add `--apply`. Both inputs share the same save pipeline; runtime `--set` baselines
 have no file expiry. Unchanged questions collapse; options show letters and radio/checkbox markers.
+On Windows, `bb answers --export` and `--out` are unavailable until private file permissions
+can be enforced. Use `--set` without `--out` to preview and save; JSON can be printed to stdout.
 
 `--new-attempt` explicitly starts an eligible untimed test, then shows its answers;
 with `--set ... --apply` it can start and save. It uses an existing IN_PROGRESS attempt
