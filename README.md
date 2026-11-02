@@ -367,7 +367,8 @@ bb outline --all --filter "Homework" # Search keyword
 
 `bb answers "Practice Quiz" -c DEMO100` reads an existing in-progress Ultra test.
 Use `--set 1=A --set 2=A,B --set 3=False` to preview; add `--apply` to save and verify.
-`--set N=clear` clears; True/False/T/F and letters are case-insensitive. Letters follow
+`--set N=clear` clears; True/False/T/F and letters are case-insensitive. Matching questions take
+`--set 3=1:B,2:A` (prompt number : answer letter; prompts you leave out end up unmatched). Letters follow
 bb's list, which may differ from Blackboard's shuffled display; no option-text matching.
 Or export with `--export answers.json`, edit `changes[]`, preview with `--file answers.json`,
 then add `--apply`. Both inputs share the same save pipeline; runtime `--set` baselines
@@ -384,8 +385,9 @@ It never submits. Saved answers may be visible to course staff.
 
 Verified answer types: multiple answer (select all); single choice (multiple choice
 with one answer, encoded by Ultra as `multipleanswer` with `answerSelectionLimit: 1`);
-and true/false (`eitherOr` / `true_false`). Essay, short answer, fill-in-the-blank,
-matching, ordering, calculated, file response, and anything else are unsupported:
+true/false (`eitherOr` / `true_false`); and matching (`matching`, `--set N=1:B,2:A`; PATCH body derived
+from the Ultra client and **not yet live-replayed by `bb`**, clearing unverified). Essay, short answer,
+fill-in-the-blank, hotspot, ordering, calculated, file response, and anything else are unsupported:
 **answer in Blackboard**. Type support does not establish live acceptance of every clear case.
 
 Fresh baseline checks are weaker than CAS; avoid concurrent browser/other-host edits.

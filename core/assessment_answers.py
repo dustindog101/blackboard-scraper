@@ -22,7 +22,8 @@ MAX_FILE_BYTES = 512 * 1024
 SINGLE = "single_choice"
 MULTI = "multiple_answer"
 TRUE_FALSE = "true_false"
-SUPPORTED_TYPES = (SINGLE, MULTI, TRUE_FALSE)
+MATCHING = "matching"
+SUPPORTED_TYPES = (SINGLE, MULTI, TRUE_FALSE, MATCHING)
 
 # Verified live 2026-10-20 (ENGL100 J#5): True/False is questionType eitherOr with
 # answerType true_false and a bare boolean givenAnswer (None = unanswered).
@@ -54,6 +55,44 @@ def clean_text(raw: Optional[str]) -> str:
     return re.sub(r"[ \t ]+", " ", re.sub(r"\n\s*\n+", "\n", text)).strip()
 
 
+def pair_token(prompt_id: str, answer_id: str) -> str:
+    """Matching selection token: one prompt matched to one local answer ID (``a0``, ``a1``, ...)."""
+    return f"{prompt_id}:{answer_id}"
+
+
+def split_pair(token: str) -> tuple:
+    prompt_id, _, answer_id = token.rpartition(":")
+    return prompt_id, answer_id
+
+
+def given_field(kind: str) -> str:
+    """Provider body field that carries the answer for this public type."""
+    return "givenAnswers" if kind == MATCHING else "givenAnswer"
+
+
+def is_answered(q: Dict[str, Any]) -> bool:
+    """Blackboard counts a matching question as answered only when every prompt has a match."""
+    selected = q["selected_choice_ids"]
+    return len(selected) == len(q["prompts"]) if q["type"] == MATCHING else bool(selected)
+
+
+def matched_pairs(q: Dict[str, Any], tokens: List[str]) -> List[Dict[str, Any]]:
+    """Per prompt, in prompt order: the prompt, and the chosen answer letter/text (None when unanswered)."""
+    chosen = dict(split_pair(t) for t in tokens)
+    letters = {c["id"]: (choice_letter(i), c["text"]) for i, c in enumerate(q["choices"])}
+    return [{"prompt": p["text"], "letter": (letters[chosen[p["id"]]][0] if p["id"] in chosen else None),
+             "answer": (letters[chosen[p["id"]]][1] if p["id"] in chosen else None)} for p in q["prompts"]]
+
+
+def _valid_matching(question: Dict[str, Any]) -> bool:
+    prompts, answers = question.get("prompts"), question.get("answers")
+    if not isinstance(prompts, list) or not prompts or not isinstance(answers, list) or not answers:
+        return False
+    ids = [p.get("id") if isinstance(p, dict) else None for p in prompts]
+    return (all(isinstance(i, str) and i for i in ids) and len(set(ids)) == len(ids)
+            and all(isinstance(a, dict) for a in answers))
+
+
 def question_kind(qa: Dict[str, Any]) -> Optional[str]:
     """Public type for a raw question attempt, or None when saving it is unsupported."""
     qtype = qa.get("questionType")
@@ -65,6 +104,8 @@ def question_kind(qa: Dict[str, Any]) -> Optional[str]:
         return SINGLE if question.get("answerSelectionLimit") == 1 else MULTI
     if qtype == "eitherOr" and question.get("answerType") == "true_false":
         return TRUE_FALSE
+    if qtype == "matching" and _valid_matching(question):
+        return MATCHING
     return None
 
 
@@ -81,6 +122,17 @@ def _raw_selected(qa: Dict[str, Any], kind: str, choice_ids: List[str]) -> List[
     if isinstance(given, list) and len(given) == len(choice_ids) and all(isinstance(x, bool) for x in given):
         return [cid for cid, flag in zip(choice_ids, given) if flag]
     raise AnswersRefusal("unsupported_encoding", f"Unexpected multiple-answer encoding on {qa.get('id')}")
+
+
+def _raw_matching(qa: Dict[str, Any], prompt_ids: List[str], answer_ids: List[str]) -> List[str]:
+    """Readback ``givenAnswers``: [] or null = nothing answered, else one int index (or null) per prompt."""
+    given = qa.get("givenAnswers")
+    if given is None or given == []:
+        return []
+    if (isinstance(given, list) and len(given) == len(prompt_ids)
+            and all(g is None or (type(g) is int and 0 <= g < len(answer_ids)) for g in given)):
+        return [pair_token(pid, answer_ids[g]) for pid, g in zip(prompt_ids, given) if g is not None]
+    raise AnswersRefusal("unsupported_encoding", f"Unexpected matching answer encoding on {qa.get('id')}")
 
 
 def project_attempt(attempt: Dict[str, Any]) -> Dict[str, Any]:
@@ -113,9 +165,17 @@ def project_attempt(attempt: Dict[str, Any]) -> Dict[str, Any]:
             unsupported.append({"number": number, "question_attempt_id": qa_id,
                                 "provider_type": qa.get("questionType"), "prompt": prompt})
             continue
+        prompts: List[Dict[str, str]] = []
         if kind == TRUE_FALSE:
             choices = [dict(c) for c in TF_CHOICES]
             limit = 1
+        elif kind == MATCHING:
+            # Answers carry no provider IDs: a0, a1, ... are positions in provider order (also the CLI letters).
+            prompts = [{"id": p["id"], "text": clean_text((p.get("promptText") or {}).get("rawText"))}
+                       for p in question["prompts"]]
+            choices = [{"id": f"a{i}", "text": clean_text((a.get("answerText") or {}).get("rawText"))}
+                       for i, a in enumerate(question["answers"])]
+            limit = len(prompts)
         else:
             answers = question.get("answers") or []
             ids = [a["id"] for a in answers]
@@ -126,6 +186,10 @@ def project_attempt(attempt: Dict[str, Any]) -> Dict[str, Any]:
                        for a in answers]
             limit = 1 if kind == SINGLE else (question.get("answerSelectionLimit") or len(choices))
         raw[qa_id] = qa
+        if kind == MATCHING:
+            selected = _raw_matching(qa, [p["id"] for p in prompts], [c["id"] for c in choices])
+        else:
+            selected = _raw_selected(qa, kind, [c["id"] for c in choices])
         questions.append({
             "number": number,
             "question_attempt_id": qa_id,
@@ -135,29 +199,36 @@ def project_attempt(attempt: Dict[str, Any]) -> Dict[str, Any]:
             "points": question.get("points"),
             "max_selections": limit,
             "choices": choices,
-            "selected_choice_ids": _raw_selected(qa, kind, [c["id"] for c in choices]),
+            **({"prompts": prompts} if kind == MATCHING else {}),
+            "selected_choice_ids": selected,
         })
     return {"status": attempt.get("status"), "questions": questions, "unsupported": unsupported, "raw": raw}
 
 
 def fingerprint(raw_by_id: Dict[str, Any], order: List[str]) -> str:
-    """sha256 over identity, type, raw prompt and every choice identity/text/order."""
+    """sha256 over identity, type, raw prompt and every choice identity/text/order (matching: prompt IDs/text/order too)."""
     canon = []
     for qa_id in order:
         qa = raw_by_id[qa_id]
         q = qa.get("question") or {}
-        canon.append([
+        entry = [
             qa_id, qa.get("questionId"), qa.get("questionType"), q.get("answerType"),
             q.get("answerSelectionLimit"), (q.get("questionText") or {}).get("rawText"),
             [[a.get("id"), (a.get("answerText") or {}).get("rawText")] for a in (q.get("answers") or [])],
-        ])
+        ]
+        if qa.get("questionType") == "matching":  # only here, so other types keep their fingerprints
+            entry.append([[p.get("id"), (p.get("promptText") or {}).get("rawText")] for p in q.get("prompts") or []])
+        canon.append(entry)
     return hashlib.sha256(json.dumps(canon, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def encode_given(kind: str, choice_ids: List[str], selected: List[str]) -> Any:
-    """Provider givenAnswer value for a desired selection (verified encodings only)."""
+def encode_given(kind: str, choice_ids: List[str], selected: List[str], prompt_ids: Optional[List[str]] = None) -> Any:
+    """Provider answer value for a desired selection (see ``given_field`` for the body key)."""
     if kind == TRUE_FALSE:
         return None if not selected else selected[0] == "true"
+    if kind == MATCHING:
+        chosen = dict(split_pair(t) for t in selected)
+        return [choice_ids.index(chosen[pid]) if pid in chosen else None for pid in prompt_ids or []]
     wanted = set(selected)
     return [cid in wanted for cid in choice_ids]
 
@@ -178,15 +249,33 @@ def parse_sets(values: List[str]) -> Dict[int, List[str]]:
     for value in values:
         match = re.fullmatch(r"\s*([1-9]\d*)\s*=\s*(.*?)\s*", value)
         if not match:
-            raise AnswersInputError("--set needs N=A,B, N=True/False, or N=clear")
+            raise AnswersInputError("--set needs N=A,B, N=True/False, N=1:B,2:A (matching), or N=clear")
         number, selection = int(match[1]), match[2].upper()
         if number in result:
             raise AnswersInputError(f"duplicate --set question {number}")
         tokens = [s.strip() for s in selection.split(",")]
-        if not all(re.fullmatch(r"[A-Z]+", s) for s in tokens) or len(set(tokens)) != len(tokens):
+        if not all(re.fullmatch(r"([1-9]\d*:)?[A-Z]+", s) for s in tokens) or len(set(tokens)) != len(tokens):
             raise AnswersInputError(f"question {number}: invalid or duplicate selection")
         result[number] = [] if tokens == ["CLEAR"] else tokens
     return result
+
+
+def _matching_selection(number: int, tokens: List[str], q: Dict[str, Any], letters: Dict[str, str]) -> List[str]:
+    """``1:B,2:A`` -> pair tokens. Prompt numbers and letters are positions in bb's list, never text."""
+    selected, seen = [], set()
+    for token in tokens:
+        prompt_no, _, letter = token.rpartition(":")
+        if not prompt_no:
+            raise AnswersInputError(f"question {number}: matching needs prompt:letter pairs, like 1:B,2:A")
+        if not 1 <= int(prompt_no) <= len(q["prompts"]):
+            raise AnswersInputError(f"question {number}: no prompt {prompt_no} (use bb's prompt list)")
+        if letter not in letters:
+            raise AnswersInputError(f"question {number}: unknown letter {letter} (use bb's answer list)")
+        if prompt_no in seen:
+            raise AnswersInputError(f"question {number}: prompt {prompt_no} given twice")
+        seen.add(prompt_no)
+        selected.append(pair_token(q["prompts"][int(prompt_no) - 1]["id"], letters[letter]))
+    return selected
 
 
 def set_changes(parsed: Dict[int, List[str]], projection: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -198,6 +287,11 @@ def set_changes(parsed: Dict[int, List[str]], projection: Dict[str, Any]) -> Lis
         if q is None:
             raise AnswersInputError(f"question {number} is unsupported or absent; answer in Blackboard")
         letters = {choice_letter(i): c["id"] for i, c in enumerate(q["choices"])}
+        if q["type"] == MATCHING:
+            selected = _matching_selection(number, tokens, q, letters)
+            changes.append({"question_attempt_id": q["question_attempt_id"],
+                            "operation": "set" if tokens else "clear", "selected_choice_ids": selected})
+            continue
         if q["type"] == TRUE_FALSE:
             letters.update(TRUE="true", T="true", FALSE="false", F="false")
         if any(token not in letters for token in tokens):
@@ -236,9 +330,11 @@ def _example(questions: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not questions:
         return None
     q = questions[0]
+    first = pair_token(q["prompts"][0]["id"], q["choices"][0]["id"]) if q["type"] == MATCHING else q["choices"][0]["id"]
     return {"number": q["number"], "question_attempt_id": q["question_attempt_id"], "operation": "set",
-            "selected_choice_ids": [q["choices"][0]["id"]],
-            "note": "set = the full list of choices to have selected; use operation clear (no ids) to blank it"}
+            "selected_choice_ids": [first],
+            "note": "set = the full list of choices to have selected; use operation clear (no ids) to blank it"
+                    + ("; matching ids are promptId:answerId, at most one per prompt" if q["type"] == MATCHING else "")}
 
 
 def _no_dupes(pairs):
@@ -363,11 +459,14 @@ def plan_changes(doc: Dict[str, Any], fresh: Dict[str, Any], fresh_sha: str) -> 
         q = current.get(qa_id)
         if q is None or qa_id not in baseline:
             raise AnswersInputError(f"question {qa_id} is not in this attempt")
-        valid = [c["id"] for c in q["choices"]]
+        valid = ([pair_token(p["id"], c["id"]) for p in q["prompts"] for c in q["choices"]]
+                 if q["type"] == MATCHING else [c["id"] for c in q["choices"]])
         desired = [] if ch["operation"] == "clear" else list(ch["selected_choice_ids"])
         bad = [s for s in desired if s not in valid]
         if bad:
             raise AnswersInputError(f"question {q['number']}: unknown choice ID(s) {', '.join(bad)}")
+        if q["type"] == MATCHING and len({split_pair(t)[0] for t in desired}) != len(desired):
+            raise AnswersInputError(f"question {q['number']}: a prompt can have only one answer")
         if len(desired) > q["max_selections"]:
             raise AnswersInputError(f"question {q['number']} takes one answer" if q["max_selections"] == 1
                                     else f"question {q['number']}: at most {q['max_selections']} choices allowed")
@@ -380,7 +479,9 @@ def plan_changes(doc: Dict[str, Any], fresh: Dict[str, Any], fresh_sha: str) -> 
             continue
         else:
             status = "change"
-        edits.append(PlannedEdit(q["number"], qa_id, q["type"], q["prompt"], q["choices"], now_sel, desired, status))
+        extra = {"prompts": q["prompts"], "choices": q["choices"]} if q["type"] == MATCHING else {}
+        edits.append(PlannedEdit(q["number"], qa_id, q["type"], q["prompt"], q["choices"], now_sel, desired, status,
+                                 extra=extra))
     if conflicts:
         raise AnswersRefusal("conflict", "Answers changed in Blackboard since export (questions "
                              + ", ".join(map(str, conflicts)) + "). Export again; nothing was saved.",

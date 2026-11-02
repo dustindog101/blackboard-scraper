@@ -91,9 +91,40 @@ Readback cannot close this race. The student explicitly authorized proceeding wi
 limitation. [ADR-0006](../adr/0006-explicit-answer-save-without-submit.md) records the
 deviation from the original spec's CAS gate and browser-write ban.
 
+## Matching (derived from the Ultra client, not yet live-replayed)
+
+Evidence (gathered read-only, 2026-11-01, from the shipped Ultra web bundle plus one live GET
+readback after a browser-UI save; no write was sent to gather it):
+
+- Route and method are the existing answer route: `PATCH .../assessment/answers/{questionAttemptId}`.
+- Body: `{"questionType": "matching", "givenAnswers": [<int|null>, ...]}`. The field is
+  `givenAnswers` (plural) and `givenAnswer` is not sent. The array is parallel to
+  `question.prompts` (prompt order). Each entry is a zero-based index into `question.answers`
+  (provider order) or `null` for an unmatched prompt. The client's save call names
+  `questionType`, `givenAnswer` and `givenAnswers`; the unset field is dropped from JSON.
+- The save response echoes `givenAnswers`. `bb` requires the echo to equal the sent array.
+- Raw shape: `question.prompts[]` have stable `id` and `promptText.rawText`; `question.answers[]`
+  have `answerText.rawText` and **no IDs**. Readback `givenAnswers` is `[]` or `null` when
+  nothing is answered, else a list of int/null of length `len(prompts)`; anything else is refused
+  as `unsupported_encoding`.
+- Prompts may carry `reusesAnswer` (the authoring UI lets several prompts share one answer), so `bb`
+  does not forbid reuse. The server may still reject it for a given question; that surfaces as a
+  failed save (exit 4), not silent success.
+
+`bb` models a matching selection as strings `"<promptId>:a<index>"`, one per matched prompt, so the
+strict string-list file schema and the set comparisons stay valid and become per prompt (a prompt
+appears at most once). The definition fingerprint also covers prompt IDs, prompt text and answer
+text and order. `--set` takes prompt numbers and answer letters in bb's order; the Blackboard UI may
+show answers shuffled, so check by the letters bb prints. Nothing matches by text.
+
+Not verified: a `PATCH` sent by `bb` itself with the two-field body (the UI sends any other changed
+keys too, and multipleanswer was likewise unverified until live replay); clearing (all `null`);
+reused answers; distractor answers; the browser transport for this type.
+
 ## Unverified
 
-Essay, fill-in, matching and other encodings remain unsupported. CAS and server-side
+Essay, fill-in, hotspot, ordering and other encodings remain unsupported; matching is
+derived from the Ultra client but not live-replayed (see "Matching" above). CAS and server-side
 atomic editability guarantees remain unverified. Behavior after the due date was not
 tested; apply refuses when less than 120 seconds remain, including past-due attempts.
 This local cutoff is not proof of server deadline enforcement or indefinite draft retention.
@@ -222,6 +253,20 @@ bb answers PRACTICE_ID -c DEMO100 --set 1=A --set 2=A,B --set 3=False
 # MUTATION: only after explicit save authorization; no new start is needed here.
 bb answers PRACTICE_ID -c DEMO100 --set 1=A --set 2=A,B --set 3=False --apply --json
 ```
+
+Matching acceptance (not run; separately authorized, disposable untimed practice test that has
+a matching question, already `IN_PROGRESS`). Preview, then one save, then reload Blackboard:
+
+```bash
+bb answers PRACTICE_ID -c DEMO100                       # note the matching question number N and its lists
+bb answers PRACTICE_ID -c DEMO100 --set N=1:B,2:A       # preview; confirm prompts and letters
+# MUTATION: only after explicit save authorization.
+bb answers PRACTICE_ID -c DEMO100 --set N=1:B,2:A --apply --json
+# Optional, separately: partial match (omit a prompt), a reused answer, then N=clear.
+```
+
+Confirm `saved_verified`, the sanitized request body shape, and that the Blackboard UI shows the
+same pairs after reload. Record what the server did with a reused answer and with clear.
 
 For a separately authorized retake with readable prior questions and no active attempt,
 combined acceptance is exactly:

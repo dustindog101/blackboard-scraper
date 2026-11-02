@@ -100,6 +100,7 @@ class Provider:
         self.fail_patch = None
         self.persist = True
         self.on_read = None
+        self.echo = {}
         self.response_status = "IN_PROGRESS"
         self.columns = [{"id": COL, "contentId": AID, "name": "Synthetic practice",
                          "scoreProviderHandle": "resource/x-bb-assessment",
@@ -146,9 +147,11 @@ class Provider:
             raise urllib.error.HTTPError(request.full_url, 503, "synthetic unavailable", {}, None)
         qa_id = path.rsplit("/", 1)[1]
         qa = next(q for q in blocks(self.attempt) if q.get("id") == qa_id)
+        field = next(k for k in body if k.startswith("givenAnswer"))
         if self.persist:
-            qa["givenAnswer"] = deepcopy(body["givenAnswer"])
-        return json.dumps({"givenAnswer": body["givenAnswer"], "attemptStatus": self.response_status}).encode()
+            qa[field] = deepcopy(body[field])
+        echo = self.echo.get(qa_id, body[field])
+        return json.dumps({field: echo, "attemptStatus": self.response_status}).encode()
 
     @property
     def writes(self):
@@ -162,7 +165,7 @@ class Provider:
             if method == "PATCH":
                 assert "/assessment/answers/" in path
                 assert not path.endswith("/attempts")
-                assert set(body) == {"questionType", "givenAnswer"}
+                assert set(body) in ({"questionType", "givenAnswer"}, {"questionType", "givenAnswers"})
 
 
 @pytest.fixture
@@ -1734,3 +1737,294 @@ def test_url_target_variants_and_course_conflict():
     assert answers.parse_target_url(f"{base}/webapps/assessment/take/launchAssessment.jsp?course_id=_1_1&content_id=_2_1") == ("_1_1", "_2_1")
     with pytest.raises(model.AnswersInputError):
         answers.resolve_target(f"{base}/ultra/courses/_1_1/assessment/_2_1/overview", ["_9_1"], {"_9_1": "A", "_1_1": "B"})
+
+
+# ---------------------------------------------------------------------------
+# Matching (synthetic data; the PATCH body is derived from the Ultra client, not replayed live)
+# ---------------------------------------------------------------------------
+
+MATCH = "_920005_1"
+MATCH_PATH = PATH.replace(SINGLE, MATCH)
+PROMPTS = [("p-x", "Prompt one"), ("p-y", "Prompt two"), ("p-z", "Prompt three")]
+MATCH_ANSWERS = ["Alpha", "Beta", "Gamma", "Delta"]  # Delta is a distractor; provider order is not alphabetical
+
+
+def matching_question(given=None, answers_=None, prompts=None):
+    return {
+        "id": MATCH, "questionId": "synthetic-matching", "questionType": "matching",
+        "visibleQuestionNumber": 1, "givenAnswers": given,
+        "question": {
+            "questionText": {"rawText": "<p>Match each item.</p>"}, "points": 4,
+            "prompts": [{"id": pid, "promptText": {"rawText": text}, "matchingAnswerIndex": i}
+                        for i, (pid, text) in enumerate(prompts or PROMPTS)],
+            "answers": [{"answerText": {"rawText": text}} for text in answers_ or MATCH_ANSWERS],
+        },
+    }
+
+
+@pytest.fixture
+def mprovider(provider):
+    blocks(provider.attempt).append(matching_question([]))
+    return provider
+
+
+def mstate():
+    return answers.load_state(answers.resolve_target("Synthetic practice", [CID], {CID: "TEST100 Synthetic course"}))
+
+
+def mdoc(state, selections, operation="set"):
+    result = model.build_export(deepcopy(state["target"]), deepcopy(state["projection"]), NOW)
+    result["changes"] = [{"question_attempt_id": MATCH, "operation": operation, "selected_choice_ids": selections}]
+    return result
+
+
+def order(proj):
+    return [q["question_attempt_id"] for q in proj["questions"]]
+
+
+def project(**kw):
+    attempt = raw_attempt()
+    blocks(attempt).append(matching_question(**kw))
+    return model.project_attempt(attempt)
+
+
+def mq(proj):
+    return next(q for q in proj["questions"] if q["question_attempt_id"] == MATCH)
+
+
+def test_matching_projection_has_prompts_local_answer_ids_and_no_selection():
+    q = mq(project(given=None))
+    assert q["type"] == "matching"
+    assert q["prompts"] == [{"id": pid, "text": text} for pid, text in PROMPTS]
+    assert [(c["id"], c["text"]) for c in q["choices"]] == [(f"a{i}", t) for i, t in enumerate(MATCH_ANSWERS)]
+    assert q["selected_choice_ids"] == [] and q["max_selections"] == 3
+    assert "prompts" not in next(x for x in project()["questions"] if x["type"] == "single_choice")
+
+
+@pytest.mark.parametrize("given,tokens", [
+    (None, []), ([], []), ([None, None, None], []),
+    ([2, None, 0], ["p-x:a2", "p-z:a0"]),
+    ([3, 3, 1], ["p-x:a3", "p-y:a3", "p-z:a1"]),  # reuse across prompts reads back as given
+])
+def test_matching_decodes_null_empty_partial_and_full(given, tokens):
+    assert mq(project(given=given))["selected_choice_ids"] == tokens
+
+
+@pytest.mark.parametrize("given", [
+    [0], [0, 1, 2, 3], [0, 1, 4], [0, 1, -1], [0, 1, True], [0, 1, "2"], [0, 1, 1.0], "0,1,2", {"0": 1}, 0,
+])
+def test_matching_refuses_unknown_encodings(given):
+    with pytest.raises(model.AnswersRefusal) as exc:
+        project(given=given)
+    assert exc.value.code == "unsupported_encoding"
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda q: q["question"].update(prompts=[]),
+    lambda q: q["question"].update(answers=[]),
+    lambda q: q["question"].update(prompts="x"),
+    lambda q: q["question"]["prompts"][0].update(id=""),
+    lambda q: q["question"]["prompts"][1].update(id="p-x"),
+    lambda q: q["question"]["prompts"].append("not a dict"),
+    lambda q: q["question"]["answers"].append(None),
+])
+def test_matching_with_unusable_shape_stays_unsupported(mutate):
+    attempt = raw_attempt()
+    qa = matching_question()
+    mutate(qa)
+    blocks(attempt).append(qa)
+    proj = model.project_attempt(attempt)
+    assert all(q["question_attempt_id"] != MATCH for q in proj["questions"])
+    assert [u["question_attempt_id"] for u in proj["unsupported"]][-1] == MATCH
+
+
+@pytest.mark.parametrize("kwargs", [
+    dict(prompts=PROMPTS[::-1]), dict(prompts=[("p-x", "Prompt one!")] + PROMPTS[1:]),
+    dict(prompts=[("p-q", "Prompt one")] + PROMPTS[1:]),
+    dict(answers_=MATCH_ANSWERS[::-1]), dict(answers_=["Alpha!"] + MATCH_ANSWERS[1:]), dict(answers_=MATCH_ANSWERS[:3]),
+])
+def test_matching_fingerprint_covers_prompts_and_answers(kwargs):
+    base, other = project(), project(**kwargs)
+    assert model.fingerprint(base["raw"], order(base)) != model.fingerprint(other["raw"], order(other))
+
+
+def test_matching_fingerprint_ignores_current_selection():
+    a, b = project(given=[]), project(given=[1, 2, 0])
+    assert model.fingerprint(a["raw"], order(a)) == model.fingerprint(b["raw"], order(b))
+
+
+def test_matching_encode_is_prompt_ordered_with_none_for_unmatched():
+    ids = [f"a{i}" for i in range(4)]
+    pids = [p for p, _ in PROMPTS]
+    assert model.encode_given("matching", ids, ["p-z:a0", "p-x:a2"], pids) == [2, None, 0]
+    assert model.encode_given("matching", ids, [], pids) == [None, None, None]
+    assert model.given_field("matching") == "givenAnswers" and model.given_field("multiple_answer") == "givenAnswer"
+
+
+@pytest.mark.parametrize("text,tokens", [
+    ("3=1:B,2:A", ["1:B", "2:A"]), ("3=1:b, 3:d", ["1:B", "3:D"]), ("3=clear", []), ("3=1:A,2:A", ["1:A", "2:A"]),
+])
+def test_matching_set_parse_and_translate(text, tokens):
+    assert model.parse_sets([text]) == {3: tokens}
+    proj = project()
+    number = mq(proj)["number"]
+    changes = model.set_changes({number: tokens}, proj)
+    if tokens:
+        expected = [f"{PROMPTS[int(t[0]) - 1][0]}:a{ord(t[2]) - 65}" for t in tokens]
+        assert changes == [{"question_attempt_id": MATCH, "operation": "set", "selected_choice_ids": expected}]
+    else:
+        assert changes[0]["operation"] == "clear" and changes[0]["selected_choice_ids"] == []
+
+
+@pytest.mark.parametrize("tokens,why", [
+    (["0:A"], "no prompt"), (["4:A"], "no prompt"), (["1:E"], "unknown letter"), (["1:A", "1:B"], "twice"),
+    (["A"], "prompt:letter"), (["True"], "prompt:letter"),
+])
+def test_matching_set_refuses_bad_input(tokens, why):
+    proj = project()
+    with pytest.raises(model.AnswersInputError, match=why):
+        model.set_changes({mq(proj)["number"]: [t.upper() for t in tokens]}, proj)
+
+
+@pytest.mark.parametrize("text", ["3=1:", "3=:A", "3=1:B,1:B", "3=01:A", "3=1:2"])
+def test_matching_set_syntax_errors(text):
+    with pytest.raises(model.AnswersInputError):
+        model.parse_sets([text])
+
+
+def test_pair_tokens_are_refused_on_choice_questions():
+    proj = project()
+    with pytest.raises(model.AnswersInputError, match="unknown letter"):
+        model.set_changes({1: ["1:A"]}, proj)
+
+
+@pytest.mark.parametrize("sel", [["p-x:a0", "p-x:a1"], ["p-q:a0"], ["p-x:a9"], ["a0"]])
+def test_matching_plan_refuses_duplicate_prompt_or_unknown_pair(mprovider, sel):
+    state = mstate()
+    with pytest.raises(model.AnswersInputError):
+        answers.prepare(mdoc(state, sel), state)
+
+
+def test_matching_preview_shows_prompts_and_letters_and_writes_nothing(mprovider, tmp_path, capsys):
+    state = mstate()
+    d = mdoc(state, ["p-x:a1", "p-y:a1"])
+    path = tmp_path / "in.json"
+    path.write_text(json.dumps(d))
+    assert answers.run_cli(args(file=str(path), json=False), {CID: "TEST100 Synthetic course"}, [CID]) == 0
+    text = capsys.readouterr().out
+    assert "Prompt one  →  B. Beta" in text and "Prompt three  →  (not matched)" in text and "D. Delta" in text
+    assert "Preview only" in text and mprovider.patch_count == 0
+    assert answers.preview(d, state)["questions"][0]["after"] == ["Prompt one = Beta", "Prompt two = Beta"]
+
+
+def test_matching_apply_sends_exact_body_and_verifies_readback(mprovider):
+    state = mstate()
+    result = answers.apply(mdoc(state, ["p-z:a0", "p-x:a2"]), state, lambda _: None)
+    assert result["outcome"] == "saved_verified" and result["answered_after"] == "0/4"
+    assert mprovider.writes == [(MATCH_PATH, {"questionType": "matching", "givenAnswers": [2, None, 0]})]
+    assert list(mprovider.writes[0][1]) == ["questionType", "givenAnswers"]
+    assert result["questions"][0]["before"] == []
+    assert result["questions"][0]["after"] == ["Prompt one = Gamma", "Prompt three = Alpha"]
+    assert mq(state["projection"])["selected_choice_ids"] == []
+
+
+def test_matching_full_match_counts_as_answered(mprovider):
+    state = mstate()
+    result = answers.apply(mdoc(state, ["p-x:a0", "p-y:a1", "p-z:a2"]), state, lambda _: None)
+    assert result["answered_after"] == "1/4" and mprovider.writes[0][1]["givenAnswers"] == [0, 1, 2]
+
+
+def test_matching_clear_sends_all_none_after_a_save(mprovider):
+    blocks(mprovider.attempt)[-1]["givenAnswers"] = [1, None, 3]
+    state = mstate()
+    result = answers.apply(mdoc(state, [], "clear"), state, lambda _: None)
+    assert result["outcome"] == "saved_verified"
+    assert mprovider.writes == [(MATCH_PATH, {"questionType": "matching", "givenAnswers": [None, None, None]})]
+
+
+def test_matching_unchanged_is_not_written(mprovider):
+    blocks(mprovider.attempt)[-1]["givenAnswers"] = [1, None, 3]
+    state = mstate()
+    result = answers.apply(mdoc(state, ["p-z:a3", "p-x:a1"]), state, lambda _: None)
+    assert result["questions"][0]["outcome"] == "unchanged" and mprovider.patch_count == 0
+
+
+def test_matching_response_echo_mismatch_stops_as_unknown(mprovider, tmp_path, capsys):
+    mprovider.echo[MATCH] = [0, None, None]
+    state = mstate()
+    result = answers.apply(mdoc(state, ["p-x:a2"]), state, lambda _: None)
+    assert mprovider.patch_count == 1
+    assert result["outcome"] == "unknown" and result["questions"][0]["outcome"] == "unknown"
+    mprovider.patch_count = 0
+    mprovider.attempt = raw_attempt()
+    blocks(mprovider.attempt).append(matching_question([]))
+    assert cli(mdoc(mstate(), ["p-x:a2"]), tmp_path, apply=True) == 4
+    assert assert_one_json(capsys)["outcome"] == "unknown" and mprovider.patch_count == 1
+
+
+def test_matching_answer_changed_since_export_is_a_conflict(mprovider):
+    state = mstate()
+    d = mdoc(state, ["p-x:a2"])
+    blocks(mprovider.attempt)[-1]["givenAnswers"] = [1, None, None]
+    with pytest.raises(model.AnswersRefusal) as exc:
+        answers.prepare(d, mstate())
+    assert exc.value.code == "conflict" and mprovider.patch_count == 0
+
+
+def test_matching_answer_changed_mid_run_is_left_alone(mprovider):
+    state = mstate()
+    d = mdoc(state, ["p-x:a2"])
+    seen = []
+
+    def edit_once(fake):
+        seen.append(1)
+        if len(seen) == 2:
+            blocks(fake.attempt)[-1]["givenAnswers"] = [3, None, None]
+    mprovider.on_read = edit_once
+    with pytest.raises(model.AnswersRefusal):
+        answers.apply(d, state, lambda _: None)
+    assert mprovider.patch_count == 0
+
+
+def test_matching_persist_failure_is_unknown_not_retried(mprovider):
+    mprovider.persist = False
+    state = mstate()
+    result = answers.apply(mdoc(state, ["p-x:a2"]), state, lambda _: None)
+    assert result["outcome"] == "unknown" and mprovider.patch_count == 1
+
+
+@pytest.mark.parametrize("body", [
+    {"questionType": "matching", "givenAnswer": [1, None]},
+    {"questionType": "multipleanswer", "givenAnswers": [1, None]},
+    {"questionType": "matching", "givenAnswer": [1], "givenAnswers": [1]},
+    {"questionType": "matching", "givenAnswers": [1], "extra": 1},
+])
+def test_validate_write_wrong_field_for_type_or_both_is_refused(body):
+    with pytest.raises(AssertionError):
+        answers._validate_write(MATCH_PATH, body)
+
+
+def test_validate_write_accepts_matching_body():
+    answers._validate_write(MATCH_PATH, {"questionType": "matching", "givenAnswers": [None, 1]})
+
+
+def test_export_example_change_for_matching_is_a_valid_pair(mprovider):
+    state = mstate()
+    d = model.build_export(deepcopy(state["target"]), {**state["projection"], "questions": [mq(state["projection"])]}, NOW)
+    assert d["example_change"]["selected_choice_ids"] == ["p-x:a0"]
+
+
+def test_existing_types_keep_their_bodies_beside_matching(mprovider):
+    state = mstate()
+    d = mdoc(state, ["p-x:a2"])
+    d["changes"].append(change())
+    result = answers.apply(d, state, lambda _: None)
+    assert result["outcome"] == "saved_verified"
+    bodies = {path.rsplit("/", 1)[1]: body for path, body in mprovider.writes}
+    assert bodies[SINGLE] == {"questionType": "multipleanswer", "givenAnswer": [False, True, False, False]}
+    assert bodies[MATCH] == {"questionType": "matching", "givenAnswers": [2, None, None]}
+
+
+def test_retake_shape_includes_prompts():
+    a, b = project(), project(prompts=PROMPTS[::-1])
+    assert starts.question_shape(a) != starts.question_shape(b)

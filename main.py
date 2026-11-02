@@ -919,8 +919,9 @@ Guides: 'bb guide <topic>' (auth, courses, schema, telegram, concurrency).""",
         description=(
             "Show, preview and save answers in a test attempt. Never submits: you review and submit in Blackboard.\n"
             "Works on the open (in-progress) attempt. --new-attempt starts a retake first (uses up one attempt).\n"
-            "Supported: multiple answer (select all), multiple choice (one answer), true/false.\n"
-            "Essay, short answer, fill-in-the-blank, matching, ordering, calculated and file response: answer in Blackboard."
+            "Supported: multiple answer (select all), multiple choice (one answer), true/false, matching.\n"
+            "Matching: --set 3=1:B,2:A (prompt number : answer letter; prompts left out end up unmatched).\n"
+            "Essay, short answer, fill-in-the-blank, ordering, calculated and file response: answer in Blackboard."
         ),
         epilog=(
             "Examples:\n"

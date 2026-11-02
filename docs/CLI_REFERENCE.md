@@ -242,7 +242,10 @@ bb answers "Practice Quiz" -c DEMO100 --new-attempt --set 1=A --apply    # retak
 - `--set N=A,B`: repeatable shorthand using the answerable question number shown by bb
   (presentation blocks do not count). Letters are case-insensitive and follow bb's list,
   which may differ from Blackboard's shuffled display. True/false accepts True/False/T/F
-  as well as letters. `N=clear` clears. Never matches by option text. Duplicate numbers,
+  as well as letters. `N=clear` clears. Matching questions take `N=P:L,P:L`: prompt number
+  `P` and answer letter `L`, both as listed by bb (`--set 3=1:B,2:A`). The pairs are the full
+  desired state: prompts you omit end up unmatched; one answer may serve several prompts
+  (Ultra allows reused answers); a prompt given twice is an input error. Never matches by option text. Duplicate numbers,
   unknown letters, unsupported/absent numbers and excessive selections exit 2 before writes.
   It translates to the file mode's internal changes list and shares validation, fingerprints,
   baseline comparisons, locking, per-question readback and receipts. Its baseline is read at
@@ -330,6 +333,15 @@ do not copy the placeholder metadata into a live file.
 }
 ```
 
+Matching questions add `prompts` (`[{"id","text"}]` in provider order) and their `choices` are the
+answer list with local IDs `a0`, `a1`, ... (Blackboard gives answers no IDs; the ID is the provider
+position, which is also bb's letter order). `max_selections` is the number of prompts. A matching
+selection is a list of `"<promptId>:<answerId>"` strings, at most one per prompt (for example
+`["prompt-1:a2", "prompt-3:a0"]`); `selected_choice_ids` in snapshots uses the same form, and a
+question counts as answered in `answered_after` only when every prompt is matched. In `--json`
+results, matching `before`/`after` are `"prompt text = answer text"` strings in prompt order
+(unmatched prompts are omitted) and `after_choice_ids` holds the pair strings. Other types are unchanged.
+
 Edit only `changes[]`. `set` replaces the whole selected set for one question; use
 stable choice IDs, never letters or display positions. Single-choice/true-false needs
 one ID; multiple-answer accepts unique IDs up to `max_selections`. True/false IDs are
@@ -341,8 +353,9 @@ have the documented types; invalid UTF-8 is an input error. Re-export after expi
 
 Verified answer types: multiple answer (select all); single choice (multiple choice
 with one answer, encoded by Ultra as `multipleanswer` with `answerSelectionLimit: 1`);
-and true/false (`eitherOr` / `true_false`). Essay, short answer, fill-in-the-blank,
-matching, ordering, calculated, file response, and anything else are unsupported:
+true/false (`eitherOr` / `true_false`); and matching (`matching`, `--set N=1:B,2:A`; PATCH body derived
+from the Ultra client and **not yet live-replayed by `bb`**, clearing unverified). Essay, short answer,
+fill-in-the-blank, hotspot, ordering, calculated, file response, and anything else are unsupported:
 **answer in Blackboard**. Type support does not establish live acceptance of every clear case.
 
 Timed/proctored, password/secure-browser/IP-restricted,

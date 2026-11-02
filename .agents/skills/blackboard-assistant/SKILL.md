@@ -39,7 +39,8 @@ Use `bb answers "<test>" -c <COURSE>` to show an existing attempt. Preview with
 repeatable `--set 1=A --set 2=A,B --set 3=False` (or `--export`, edit `changes[]`,
 then `--file`). **Always preview chosen answers before saving.** Only the student's
 explicit save request authorizes `--apply`. `N=clear` clears; True/False/T/F and
-letters are case-insensitive. Letters follow bb's list, which may differ from
+letters are case-insensitive. Matching: `--set 3=1:B,2:A` (prompt number : answer letter,
+both from bb's lists, never text); unlisted prompts end up unmatched. Letters follow bb's list, which may differ from
 Blackboard's shuffled display. Never match by option text. Shorthand shares the
 file pipeline and uses a fresh runtime baseline without file-age expiry.
 
@@ -57,8 +58,9 @@ and submits. Saved answers may be visible to course staff.
 
 Verified answer types: multiple answer (select all); single choice (multiple choice
 with one answer, encoded by Ultra as `multipleanswer` with `answerSelectionLimit: 1`);
-and true/false (`eitherOr` / `true_false`). Essay, short answer, fill-in-the-blank,
-matching, ordering, calculated, file response, and anything else are unsupported:
+true/false (`eitherOr` / `true_false`); and matching (`matching`, `--set N=1:B,2:A`; PATCH body derived
+from the Ultra client and **not yet live-replayed by `bb`**, clearing unverified). Essay, short answer,
+fill-in-the-blank, hotspot, ordering, calculated, file response, and anything else are unsupported:
 **answer in Blackboard**. Type support does not establish live acceptance of every clear case.
 
 Baseline re-reads are not CAS; avoid concurrent browser/other-host editing. Each

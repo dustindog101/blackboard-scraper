@@ -35,6 +35,7 @@ See [protocol](../../../../docs/specs/save-draft-answers-protocol.md) and
 
 Verified answer types: multiple answer (select all); single choice (multiple choice
 with one answer, encoded by Ultra as `multipleanswer` with `answerSelectionLimit: 1`);
-and true/false (`eitherOr` / `true_false`). Essay, short answer, fill-in-the-blank,
-matching, ordering, calculated, file response, and anything else are unsupported:
+true/false (`eitherOr` / `true_false`); and matching (`matching`, `--set N=1:B,2:A`; PATCH body derived
+from the Ultra client and **not yet live-replayed by `bb`**, clearing unverified). Essay, short answer,
+fill-in-the-blank, hotspot, ordering, calculated, file response, and anything else are unsupported:
 **answer in Blackboard**. Type support does not establish live acceptance of every clear case.

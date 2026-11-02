@@ -172,7 +172,8 @@ def _preflight_sets(parsed, inventory):
 def question_shape(projection):
     """Question identity, type and choice IDs/text in provider order. Equal across attempts of the same test
     (verified live on two J#5 attempts); used so --set letters validated before a retake mean the same choices after it."""
-    return [(q["question_id"], q["type"], [(c["id"], c["text"]) for c in q["choices"]]) for q in projection["questions"]]
+    return [(q["question_id"], q["type"], [(c["id"], c["text"]) for c in q["choices"]],
+             [(p["id"], p["text"]) for p in q.get("prompts", [])]) for q in projection["questions"]]
 
 
 def ensure_attempt(match, progress, parsed=None, cancel_event=None, http=None, browser_factory=None):

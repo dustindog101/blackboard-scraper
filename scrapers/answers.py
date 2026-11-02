@@ -28,16 +28,16 @@ from typing import Any, Callable, Dict, List, Optional
 
 from core import rest
 from core.assessment_answers import (
-    SCHEMA_VERSION, AnswersInputError, AnswersRefusal, PlannedEdit, build_export,
-    check_snapshot_age, choice_letter, encode_given, fingerprint, parse_file, parse_sets,
-    plan_changes, project_attempt, set_changes,
+    MATCHING, SCHEMA_VERSION, AnswersInputError, AnswersRefusal, PlannedEdit, build_export,
+    check_snapshot_age, choice_letter, encode_given, fingerprint, given_field, is_answered, matched_pairs,
+    parse_file, parse_sets, plan_changes, project_attempt, set_changes,
 )
 from core.config import BLACKBOARD_BASE, SESSION_DIR
 
 MIN_WINDOW = timedelta(seconds=120)
 _ID = r"_\d+_\d+"
 _SAVE_PATH = re.compile(rf"/learn/api/v1/courses/{_ID}/gradebook/attempts/{_ID}/assessment/answers/{_ID}")
-_BODY_KEYS = {"questionType", "givenAnswer"}
+_BODY_KEYS = ({"questionType", "givenAnswer"}, {"questionType", "givenAnswers"})
 _ASSESSMENT_HANDLE = "resource/x-bb-assessment"
 
 Progress = Callable[[str], None]
@@ -360,7 +360,9 @@ class WriteFailed(Exception):
 
 
 def _validate_write(path: str, body: Dict[str, Any]) -> str:
-    if not _SAVE_PATH.fullmatch(path) or set(body) != _BODY_KEYS:
+    # Exactly one answer field, and givenAnswers only for matching (the one type that uses it).
+    if (not _SAVE_PATH.fullmatch(path) or set(body) not in _BODY_KEYS
+            or ("givenAnswers" in body) != (body["questionType"] == "matching")):
         raise AssertionError("refusing a write outside the answer-save allowlist")
     return json.dumps(body)
 
@@ -644,8 +646,10 @@ def apply(doc: Dict[str, Any], state: Dict[str, Any], progress: Progress,
                     if set(now_sel) != set(e.before):
                         raise AnswersRefusal("conflict", "Answer changed in Blackboard during this run; left alone.")
                     raw = proj["raw"][e.question_attempt_id]
+                    field = given_field(q["type"])
                     body = {"questionType": raw["questionType"],
-                            "givenAnswer": encode_given(q["type"], [c["id"] for c in q["choices"]], e.after)}
+                            field: encode_given(q["type"], [c["id"] for c in q["choices"]], e.after,
+                                                [p["id"] for p in q.get("prompts", [])])}
                     # The transport calls this again after browser startup, immediately before sending.
                     def dispatch_guard():
                         latest = guard()
@@ -659,7 +663,7 @@ def apply(doc: Dict[str, Any], state: Dict[str, Any], progress: Progress,
                     try:
                         resp = saver.patch(f"/learn/api/v1/courses/{t['course_id']}/gradebook/attempts/"
                                            f"{t['attempt_id']}/assessment/answers/{e.question_attempt_id}", body)
-                        if not isinstance(resp, dict) or resp.get("attemptStatus") != "IN_PROGRESS" or "givenAnswer" not in resp or resp["givenAnswer"] != body["givenAnswer"]:
+                        if not isinstance(resp, dict) or resp.get("attemptStatus") != "IN_PROGRESS" or field not in resp or resp[field] != body[field]:
                             raise WriteFailed("unknown", "Unexpected answer-save response")
                     except (NotDispatched, AnswersRefusal):
                         raise
@@ -731,7 +735,7 @@ def _final_readback(state: Dict[str, Any], edits: List[PlannedEdit]) -> Dict[str
                 e.outcome, e.detail = "unknown", "Requested answer absent or changed in the final snapshot"
         return {"ok": True, "status": detail.get("status"), "outside_changes": outside,
                 "observed_at": _now().isoformat(timespec="seconds"), "current": current,
-                "answered": sum(bool(q["selected_choice_ids"]) for q in proj["questions"]), "total": len(proj["questions"])}
+                "answered": sum(is_answered(q) for q in proj["questions"]), "total": len(proj["questions"])}
     except Exception as exc:
         for e in edits:
             if e.outcome in ("saved_verified", "unchanged", None):
@@ -768,10 +772,16 @@ def _result(state, edits, outcome, final, transport, stop_reason=None) -> Dict[s
 
 
 def _edit_json(e: PlannedEdit) -> Dict[str, Any]:
-    text = {c["id"]: c["text"] for c in e.choices}
+    if e.kind == MATCHING:
+        def pairs(tokens):  # "prompt text = answer text" per matched prompt, in prompt order
+            return [f"{m['prompt']} = {m['answer']}" for m in matched_pairs(e.extra, tokens) if m["letter"]]
+        before, after = pairs(e.before), pairs(e.after)
+    else:
+        text = {c["id"]: c["text"] for c in e.choices}
+        before, after = [text[i] for i in e.before], [text[i] for i in e.after]
     return {"number": e.number, "question_attempt_id": e.question_attempt_id, "type": e.kind,
             "status": e.status, "outcome": e.outcome or ("preview" if e.status == "change" else "unchanged"),
-            "detail": e.detail, "before": [text[i] for i in e.before], "after": [text[i] for i in e.after],
+            "detail": e.detail, "before": before, "after": after,
             "after_choice_ids": e.after}
 
 
@@ -864,6 +874,19 @@ def _hint(q: Dict[str, Any]) -> str:
     return ""
 
 
+def _matching_lines(q: Dict[str, Any], before: Optional[List[str]], after: List[str]) -> List[str]:
+    """Answer list, then one line per prompt with its chosen letter. +/- mark prompts a save changes."""
+    out = ["     Answers:"]
+    for i, c in enumerate(q["choices"]):
+        out += _hang(f"       {choice_letter(i)}. ", c["text"], "          ")
+    old = matched_pairs(q, before if before is not None else after)
+    for n, (was, now) in enumerate(zip(old, matched_pairs(q, after)), start=1):
+        sign = " " if before is None or was["letter"] == now["letter"] else "+" if now["letter"] else "-"
+        out += _hang(f"   {sign} {n:>2}. ", f"{now['prompt']}  →  "
+                     + (f"{now['letter']}. {now['answer']}" if now["letter"] else "(not matched)"), "          ")
+    return out
+
+
 def _hang(first: str, text: str, indent: str, width: int = 88) -> List[str]:
     """First line starts with ``first``; continuation lines align under the text."""
     lines = _wrap(text, " " * len(first), width)
@@ -896,13 +919,15 @@ def _unsupported_lines(unsupported: List[Dict[str, Any]]) -> List[str]:
 def format_current(state: Dict[str, Any], started: bool = False) -> str:
     proj = state["projection"]
     qs = proj["questions"]
-    answered = sum(1 for q in qs if q["selected_choice_ids"])
+    answered = sum(1 for q in qs if is_answered(q))
     out = _header(state["target"], state["due"], "Attempt open")
     out.append(f"{answered} of {len(qs)} answered (saved in Blackboard, not submitted)")
     out.append("")
     for q in qs:
         out += _hang(f"{q['number']:>2}. ", q["prompt"] + _hint(q), "    ")
-        for i, c in enumerate(q["choices"]):
+        if q["type"] == MATCHING:
+            out += _matching_lines(q, None, q["selected_choice_ids"])
+        for i, c in enumerate(q["choices"] if q["type"] != MATCHING else []):
             out += _hang(f"     {_box(q, c['id'] in q['selected_choice_ids'])} {choice_letter(i)}. ", c["text"], "            ")
         out.append("")
     if proj["unsupported"]:
@@ -946,7 +971,9 @@ def format_result(res: Dict[str, Any], questions: Dict[str, Dict[str, Any]], nex
         after = set(item["after_choice_ids"])
         out += _hang(f"{q['number']:>2}. ", q["prompt"] + _hint(q), "    ")
         out.append(f"    → {tag}" + (f" ({item['detail']})" if item.get("detail") else ""))
-        for i, c in enumerate(q["choices"]):
+        if q["type"] == MATCHING:
+            out += _matching_lines(q, q["selected_choice_ids"], item["after_choice_ids"])
+        for i, c in enumerate(q["choices"] if q["type"] != MATCHING else []):
             was, now = c["id"] in before, c["id"] in after
             sign = "+" if now and not was else "-" if was and not now else " "
             out += _hang(f"   {sign} {_box(q, now)} {choice_letter(i)}. ", c["text"], "            ")
